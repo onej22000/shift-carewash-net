@@ -9,7 +9,7 @@ const VM_EDITABLE_FIELDS = [
     'vehicle_id', 'shaken_date', 'shaken_expiry',
     'jibaiseki_company', 'jibaiseki_start', 'jibaiseki_end',
     'ninni_company', 'ninni_start', 'ninni_end',
-    'oil_change_date', 'battery_change_date',
+    'oil_change_date', 'battery_change_date', 'battery_type',
     'tire_change_date_front_right', 'tire_change_date_front_left',
     'tire_change_date_rear_left', 'tire_change_date_rear_right',
     'notes',
@@ -37,6 +37,8 @@ function parse_vehicle_maintenance_input(array $post, array $validVehicleIds): a
     $ninniEnd = vm_parse_date($post['ninni_end'] ?? '');
     $oilChangeDate = vm_parse_date($post['oil_change_date'] ?? '');
     $batteryChangeDate = vm_parse_date($post['battery_change_date'] ?? '');
+    $batteryTypeRaw = trim((string) ($post['battery_type'] ?? ''));
+    $batteryType = $batteryTypeRaw === '' ? null : $batteryTypeRaw;
     $tireChangeDateFrontRight = vm_parse_date($post['tire_change_date_front_right'] ?? '');
     $tireChangeDateFrontLeft = vm_parse_date($post['tire_change_date_front_left'] ?? '');
     $tireChangeDateRearLeft = vm_parse_date($post['tire_change_date_rear_left'] ?? '');
@@ -80,6 +82,7 @@ function parse_vehicle_maintenance_input(array $post, array $validVehicleIds): a
             'ninni_end' => $ninniEnd === false ? null : $ninniEnd,
             'oil_change_date' => $oilChangeDate === false ? null : $oilChangeDate,
             'battery_change_date' => $batteryChangeDate === false ? null : $batteryChangeDate,
+            'battery_type' => $batteryType,
             'tire_change_date_front_right' => $tireChangeDateFrontRight === false ? null : $tireChangeDateFrontRight,
             'tire_change_date_front_left' => $tireChangeDateFrontLeft === false ? null : $tireChangeDateFrontLeft,
             'tire_change_date_rear_left' => $tireChangeDateRearLeft === false ? null : $tireChangeDateRearLeft,
@@ -157,12 +160,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $insertStmt = $pdo->prepare(
                     'INSERT INTO vehicle_maintenance
                         (vehicle_id, shaken_date, shaken_expiry, jibaiseki_company, jibaiseki_start, jibaiseki_end,
-                         ninni_company, ninni_start, ninni_end, oil_change_date, battery_change_date,
+                         ninni_company, ninni_start, ninni_end, oil_change_date, battery_change_date, battery_type,
                          tire_change_date_front_right, tire_change_date_front_left,
                          tire_change_date_rear_left, tire_change_date_rear_right, notes, created_by)
                      VALUES
                         (:vehicle_id, :shaken_date, :shaken_expiry, :jibaiseki_company, :jibaiseki_start, :jibaiseki_end,
-                         :ninni_company, :ninni_start, :ninni_end, :oil_change_date, :battery_change_date,
+                         :ninni_company, :ninni_start, :ninni_end, :oil_change_date, :battery_change_date, :battery_type,
                          :tire_change_date_front_right, :tire_change_date_front_left,
                          :tire_change_date_rear_left, :tire_change_date_rear_right, :notes, :created_by)'
                 );
@@ -178,6 +181,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':ninni_end' => $values['ninni_end'],
                     ':oil_change_date' => $values['oil_change_date'],
                     ':battery_change_date' => $values['battery_change_date'],
+                    ':battery_type' => $values['battery_type'],
                     ':tire_change_date_front_right' => $values['tire_change_date_front_right'],
                     ':tire_change_date_front_left' => $values['tire_change_date_front_left'],
                     ':tire_change_date_rear_left' => $values['tire_change_date_rear_left'],
@@ -208,6 +212,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 jibaiseki_company = :jibaiseki_company, jibaiseki_start = :jibaiseki_start, jibaiseki_end = :jibaiseki_end,
                                 ninni_company = :ninni_company, ninni_start = :ninni_start, ninni_end = :ninni_end,
                                 oil_change_date = :oil_change_date, battery_change_date = :battery_change_date,
+                                battery_type = :battery_type,
                                 tire_change_date_front_right = :tire_change_date_front_right,
                                 tire_change_date_front_left = :tire_change_date_front_left,
                                 tire_change_date_rear_left = :tire_change_date_rear_left,
@@ -226,6 +231,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ':ninni_end' => $values['ninni_end'],
                             ':oil_change_date' => $values['oil_change_date'],
                             ':battery_change_date' => $values['battery_change_date'],
+                            ':battery_type' => $values['battery_type'],
                             ':tire_change_date_front_right' => $values['tire_change_date_front_right'],
                             ':tire_change_date_front_left' => $values['tire_change_date_front_left'],
                             ':tire_change_date_rear_left' => $values['tire_change_date_rear_left'],
@@ -412,6 +418,10 @@ if ($filterVehicleId > 0) {
                     <input type="date" id="m_battery_change_date" name="battery_change_date" value="<?= htmlspecialchars($formValues['battery_change_date'], ENT_QUOTES, 'UTF-8') ?>">
                 </div>
                 <div class="form-row">
+                    <label for="m_battery_type">バッテリー種類</label>
+                    <input type="text" id="m_battery_type" name="battery_type" maxlength="20" placeholder="例: 750D23L" value="<?= htmlspecialchars($formValues['battery_type'], ENT_QUOTES, 'UTF-8') ?>">
+                </div>
+                <div class="form-row">
                     <label for="m_tire_change_date_front_right">タイヤ交換日（前輪右）</label>
                     <input type="date" id="m_tire_change_date_front_right" name="tire_change_date_front_right" value="<?= htmlspecialchars($formValues['tire_change_date_front_right'], ENT_QUOTES, 'UTF-8') ?>">
                 </div>
@@ -462,6 +472,7 @@ if ($filterVehicleId > 0) {
                     <th>任意保険期間</th>
                     <th>オイル交換日</th>
                     <th>バッテリー交換日</th>
+                    <th>バッテリー種類</th>
                     <th>タイヤ交換日（前右／前左／後左／後右）</th>
                     <th>備考</th>
                     <th>操作</th>
@@ -478,6 +489,7 @@ if ($filterVehicleId > 0) {
                         <td><?= htmlspecialchars(($record['ninni_start'] ?? '-') . ' 〜 ' . ($record['ninni_end'] ?? '-'), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($record['oil_change_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($record['battery_change_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars($record['battery_type'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td class="tire-cell"><?= nl2br(htmlspecialchars(vm_format_tire_cell($record), ENT_QUOTES, 'UTF-8')) ?></td>
                         <td><?= htmlspecialchars($record['notes'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td>

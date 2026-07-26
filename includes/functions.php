@@ -1150,7 +1150,7 @@ function build_vehicle_maintenance_snapshot(PDO $pdo, int $vehicleMaintenanceId)
 {
     $stmt = $pdo->prepare(
         'SELECT vehicle_id, shaken_date, shaken_expiry, jibaiseki_company, jibaiseki_start, jibaiseki_end,
-                ninni_company, ninni_start, ninni_end, oil_change_date, battery_change_date,
+                ninni_company, ninni_start, ninni_end, oil_change_date, battery_change_date, battery_type,
                 tire_change_date_front_right, tire_change_date_front_left,
                 tire_change_date_rear_left, tire_change_date_rear_right, notes
          FROM vehicle_maintenance WHERE id = :id'
@@ -1201,7 +1201,7 @@ function calc_vehicle_alerts(PDO $pdo, string $today): array
 
     $vehiclesStmt = $pdo->query(
         "SELECT v.id, v.plate_number, v.vehicle_name,
-                vm.shaken_expiry, vm.jibaiseki_end, vm.ninni_end, vm.oil_change_date,
+                vm.shaken_expiry, vm.jibaiseki_end, vm.ninni_end, vm.oil_change_date, vm.battery_change_date,
                 vm.tire_change_date_front_right, vm.tire_change_date_front_left,
                 vm.tire_change_date_rear_left, vm.tire_change_date_rear_right
          FROM vehicles v
@@ -1226,9 +1226,11 @@ function calc_vehicle_alerts(PDO $pdo, string $today): array
     ];
     $elapsedAlertLabels = [
         'oil' => 'オイル交換',
+        'battery' => 'バッテリー交換',
     ];
     $elapsedFields = [
         'oil' => 'oil_change_date',
+        'battery' => 'battery_change_date',
     ];
     // タイヤは車輪位置ごとに交換日が別なので、4輪それぞれ独立して閾値判定する（アラート閾値自体はvehicle_alert_settingsの'tire'を共用）。
     $tireWheelLabels = [

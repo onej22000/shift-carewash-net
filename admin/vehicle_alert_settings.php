@@ -11,6 +11,7 @@ const VEHICLE_ALERT_TYPE_LABELS = [
     'ninni' => '任意保険期限',
     'oil' => 'オイル交換',
     'tire' => 'タイヤ交換',
+    'battery' => 'バッテリー交換',
 ];
 
 const VEHICLE_ALERT_TYPE_DESCRIPTIONS = [
@@ -19,6 +20,7 @@ const VEHICLE_ALERT_TYPE_DESCRIPTIONS = [
     'ninni' => '任意保険契約終了日の何日前から警告するか',
     'oil' => '前回オイル交換から何日経過したら警告するか',
     'tire' => '前回タイヤ交換（各輪）から何日経過したら警告するか',
+    'battery' => '前回バッテリー交換から何日経過したら警告するか',
 ];
 
 $errorMessage = '';

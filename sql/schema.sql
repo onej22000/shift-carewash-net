@@ -314,6 +314,7 @@ CREATE TABLE vehicle_maintenance (
     ninni_end          DATE NULL COMMENT '任意保険契約終了日',
     oil_change_date    DATE NULL COMMENT 'オイル交換日',
     battery_change_date DATE NULL COMMENT 'バッテリー交換日',
+    battery_type        VARCHAR(20) NULL COMMENT 'バッテリー種類（例: 750D23L）',
     tire_change_date_front_right DATE NULL COMMENT 'タイヤ交換日（前輪右）',
     tire_change_date_front_left  DATE NULL COMMENT 'タイヤ交換日（前輪左）',
     tire_change_date_rear_left   DATE NULL COMMENT 'タイヤ交換日（後輪左）',
@@ -348,7 +349,7 @@ CREATE TABLE vehicle_maintenance_history (
 -- アラート閾値設定マスタ
 CREATE TABLE vehicle_alert_settings (
     id             INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    alert_type     ENUM('shaken','jibaiseki','ninni','oil','tire') NOT NULL COMMENT '警告種別',
+    alert_type     ENUM('shaken','jibaiseki','ninni','oil','tire','battery') NOT NULL COMMENT '警告種別',
     threshold_days INT UNSIGNED NOT NULL COMMENT '警告を出す閾値（日数）',
     is_active      TINYINT(1) NOT NULL DEFAULT 1,
     UNIQUE KEY uniq_vas_alert_type (alert_type)
