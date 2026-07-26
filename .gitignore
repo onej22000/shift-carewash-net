@@ -1,0 +1,6 @@
+config.php
+.user.ini
+vendor/
+*.log
+includes/fonts/
+.git.old_backup_20260726/

@@ -1,0 +1,42 @@
+# .gitディレクトリの公開防止（緊急対応：フルパスDB接続情報を含むconfig.phpがgit管理下にあり、
+# .git/config・.git/HEADが直接HTTPアクセス可能だったため2026-07-14に追加）。
+RewriteEngine On
+RewriteRule ^\.git/ - [F,L]
+
+<IfModule mod_authz_core.c>
+    <FilesMatch "^\.git">
+        Require all denied
+    </FilesMatch>
+</IfModule>
+<IfModule !mod_authz_core.c>
+    <FilesMatch "^\.git">
+        Order Allow,Deny
+        Deny from all
+    </FilesMatch>
+</IfModule>
+
+# 設定ファイル・Composerメタデータへの直接アクセス防止
+<FilesMatch "^(config\.php|composer\.json|composer\.lock)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order Allow,Deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# vendor配下はPHPのrequireのみで使う（URL直接アクセス不要）
+RewriteRule ^vendor/ - [F,L]
+
+# バックアップ・エディタの一時ファイル等の恒久的なアクセス拒否
+# （2026-07-14セキュリティ監査：POLITICA側でindex.html.bakの露出が見つかったため、同様の事故を予防する目的で追加）
+<FilesMatch "(\.bak|\.old|\.orig|\.sql|~)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order Allow,Deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
