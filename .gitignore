@@ -4,3 +4,4 @@ vendor/
 *.log
 includes/fonts/
 .git.old_backup_20260726/
+index.html.bak
