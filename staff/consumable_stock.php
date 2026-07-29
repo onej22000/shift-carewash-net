@@ -6,9 +6,9 @@ $staff = require_login('staff');
 $pdo = getPdo();
 
 const CONSUMABLE_ITEM_LABELS = [
-    'linen_bag_orange' => 'リネン袋（オレンジ）',
-    'linen_bag_yellow' => 'リネン袋（黄）',
-    'linen_bag_blue' => 'リネン袋（青）',
+    'linen_bag_orange' => 'リネン袋（オレンジ／集荷用）',
+    'linen_bag_yellow' => 'リネン袋（黄／集荷用）',
+    'linen_bag_blue' => 'リネン袋（青／返却用）',
     'laundry_net' => '洗濯ネット',
 ];
 

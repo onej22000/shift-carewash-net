@@ -5,8 +5,6 @@ require_once __DIR__ . '/../includes/functions.php';
 $staff = require_login('staff');
 $pdo = getPdo();
 
-const CLEANING_SITE_VALUE = 'cleaning_site';
-
 /**
  * 指定施設について、この工程がまだ入力されていない未完了サイクルを、
  * pickup_date昇順（古い順）で返す。前工程が未完了のサイクルは対象にしない
@@ -301,10 +299,11 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
     ];
 }
 
-$facilitiesStmt = $pdo->query('SELECT id, name FROM facilities WHERE is_active = 1 ORDER BY name');
+$facilitiesStmt = $pdo->query('SELECT id, name, facility_type FROM facilities WHERE is_active = 1 ORDER BY name');
 $facilities = $facilitiesStmt->fetchAll();
 $validFacilityIds = array_map('intval', array_column($facilities, 'id'));
 $facilityNamesById = array_column($facilities, 'name', 'id');
+$facilityTypesById = array_column($facilities, 'facility_type', 'id');
 
 $employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' ORDER BY name");
 $employees = $employeesStmt->fetchAll();
@@ -323,9 +322,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $action = (string) ($_POST['action'] ?? '');
 
         if ($action === 'resolve_location') {
-            $location = (string) ($_POST['location'] ?? '');
-            $isCleaningSite = $location === CLEANING_SITE_VALUE;
-            $facilityId = $isCleaningSite ? (int) ($_POST['target_facility_id'] ?? 0) : (int) $location;
+            $facilityId = (int) ($_POST['location'] ?? 0);
+            $isCleaningSite = ($facilityTypesById[$facilityId] ?? null) === 'クリーニング所';
 
             if (!in_array($facilityId, $validFacilityIds, true)) {
                 $errorMessage = '施設を選択してください。';
@@ -823,18 +821,7 @@ function format_stage_cell($bagCount, $time): string
 
                 <div class="form-row">
                     <label for="location">場所</label>
-                    <select id="location" name="location" required onchange="onLocationChange()">
-                        <option value="">選択してください</option>
-                        <?php foreach ($facilities as $facility): ?>
-                            <option value="<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
-                        <?php endforeach; ?>
-                        <option value="<?= CLEANING_SITE_VALUE ?>">クリーニング所</option>
-                    </select>
-                </div>
-
-                <div class="form-row" id="target-facility-row" style="display:none;">
-                    <label for="target_facility_id">対象施設</label>
-                    <select id="target_facility_id" name="target_facility_id" disabled>
+                    <select id="location" name="location" required>
                         <option value="">選択してください</option>
                         <?php foreach ($facilities as $facility): ?>
                             <option value="<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
@@ -1044,23 +1031,5 @@ function format_stage_cell($bagCount, $time): string
     <?php endif; ?>
 </section>
 
-<script>
-function onLocationChange() {
-    var location = document.getElementById('location');
-    var targetRow = document.getElementById('target-facility-row');
-    var targetSelect = document.getElementById('target_facility_id');
-
-    if (location.value === '<?= CLEANING_SITE_VALUE ?>') {
-        targetRow.style.display = '';
-        targetSelect.disabled = false;
-        targetSelect.required = true;
-    } else {
-        targetRow.style.display = 'none';
-        targetSelect.disabled = true;
-        targetSelect.required = false;
-        targetSelect.value = '';
-    }
-}
-</script>
 </body>
 </html>
