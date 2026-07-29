@@ -78,6 +78,26 @@ CREATE TABLE attendance_edit_logs (
     CONSTRAINT fk_edit_logs_employee FOREIGN KEY (edited_by) REFERENCES employees(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='打刻修正・取り消し履歴';
 
+-- attendance.break_start_at/break_end_atは「今まさに休憩中かどうか」の現在状態を持つだけで、
+-- 1日に複数回休憩すると前回分の開始・終了時刻は次の休憩開始時に上書きされ失われる
+-- （total_break_minutesに累計分数だけは残る）。施設間移動時間の算出（travel_time機能）では
+-- 「いつからいつまで休憩していたか」を個々に参照する必要があるため、休憩1回ごとに1行残す
+-- 履歴テーブルを別途持つ。staff/break.phpから、既存のattendance側の更新と並行して
+-- こちらにも書き込む（dual-write。既存機能の挙動は変えない）。
+CREATE TABLE attendance_breaks (
+    id             INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    attendance_id  INT UNSIGNED NOT NULL COMMENT '対象の打刻レコード（attendance.id）',
+    employee_id    INT UNSIGNED NOT NULL COMMENT '従業員ID（attendance経由でも引けるが、集計クエリの簡略化のため非正規化して保持）',
+    break_start_at DATETIME NOT NULL COMMENT '休憩開始日時',
+    break_end_at   DATETIME NULL COMMENT '休憩終了日時（休憩中はNULL）',
+    created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_attendance_breaks_attendance FOREIGN KEY (attendance_id) REFERENCES attendance(id),
+    CONSTRAINT fk_attendance_breaks_employee   FOREIGN KEY (employee_id)   REFERENCES employees(id),
+    INDEX idx_attendance_breaks_attendance (attendance_id),
+    INDEX idx_attendance_breaks_employee_start (employee_id, break_start_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='休憩1回ごとの開始・終了時刻の履歴（attendanceの現在状態カラムとは別に、過去の個々の休憩区間を保持する）';
+
 CREATE TABLE shift_edit_logs (
     id           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     shift_id     INT UNSIGNED NULL COMMENT '対象シフトID（削除の場合は削除前のID）',
@@ -177,13 +197,17 @@ CREATE TABLE collection_cycles (
     issued_bag_blue       INT UNSIGNED NULL COMMENT 'リネン袋交付数（青）。集荷時に施設へ渡した交換用の空袋数',
     issued_laundry_net_count INT UNSIGNED NULL COMMENT '洗濯ネット交付数。集荷時に施設へ渡した洗濯ネット数',
     arrival_bag_count     INT UNSIGNED NULL COMMENT 'クリーニング所到着時のリネン袋数',
+    arrival_date          DATE NULL COMMENT 'クリーニング所到着日（集荷日と異なる日になりうる）',
     arrival_time          TIME NULL COMMENT 'クリーニング所到着時刻',
     arrival_employee_id   INT UNSIGNED NULL COMMENT 'クリーニング所到着担当者',
+    arrival_facility_id   INT UNSIGNED NULL COMMENT '到着したクリーニング所（facilities.facility_type=クリーニング所）。施設間移動時間の算出に使用',
     dispatch_bag_count    INT UNSIGNED NULL COMMENT 'クリーニング所発送時のリネン袋数',
     dispatch_date         DATE NULL COMMENT 'クリーニング所発送日（集荷日と異なる日になりうる）',
     dispatch_time         TIME NULL COMMENT 'クリーニング所発送時刻',
     dispatch_employee_id  INT UNSIGNED NULL COMMENT 'クリーニング所発送担当者',
+    dispatch_facility_id  INT UNSIGNED NULL COMMENT '発送元のクリーニング所（facilities.facility_type=クリーニング所）。施設間移動時間の算出に使用',
     return_bag_count      INT UNSIGNED NULL COMMENT '返却時のリネン袋数',
+    return_date           DATE NULL COMMENT '返却日（集荷日から日をまたいで後日になることが多い。返却は次回集荷と同じ訪問で行われることが多いため、pickup_dateとは独立して持つ）',
     return_time           TIME NULL COMMENT '返却時刻',
     return_employee_id    INT UNSIGNED NULL COMMENT '返却担当者',
     remarks               VARCHAR(255) NULL COMMENT '備考',
@@ -193,7 +217,9 @@ CREATE TABLE collection_cycles (
     CONSTRAINT fk_cc_facility           FOREIGN KEY (facility_id)           REFERENCES facilities(id),
     CONSTRAINT fk_cc_pickup_employee    FOREIGN KEY (pickup_employee_id)    REFERENCES employees(id),
     CONSTRAINT fk_cc_arrival_employee   FOREIGN KEY (arrival_employee_id)   REFERENCES employees(id),
+    CONSTRAINT fk_cc_arrival_facility   FOREIGN KEY (arrival_facility_id)   REFERENCES facilities(id),
     CONSTRAINT fk_cc_dispatch_employee  FOREIGN KEY (dispatch_employee_id) REFERENCES employees(id),
+    CONSTRAINT fk_cc_dispatch_facility  FOREIGN KEY (dispatch_facility_id) REFERENCES facilities(id),
     CONSTRAINT fk_cc_return_employee    FOREIGN KEY (return_employee_id)   REFERENCES employees(id),
     INDEX idx_cc_facility_pickup_date (facility_id, pickup_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='施設×集荷日を1サイクルとする集荷・配送記録簿（集荷→クリーニング所到着→発送→返却）。各工程は前工程が入力済みの直近未完了サイクルにのみ入力できる';

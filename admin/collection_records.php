@@ -7,9 +7,10 @@ $pdo = getPdo();
 
 const CC_EDITABLE_FIELDS = [
     'facility_id', 'pickup_date', 'pickup_bag_count', 'pickup_time', 'pickup_employee_id',
-    'arrival_bag_count', 'arrival_time', 'arrival_employee_id',
-    'dispatch_bag_count', 'dispatch_date', 'dispatch_time', 'dispatch_employee_id',
-    'return_bag_count', 'return_time', 'return_employee_id', 'remarks',
+    'issued_bag_orange', 'issued_bag_yellow', 'issued_bag_blue', 'issued_laundry_net_count',
+    'arrival_bag_count', 'arrival_date', 'arrival_time', 'arrival_employee_id', 'arrival_facility_id',
+    'dispatch_bag_count', 'dispatch_date', 'dispatch_time', 'dispatch_employee_id', 'dispatch_facility_id',
+    'return_bag_count', 'return_date', 'return_time', 'return_employee_id', 'remarks',
 ];
 
 function cc_parse_bag_count($raw)
@@ -51,25 +52,43 @@ function cc_parse_employee_id($raw, array $validEmployeeIds)
     return in_array($id, $validEmployeeIds, true) ? $id : false;
 }
 
+function cc_parse_facility_id($raw, array $validFacilityIds)
+{
+    $raw = trim((string) $raw);
+    if ($raw === '') {
+        return null;
+    }
+    $id = (int) $raw;
+    return in_array($id, $validFacilityIds, true) ? $id : false;
+}
+
 /**
  * 集荷・配送記録簿の入力をまとめてパースする。日付・時刻・担当者・袋数はいずれも任意項目
  * （工程順を強制しないため、どの組み合わせでも保存できるようにする）。facility_idとpickup_dateのみ必須。
  */
-function parse_collection_cycle_input(array $post, array $validFacilityIds, array $validEmployeeIds): array
+function parse_collection_cycle_input(array $post, array $validFacilityIds, array $validEmployeeIds, array $validCleaningFacilityIds): array
 {
     $facilityId = (int) ($post['facility_id'] ?? 0);
     $pickupDate = cc_parse_date($post['pickup_date'] ?? '');
     $pickupBagCount = cc_parse_bag_count($post['pickup_bag_count'] ?? '');
     $pickupTime = cc_parse_time($post['pickup_time'] ?? '');
     $pickupEmployeeId = cc_parse_employee_id($post['pickup_employee_id'] ?? '', $validEmployeeIds);
+    $issuedBagOrange = cc_parse_bag_count($post['issued_bag_orange'] ?? '');
+    $issuedBagYellow = cc_parse_bag_count($post['issued_bag_yellow'] ?? '');
+    $issuedBagBlue = cc_parse_bag_count($post['issued_bag_blue'] ?? '');
+    $issuedLaundryNetCount = cc_parse_bag_count($post['issued_laundry_net_count'] ?? '');
     $arrivalBagCount = cc_parse_bag_count($post['arrival_bag_count'] ?? '');
+    $arrivalDate = cc_parse_date($post['arrival_date'] ?? '');
     $arrivalTime = cc_parse_time($post['arrival_time'] ?? '');
     $arrivalEmployeeId = cc_parse_employee_id($post['arrival_employee_id'] ?? '', $validEmployeeIds);
+    $arrivalFacilityId = cc_parse_facility_id($post['arrival_facility_id'] ?? '', $validCleaningFacilityIds);
     $dispatchBagCount = cc_parse_bag_count($post['dispatch_bag_count'] ?? '');
     $dispatchDate = cc_parse_date($post['dispatch_date'] ?? '');
     $dispatchTime = cc_parse_time($post['dispatch_time'] ?? '');
     $dispatchEmployeeId = cc_parse_employee_id($post['dispatch_employee_id'] ?? '', $validEmployeeIds);
+    $dispatchFacilityId = cc_parse_facility_id($post['dispatch_facility_id'] ?? '', $validCleaningFacilityIds);
     $returnBagCount = cc_parse_bag_count($post['return_bag_count'] ?? '');
+    $returnDate = cc_parse_date($post['return_date'] ?? '');
     $returnTime = cc_parse_time($post['return_time'] ?? '');
     $returnEmployeeId = cc_parse_employee_id($post['return_employee_id'] ?? '', $validEmployeeIds);
     $remarksRaw = trim((string) ($post['remarks'] ?? ''));
@@ -91,14 +110,32 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
     if ($pickupEmployeeId === false) {
         $errors[] = '集荷担当者が正しくありません。';
     }
+    if ($issuedBagOrange === false) {
+        $errors[] = 'リネン袋交付数（オレンジ）は0以上の整数を入力してください。';
+    }
+    if ($issuedBagYellow === false) {
+        $errors[] = 'リネン袋交付数（黄）は0以上の整数を入力してください。';
+    }
+    if ($issuedBagBlue === false) {
+        $errors[] = 'リネン袋交付数（青）は0以上の整数を入力してください。';
+    }
+    if ($issuedLaundryNetCount === false) {
+        $errors[] = '洗濯ネット交付数は0以上の整数を入力してください。';
+    }
     if ($arrivalBagCount === false) {
         $errors[] = '到着リネン袋数は0以上の整数を入力してください。';
+    }
+    if ($arrivalDate === false) {
+        $errors[] = '到着日の形式が正しくありません。';
     }
     if ($arrivalTime === false) {
         $errors[] = '到着時間の形式が正しくありません。';
     }
     if ($arrivalEmployeeId === false) {
         $errors[] = '到着担当者が正しくありません。';
+    }
+    if ($arrivalFacilityId === false) {
+        $errors[] = '到着クリーニング所が正しくありません。';
     }
     if ($dispatchBagCount === false) {
         $errors[] = '発送リネン袋数は0以上の整数を入力してください。';
@@ -112,8 +149,14 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
     if ($dispatchEmployeeId === false) {
         $errors[] = '発送担当者が正しくありません。';
     }
+    if ($dispatchFacilityId === false) {
+        $errors[] = '発送元クリーニング所が正しくありません。';
+    }
     if ($returnBagCount === false) {
         $errors[] = '返却リネン袋数は0以上の整数を入力してください。';
+    }
+    if ($returnDate === false) {
+        $errors[] = '返却日の形式が正しくありません。';
     }
     if ($returnTime === false) {
         $errors[] = '返却時間の形式が正しくありません。';
@@ -129,14 +172,22 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
             'pickup_bag_count' => $pickupBagCount,
             'pickup_time' => $pickupTime,
             'pickup_employee_id' => $pickupEmployeeId,
+            'issued_bag_orange' => $issuedBagOrange,
+            'issued_bag_yellow' => $issuedBagYellow,
+            'issued_bag_blue' => $issuedBagBlue,
+            'issued_laundry_net_count' => $issuedLaundryNetCount,
             'arrival_bag_count' => $arrivalBagCount,
+            'arrival_date' => $arrivalDate,
             'arrival_time' => $arrivalTime,
             'arrival_employee_id' => $arrivalEmployeeId,
+            'arrival_facility_id' => $arrivalFacilityId,
             'dispatch_bag_count' => $dispatchBagCount,
             'dispatch_date' => $dispatchDate,
             'dispatch_time' => $dispatchTime,
             'dispatch_employee_id' => $dispatchEmployeeId,
+            'dispatch_facility_id' => $dispatchFacilityId,
             'return_bag_count' => $returnBagCount,
+            'return_date' => $returnDate,
             'return_time' => $returnTime,
             'return_employee_id' => $returnEmployeeId,
             'remarks' => $remarks,
@@ -148,6 +199,10 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
 $facilitiesStmt = $pdo->query('SELECT id, name FROM facilities ORDER BY name');
 $facilities = $facilitiesStmt->fetchAll();
 $validFacilityIds = array_map('intval', array_column($facilities, 'id'));
+
+$cleaningFacilitiesStmt = $pdo->query("SELECT id, name FROM facilities WHERE facility_type = 'クリーニング所' ORDER BY name");
+$cleaningFacilities = $cleaningFacilitiesStmt->fetchAll();
+$validCleaningFacilityIds = array_map('intval', array_column($cleaningFacilities, 'id'));
 
 $employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' ORDER BY name");
 $employees = $employeesStmt->fetchAll();
@@ -215,7 +270,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         } elseif ($action === 'create' || $action === 'update') {
-            [$values, $parseErrors] = parse_collection_cycle_input($_POST, $validFacilityIds, $validEmployeeIds);
+            [$values, $parseErrors] = parse_collection_cycle_input($_POST, $validFacilityIds, $validEmployeeIds, $validCleaningFacilityIds);
 
             if (!empty($parseErrors)) {
                 $errorMessage = implode(' ', $parseErrors);
@@ -223,14 +278,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $insertStmt = $pdo->prepare(
                     'INSERT INTO collection_cycles
                         (facility_id, pickup_date, pickup_bag_count, pickup_time, pickup_employee_id,
-                         arrival_bag_count, arrival_time, arrival_employee_id,
-                         dispatch_bag_count, dispatch_date, dispatch_time, dispatch_employee_id,
-                         return_bag_count, return_time, return_employee_id, remarks)
+                         issued_bag_orange, issued_bag_yellow, issued_bag_blue, issued_laundry_net_count,
+                         arrival_bag_count, arrival_date, arrival_time, arrival_employee_id, arrival_facility_id,
+                         dispatch_bag_count, dispatch_date, dispatch_time, dispatch_employee_id, dispatch_facility_id,
+                         return_bag_count, return_date, return_time, return_employee_id, remarks)
                      VALUES
                         (:facility_id, :pickup_date, :pickup_bag_count, :pickup_time, :pickup_employee_id,
-                         :arrival_bag_count, :arrival_time, :arrival_employee_id,
-                         :dispatch_bag_count, :dispatch_date, :dispatch_time, :dispatch_employee_id,
-                         :return_bag_count, :return_time, :return_employee_id, :remarks)'
+                         :issued_bag_orange, :issued_bag_yellow, :issued_bag_blue, :issued_laundry_net_count,
+                         :arrival_bag_count, :arrival_date, :arrival_time, :arrival_employee_id, :arrival_facility_id,
+                         :dispatch_bag_count, :dispatch_date, :dispatch_time, :dispatch_employee_id, :dispatch_facility_id,
+                         :return_bag_count, :return_date, :return_time, :return_employee_id, :remarks)'
                 );
                 $insertStmt->execute([
                     ':facility_id' => $values['facility_id'],
@@ -238,14 +295,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':pickup_bag_count' => $values['pickup_bag_count'],
                     ':pickup_time' => $values['pickup_time'],
                     ':pickup_employee_id' => $values['pickup_employee_id'],
+                    ':issued_bag_orange' => $values['issued_bag_orange'],
+                    ':issued_bag_yellow' => $values['issued_bag_yellow'],
+                    ':issued_bag_blue' => $values['issued_bag_blue'],
+                    ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                     ':arrival_bag_count' => $values['arrival_bag_count'],
+                    ':arrival_date' => $values['arrival_date'],
                     ':arrival_time' => $values['arrival_time'],
                     ':arrival_employee_id' => $values['arrival_employee_id'],
+                    ':arrival_facility_id' => $values['arrival_facility_id'],
                     ':dispatch_bag_count' => $values['dispatch_bag_count'],
                     ':dispatch_date' => $values['dispatch_date'],
                     ':dispatch_time' => $values['dispatch_time'],
                     ':dispatch_employee_id' => $values['dispatch_employee_id'],
+                    ':dispatch_facility_id' => $values['dispatch_facility_id'],
                     ':return_bag_count' => $values['return_bag_count'],
+                    ':return_date' => $values['return_date'],
                     ':return_time' => $values['return_time'],
                     ':return_employee_id' => $values['return_employee_id'],
                     ':remarks' => $values['remarks'],
@@ -308,9 +373,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             'UPDATE collection_cycles SET
                                 facility_id = :facility_id, pickup_date = :pickup_date,
                                 pickup_bag_count = :pickup_bag_count, pickup_time = :pickup_time, pickup_employee_id = :pickup_employee_id,
-                                arrival_bag_count = :arrival_bag_count, arrival_time = :arrival_time, arrival_employee_id = :arrival_employee_id,
-                                dispatch_bag_count = :dispatch_bag_count, dispatch_date = :dispatch_date, dispatch_time = :dispatch_time, dispatch_employee_id = :dispatch_employee_id,
-                                return_bag_count = :return_bag_count, return_time = :return_time, return_employee_id = :return_employee_id,
+                                issued_bag_orange = :issued_bag_orange, issued_bag_yellow = :issued_bag_yellow,
+                                issued_bag_blue = :issued_bag_blue, issued_laundry_net_count = :issued_laundry_net_count,
+                                arrival_bag_count = :arrival_bag_count, arrival_date = :arrival_date, arrival_time = :arrival_time,
+                                arrival_employee_id = :arrival_employee_id, arrival_facility_id = :arrival_facility_id,
+                                dispatch_bag_count = :dispatch_bag_count, dispatch_date = :dispatch_date, dispatch_time = :dispatch_time,
+                                dispatch_employee_id = :dispatch_employee_id, dispatch_facility_id = :dispatch_facility_id,
+                                return_bag_count = :return_bag_count, return_date = :return_date, return_time = :return_time,
+                                return_employee_id = :return_employee_id,
                                 remarks = :remarks
                              WHERE id = :id'
                         );
@@ -320,14 +390,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ':pickup_bag_count' => $values['pickup_bag_count'],
                             ':pickup_time' => $values['pickup_time'],
                             ':pickup_employee_id' => $values['pickup_employee_id'],
+                            ':issued_bag_orange' => $values['issued_bag_orange'],
+                            ':issued_bag_yellow' => $values['issued_bag_yellow'],
+                            ':issued_bag_blue' => $values['issued_bag_blue'],
+                            ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                             ':arrival_bag_count' => $values['arrival_bag_count'],
+                            ':arrival_date' => $values['arrival_date'],
                             ':arrival_time' => $values['arrival_time'],
                             ':arrival_employee_id' => $values['arrival_employee_id'],
+                            ':arrival_facility_id' => $values['arrival_facility_id'],
                             ':dispatch_bag_count' => $values['dispatch_bag_count'],
                             ':dispatch_date' => $values['dispatch_date'],
                             ':dispatch_time' => $values['dispatch_time'],
                             ':dispatch_employee_id' => $values['dispatch_employee_id'],
+                            ':dispatch_facility_id' => $values['dispatch_facility_id'],
                             ':return_bag_count' => $values['return_bag_count'],
+                            ':return_date' => $values['return_date'],
                             ':return_time' => $values['return_time'],
                             ':return_employee_id' => $values['return_employee_id'],
                             ':remarks' => $values['remarks'],
@@ -371,9 +449,10 @@ $formValues = [
     'facility_id' => (string) ($facilityId > 0 ? $facilityId : ''),
     'pickup_date' => (new DateTime())->format('Y-m-d'),
     'pickup_bag_count' => '', 'pickup_time' => '', 'pickup_employee_id' => '',
-    'arrival_bag_count' => '', 'arrival_time' => '', 'arrival_employee_id' => '',
-    'dispatch_bag_count' => '', 'dispatch_date' => '', 'dispatch_time' => '', 'dispatch_employee_id' => '',
-    'return_bag_count' => '', 'return_time' => '', 'return_employee_id' => '',
+    'issued_bag_orange' => '', 'issued_bag_yellow' => '', 'issued_bag_blue' => '', 'issued_laundry_net_count' => '',
+    'arrival_bag_count' => '', 'arrival_date' => '', 'arrival_time' => '', 'arrival_employee_id' => '', 'arrival_facility_id' => '',
+    'dispatch_bag_count' => '', 'dispatch_date' => '', 'dispatch_time' => '', 'dispatch_employee_id' => '', 'dispatch_facility_id' => '',
+    'return_bag_count' => '', 'return_date' => '', 'return_time' => '', 'return_employee_id' => '',
     'remarks' => '',
 ];
 
@@ -411,12 +490,16 @@ if (in_array($facilityId, $validFacilityIds, true)) {
                 pe.name AS pickup_employee_name,
                 ae.name AS arrival_employee_name,
                 de.name AS dispatch_employee_name,
-                re.name AS return_employee_name
+                re.name AS return_employee_name,
+                af.name AS arrival_facility_name,
+                df.name AS dispatch_facility_name
          FROM collection_cycles cc
          LEFT JOIN employees pe ON pe.id = cc.pickup_employee_id
          LEFT JOIN employees ae ON ae.id = cc.arrival_employee_id
          LEFT JOIN employees de ON de.id = cc.dispatch_employee_id
          LEFT JOIN employees re ON re.id = cc.return_employee_id
+         LEFT JOIN facilities af ON af.id = cc.arrival_facility_id
+         LEFT JOIN facilities df ON df.id = cc.dispatch_facility_id
          WHERE cc.facility_id = :facility_id AND cc.pickup_date BETWEEN :start_date AND :end_date AND cc.deleted_at IS NULL
          ORDER BY cc.pickup_date ASC, cc.id ASC'
     );
@@ -436,6 +519,24 @@ function cr_bag($count)
 function cr_time($time)
 {
     return $time === null ? '-' : substr($time, 0, 5);
+}
+
+function cr_issued(array $record): string
+{
+    $parts = [];
+    if ($record['issued_bag_orange'] !== null) {
+        $parts[] = 'オレンジ' . (int) $record['issued_bag_orange'];
+    }
+    if ($record['issued_bag_yellow'] !== null) {
+        $parts[] = '黄' . (int) $record['issued_bag_yellow'];
+    }
+    if ($record['issued_bag_blue'] !== null) {
+        $parts[] = '青' . (int) $record['issued_bag_blue'];
+    }
+    if ($record['issued_laundry_net_count'] !== null) {
+        $parts[] = 'ネット' . (int) $record['issued_laundry_net_count'];
+    }
+    return empty($parts) ? '-' : implode('・', $parts);
 }
 ?>
 <!DOCTYPE html>
@@ -542,10 +643,30 @@ function cr_time($time)
                         <?php endforeach; ?>
                     </select>
                 </div>
+                <div class="form-row">
+                    <label for="f_issued_bag_orange">リネン袋交付数（オレンジ）</label>
+                    <input type="number" id="f_issued_bag_orange" name="issued_bag_orange" min="0" step="1" value="<?= htmlspecialchars($formValues['issued_bag_orange'], ENT_QUOTES, 'UTF-8') ?>">
+                </div>
+                <div class="form-row">
+                    <label for="f_issued_bag_yellow">リネン袋交付数（黄）</label>
+                    <input type="number" id="f_issued_bag_yellow" name="issued_bag_yellow" min="0" step="1" value="<?= htmlspecialchars($formValues['issued_bag_yellow'], ENT_QUOTES, 'UTF-8') ?>">
+                </div>
+                <div class="form-row">
+                    <label for="f_issued_bag_blue">リネン袋交付数（青）</label>
+                    <input type="number" id="f_issued_bag_blue" name="issued_bag_blue" min="0" step="1" value="<?= htmlspecialchars($formValues['issued_bag_blue'], ENT_QUOTES, 'UTF-8') ?>">
+                </div>
+                <div class="form-row">
+                    <label for="f_issued_laundry_net_count">洗濯ネット交付数</label>
+                    <input type="number" id="f_issued_laundry_net_count" name="issued_laundry_net_count" min="0" step="1" value="<?= htmlspecialchars($formValues['issued_laundry_net_count'], ENT_QUOTES, 'UTF-8') ?>">
+                </div>
 
                 <div class="form-row">
                     <label for="f_arrival_bag_count">到着リネン袋数</label>
                     <input type="number" id="f_arrival_bag_count" name="arrival_bag_count" min="0" step="1" value="<?= htmlspecialchars($formValues['arrival_bag_count'], ENT_QUOTES, 'UTF-8') ?>">
+                </div>
+                <div class="form-row">
+                    <label for="f_arrival_date">到着日</label>
+                    <input type="date" id="f_arrival_date" name="arrival_date" value="<?= htmlspecialchars($formValues['arrival_date'], ENT_QUOTES, 'UTF-8') ?>">
                 </div>
                 <div class="form-row">
                     <label for="f_arrival_time">到着時間</label>
@@ -557,6 +678,15 @@ function cr_time($time)
                         <option value="">未設定</option>
                         <?php foreach ($employees as $employee): ?>
                             <option value="<?= (int) $employee['id'] ?>" <?= (string) $employee['id'] === $formValues['arrival_employee_id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label for="f_arrival_facility_id">到着クリーニング所</label>
+                    <select id="f_arrival_facility_id" name="arrival_facility_id">
+                        <option value="">未設定</option>
+                        <?php foreach ($cleaningFacilities as $facility): ?>
+                            <option value="<?= (int) $facility['id'] ?>" <?= (string) $facility['id'] === $formValues['arrival_facility_id'] ? 'selected' : '' ?>><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
@@ -582,10 +712,23 @@ function cr_time($time)
                         <?php endforeach; ?>
                     </select>
                 </div>
+                <div class="form-row">
+                    <label for="f_dispatch_facility_id">発送元クリーニング所</label>
+                    <select id="f_dispatch_facility_id" name="dispatch_facility_id">
+                        <option value="">未設定</option>
+                        <?php foreach ($cleaningFacilities as $facility): ?>
+                            <option value="<?= (int) $facility['id'] ?>" <?= (string) $facility['id'] === $formValues['dispatch_facility_id'] ? 'selected' : '' ?>><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
 
                 <div class="form-row">
                     <label for="f_return_bag_count">返却リネン袋数</label>
                     <input type="number" id="f_return_bag_count" name="return_bag_count" min="0" step="1" value="<?= htmlspecialchars($formValues['return_bag_count'], ENT_QUOTES, 'UTF-8') ?>">
+                </div>
+                <div class="form-row">
+                    <label for="f_return_date">返却日</label>
+                    <input type="date" id="f_return_date" name="return_date" value="<?= htmlspecialchars($formValues['return_date'], ENT_QUOTES, 'UTF-8') ?>">
                 </div>
                 <div class="form-row">
                     <label for="f_return_time">返却時間</label>
@@ -633,18 +776,18 @@ function cr_time($time)
             <thead>
                 <tr>
                     <th rowspan="2">集荷日</th>
-                    <th colspan="3">集荷</th>
-                    <th colspan="3">クリーニング所到着</th>
+                    <th colspan="4">集荷</th>
+                    <th colspan="4">クリーニング所到着</th>
                     <th colspan="4">クリーニング所発送</th>
                     <th colspan="3">返却</th>
                     <th rowspan="2">備考</th>
                     <th rowspan="2">操作</th>
                 </tr>
                 <tr>
-                    <th>リネン袋数</th><th>時間</th><th>担当者</th>
-                    <th>リネン袋数</th><th>時間</th><th>担当者</th>
-                    <th>リネン袋数</th><th>発送日</th><th>時間</th><th>担当者</th>
-                    <th>リネン袋数</th><th>時間</th><th>担当者</th>
+                    <th>リネン袋数</th><th>時間</th><th>担当者</th><th>交付袋・ネット</th>
+                    <th>リネン袋数</th><th>到着日</th><th>時間</th><th>担当者・クリーニング所</th>
+                    <th>リネン袋数</th><th>発送日</th><th>時間</th><th>担当者・クリーニング所</th>
+                    <th>リネン袋数</th><th>返却日</th><th>時間</th>
                 </tr>
             </thead>
             <tbody>
@@ -654,16 +797,18 @@ function cr_time($time)
                         <td><?= cr_bag($record['pickup_bag_count']) ?></td>
                         <td><?= cr_time($record['pickup_time']) ?></td>
                         <td><?= htmlspecialchars($record['pickup_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars(cr_issued($record), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= cr_bag($record['arrival_bag_count']) ?></td>
+                        <td><?= htmlspecialchars($record['arrival_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= cr_time($record['arrival_time']) ?></td>
-                        <td><?= htmlspecialchars($record['arrival_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars($record['arrival_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?><?= $record['arrival_facility_name'] !== null ? '（' . htmlspecialchars($record['arrival_facility_name'], ENT_QUOTES, 'UTF-8') . '）' : '' ?></td>
                         <td><?= cr_bag($record['dispatch_bag_count']) ?></td>
                         <td><?= htmlspecialchars($record['dispatch_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= cr_time($record['dispatch_time']) ?></td>
-                        <td><?= htmlspecialchars($record['dispatch_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars($record['dispatch_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?><?= $record['dispatch_facility_name'] !== null ? '（' . htmlspecialchars($record['dispatch_facility_name'], ENT_QUOTES, 'UTF-8') . '）' : '' ?></td>
                         <td><?= cr_bag($record['return_bag_count']) ?></td>
+                        <td><?= htmlspecialchars($record['return_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= cr_time($record['return_time']) ?></td>
-                        <td><?= htmlspecialchars($record['return_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($record['remarks'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                         <td>
                             <a href="?facility_id=<?= $facilityId ?>&month=<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>&edit=<?= (int) $record['id'] ?>">編集</a>

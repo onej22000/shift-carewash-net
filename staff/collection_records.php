@@ -30,12 +30,16 @@ if (in_array($facilityId, $validFacilityIds, true)) {
                 pe.name AS pickup_employee_name,
                 ae.name AS arrival_employee_name,
                 de.name AS dispatch_employee_name,
-                re.name AS return_employee_name
+                re.name AS return_employee_name,
+                af.name AS arrival_facility_name,
+                df.name AS dispatch_facility_name
          FROM collection_cycles cc
          LEFT JOIN employees pe ON pe.id = cc.pickup_employee_id
          LEFT JOIN employees ae ON ae.id = cc.arrival_employee_id
          LEFT JOIN employees de ON de.id = cc.dispatch_employee_id
          LEFT JOIN employees re ON re.id = cc.return_employee_id
+         LEFT JOIN facilities af ON af.id = cc.arrival_facility_id
+         LEFT JOIN facilities df ON df.id = cc.dispatch_facility_id
          WHERE cc.facility_id = :facility_id AND cc.pickup_date BETWEEN :start_date AND :end_date AND cc.deleted_at IS NULL
          ORDER BY cc.pickup_date ASC, cc.id ASC'
     );
@@ -131,16 +135,16 @@ function cr_issued(array $record): string
                 <tr>
                     <th rowspan="2">集荷日</th>
                     <th colspan="4">集荷</th>
-                    <th colspan="3">クリーニング所到着</th>
+                    <th colspan="4">クリーニング所到着</th>
                     <th colspan="4">クリーニング所発送</th>
                     <th colspan="3">返却</th>
                     <th rowspan="2">備考</th>
                 </tr>
                 <tr>
                     <th>リネン袋数</th><th>時間</th><th>担当者</th><th>交付袋・ネット</th>
-                    <th>リネン袋数</th><th>時間</th><th>担当者</th>
-                    <th>リネン袋数</th><th>発送日</th><th>時間</th><th>担当者</th>
-                    <th>リネン袋数</th><th>時間</th><th>担当者</th>
+                    <th>リネン袋数</th><th>到着日</th><th>時間</th><th>担当者・クリーニング所</th>
+                    <th>リネン袋数</th><th>発送日</th><th>時間</th><th>担当者・クリーニング所</th>
+                    <th>リネン袋数</th><th>返却日</th><th>時間</th>
                 </tr>
             </thead>
             <tbody>
@@ -152,15 +156,16 @@ function cr_issued(array $record): string
                         <td><?= htmlspecialchars($record['pickup_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(cr_issued($record), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= cr_bag($record['arrival_bag_count']) ?></td>
+                        <td><?= htmlspecialchars($record['arrival_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= cr_time($record['arrival_time']) ?></td>
-                        <td><?= htmlspecialchars($record['arrival_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars($record['arrival_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?><?= $record['arrival_facility_name'] !== null ? '（' . htmlspecialchars($record['arrival_facility_name'], ENT_QUOTES, 'UTF-8') . '）' : '' ?></td>
                         <td><?= cr_bag($record['dispatch_bag_count']) ?></td>
                         <td><?= htmlspecialchars($record['dispatch_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= cr_time($record['dispatch_time']) ?></td>
-                        <td><?= htmlspecialchars($record['dispatch_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars($record['dispatch_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?><?= $record['dispatch_facility_name'] !== null ? '（' . htmlspecialchars($record['dispatch_facility_name'], ENT_QUOTES, 'UTF-8') . '）' : '' ?></td>
                         <td><?= cr_bag($record['return_bag_count']) ?></td>
+                        <td><?= htmlspecialchars($record['return_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= cr_time($record['return_time']) ?></td>
-                        <td><?= htmlspecialchars($record['return_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($record['remarks'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                     </tr>
                 <?php endforeach; ?>

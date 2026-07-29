@@ -102,6 +102,10 @@ $vehicleAlerts = calc_vehicle_alerts($pdo, (new DateTime())->format('Y-m-d'));
         <h2>集荷・配送記録修正履歴</h2>
         <p>従業員・管理者による集荷・配送記録の追加・修正・削除履歴を確認します。</p>
     </a>
+    <a class="nav-card" href="/admin/travel_time.php">
+        <h2>施設間移動時間</h2>
+        <p>集荷・配送記録の日時・担当者・場所から、施設間の移動時間を休憩控除の上で算出します。</p>
+    </a>
     <a class="nav-card" href="/admin/collection_headcount.php">
         <h2>集荷人数の確認</h2>
         <p>到着済みリネン袋の中身（人数）を確認・登録し、既存の確認記録を修正・削除します。</p>

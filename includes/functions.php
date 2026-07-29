@@ -771,6 +771,152 @@ function calc_facility_category_work_stats(PDO $pdo, string $startDate, string $
     return $stats;
 }
 
+const CC_TRAVEL_STAGE_LABELS = ['pickup' => '集荷', 'arrival' => '到着', 'dispatch' => '発送', 'return' => '返却'];
+
+/**
+ * 集荷・配送記録簿（collection_cycles）の各工程（集荷/到着/発送/返却）の日時・担当者・施設から、
+ * 施設間の移動時間を算出する。同一従業員が同一日に記録した工程を時刻順に並べ、連続する2工程の
+ * 施設が異なる場合にその間の経過時間を「移動」とみなし、その間に取った休憩（attendance_breaks）の
+ * 重複分を差し引く。日付・時刻・担当者・施設のいずれかが未設定の工程（quick入力の一部項目が
+ * 空欄のまま等）は対象外とする（場所や時刻を特定できないものを移動時間の算出に混ぜないため）。
+ *
+ * @return list<array{
+ *   employee_id:int, employee_name:string, date:string,
+ *   from_stage:string, from_facility:string, from_time:string,
+ *   to_stage:string, to_facility:string, to_time:string,
+ *   raw_minutes:int, break_minutes:int, travel_minutes:int
+ * }> 日付降順、同日内は従業員名・時刻順
+ */
+function calc_travel_segments(PDO $pdo, string $startDate, string $endDate, ?int $employeeId = null): array
+{
+    $employeeFilterSql = $employeeId !== null ? 'AND employee_id = :employee_id' : '';
+
+    $eventsStmt = $pdo->prepare(
+        "SELECT employee_id, event_date, event_time, facility_id, stage FROM (
+            SELECT pickup_employee_id AS employee_id, pickup_date AS event_date, pickup_time AS event_time,
+                   facility_id, 'pickup' AS stage
+            FROM collection_cycles
+            WHERE deleted_at IS NULL AND pickup_employee_id IS NOT NULL
+              AND pickup_date IS NOT NULL AND pickup_time IS NOT NULL
+            UNION ALL
+            SELECT arrival_employee_id, arrival_date, arrival_time, arrival_facility_id, 'arrival'
+            FROM collection_cycles
+            WHERE deleted_at IS NULL AND arrival_employee_id IS NOT NULL
+              AND arrival_date IS NOT NULL AND arrival_time IS NOT NULL AND arrival_facility_id IS NOT NULL
+            UNION ALL
+            SELECT dispatch_employee_id, dispatch_date, dispatch_time, dispatch_facility_id, 'dispatch'
+            FROM collection_cycles
+            WHERE deleted_at IS NULL AND dispatch_employee_id IS NOT NULL
+              AND dispatch_date IS NOT NULL AND dispatch_time IS NOT NULL AND dispatch_facility_id IS NOT NULL
+            UNION ALL
+            SELECT return_employee_id, return_date, return_time, facility_id, 'return'
+            FROM collection_cycles
+            WHERE deleted_at IS NULL AND return_employee_id IS NOT NULL
+              AND return_date IS NOT NULL AND return_time IS NOT NULL
+        ) events
+        WHERE event_date BETWEEN :start AND :end $employeeFilterSql
+        ORDER BY employee_id, event_date, event_time"
+    );
+    $params = [':start' => $startDate, ':end' => $endDate];
+    if ($employeeId !== null) {
+        $params[':employee_id'] = $employeeId;
+    }
+    $eventsStmt->execute($params);
+    $events = $eventsStmt->fetchAll();
+
+    if (empty($events)) {
+        return [];
+    }
+
+    $involvedEmployeeIds = array_values(array_unique(array_map(static fn (array $e): int => (int) $e['employee_id'], $events)));
+
+    $facilityNamesStmt = $pdo->query('SELECT id, name FROM facilities');
+    $facilityNames = array_column($facilityNamesStmt->fetchAll(), 'name', 'id');
+
+    $employeeNamesStmt = $pdo->query('SELECT id, name FROM employees');
+    $employeeNames = array_column($employeeNamesStmt->fetchAll(), 'name', 'id');
+
+    // 休憩は日をまたぐ想定が無いため、対象日の前後1日分だけ余裕を持たせて取得する
+    // （深夜勤務等で休憩終了がevent_dateの翌日にわずかにずれ込むケースを取りこぼさないため）。
+    $breakRangeStart = (new DateTime($startDate))->modify('-1 day')->format('Y-m-d 00:00:00');
+    $breakRangeEnd = (new DateTime($endDate))->modify('+1 day')->format('Y-m-d 23:59:59');
+    $breaksPlaceholders = implode(',', array_fill(0, count($involvedEmployeeIds), '?'));
+    $breaksStmt = $pdo->prepare(
+        "SELECT employee_id, break_start_at, break_end_at
+         FROM attendance_breaks
+         WHERE employee_id IN ($breaksPlaceholders) AND break_start_at BETWEEN ? AND ?
+         ORDER BY employee_id, break_start_at"
+    );
+    $breaksStmt->execute([...$involvedEmployeeIds, $breakRangeStart, $breakRangeEnd]);
+    $breaksByEmployee = [];
+    foreach ($breaksStmt->fetchAll() as $row) {
+        $breaksByEmployee[(int) $row['employee_id']][] = $row;
+    }
+
+    // 従業員・日付ごとにグルーピングして時刻順に並べる（SQL側は既にemployee_id, event_date, event_time順）。
+    $eventsByEmployeeDate = [];
+    foreach ($events as $event) {
+        $eventsByEmployeeDate[(int) $event['employee_id']][$event['event_date']][] = $event;
+    }
+
+    $segments = [];
+    foreach ($eventsByEmployeeDate as $empId => $byDate) {
+        foreach ($byDate as $date => $dayEvents) {
+            for ($i = 0; $i < count($dayEvents) - 1; $i++) {
+                $from = $dayEvents[$i];
+                $to = $dayEvents[$i + 1];
+                if ((int) $from['facility_id'] === (int) $to['facility_id']) {
+                    continue; // 同一施設内の連続工程は「移動」ではない
+                }
+
+                $fromDt = new DateTime($date . ' ' . $from['event_time']);
+                $toDt = new DateTime($date . ' ' . $to['event_time']);
+                $rawMinutes = max(0, (int) round(($toDt->getTimestamp() - $fromDt->getTimestamp()) / 60));
+
+                $breakMinutes = 0;
+                foreach ($breaksByEmployee[$empId] ?? [] as $break) {
+                    $breakStart = new DateTime($break['break_start_at']);
+                    $breakEnd = $break['break_end_at'] !== null ? new DateTime($break['break_end_at']) : $toDt;
+                    $overlapStart = max($fromDt, $breakStart);
+                    $overlapEnd = min($toDt, $breakEnd);
+                    if ($overlapEnd > $overlapStart) {
+                        $breakMinutes += (int) round(($overlapEnd->getTimestamp() - $overlapStart->getTimestamp()) / 60);
+                    }
+                }
+
+                $segments[] = [
+                    'employee_id' => $empId,
+                    'employee_name' => $employeeNames[$empId] ?? ('ID:' . $empId),
+                    'date' => $date,
+                    'from_stage' => CC_TRAVEL_STAGE_LABELS[$from['stage']] ?? $from['stage'],
+                    'from_facility' => $facilityNames[(int) $from['facility_id']] ?? ('ID:' . $from['facility_id']),
+                    'from_time' => substr($from['event_time'], 0, 5),
+                    'to_stage' => CC_TRAVEL_STAGE_LABELS[$to['stage']] ?? $to['stage'],
+                    'to_facility' => $facilityNames[(int) $to['facility_id']] ?? ('ID:' . $to['facility_id']),
+                    'to_time' => substr($to['event_time'], 0, 5),
+                    'raw_minutes' => $rawMinutes,
+                    'break_minutes' => $breakMinutes,
+                    'travel_minutes' => max(0, $rawMinutes - $breakMinutes),
+                ];
+            }
+        }
+    }
+
+    usort($segments, static function (array $a, array $b): int {
+        $dateCmp = strcmp($b['date'], $a['date']);
+        if ($dateCmp !== 0) {
+            return $dateCmp;
+        }
+        $nameCmp = strcmp($a['employee_name'], $b['employee_name']);
+        if ($nameCmp !== 0) {
+            return $nameCmp;
+        }
+        return strcmp($a['from_time'], $b['from_time']);
+    });
+
+    return $segments;
+}
+
 const MISSED_CLOCK_TRACKING_START_DATE = '2026-07-05';
 
 /**

@@ -10,14 +10,22 @@ const CC_FIELD_LABELS = [
     'pickup_bag_count' => '集荷リネン袋数',
     'pickup_time' => '集荷時間',
     'pickup_employee_id' => '集荷担当者',
+    'issued_bag_orange' => 'リネン袋交付数（オレンジ）',
+    'issued_bag_yellow' => 'リネン袋交付数（黄）',
+    'issued_bag_blue' => 'リネン袋交付数（青）',
+    'issued_laundry_net_count' => '洗濯ネット交付数',
     'arrival_bag_count' => '到着リネン袋数',
+    'arrival_date' => '到着日',
     'arrival_time' => '到着時間',
     'arrival_employee_id' => '到着担当者',
+    'arrival_facility_id' => '到着クリーニング所',
     'dispatch_bag_count' => '発送リネン袋数',
     'dispatch_date' => '発送日',
     'dispatch_time' => '発送時間',
     'dispatch_employee_id' => '発送担当者',
+    'dispatch_facility_id' => '発送元クリーニング所',
     'return_bag_count' => '返却リネン袋数',
+    'return_date' => '返却日',
     'return_time' => '返却時間',
     'return_employee_id' => '返却担当者',
     'remarks' => '備考',
@@ -30,13 +38,14 @@ const CC_ACTION_LABELS = [
 ];
 
 const CC_EMPLOYEE_FIELDS = ['pickup_employee_id', 'arrival_employee_id', 'dispatch_employee_id', 'return_employee_id'];
+const CC_FACILITY_FIELDS = ['arrival_facility_id', 'dispatch_facility_id'];
 
 function format_cc_log_value(?string $fieldName, ?string $value, array $facilityNames, array $employeeNames): string
 {
     if ($value === null) {
         return '-';
     }
-    if ($fieldName === 'facility_id') {
+    if ($fieldName === 'facility_id' || in_array($fieldName, CC_FACILITY_FIELDS, true)) {
         return $facilityNames[(int) $value] ?? ('ID:' . $value);
     }
     if (in_array($fieldName, CC_EMPLOYEE_FIELDS, true)) {

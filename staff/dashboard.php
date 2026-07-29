@@ -369,6 +369,7 @@ $csrfToken = csrf_token();
     <p><a href="/staff/work_status.php">作業状況・残数を確認する</a></p>
     <p><a href="/staff/facilities.php">施設一覧を見る</a></p>
     <p><a href="/staff/collection_records.php">集荷・配送記録簿を見る</a></p>
+    <p><a href="/staff/travel_time.php">施設間移動時間を確認する</a></p>
     <p><a href="/staff/consumable_stock.php">消耗品在庫管理を見る</a></p>
 </section>
 
