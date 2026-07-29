@@ -5,11 +5,16 @@ require_once __DIR__ . '/../includes/functions.php';
 $admin = require_login('admin');
 $pdo = getPdo();
 
-const FACILITY_EDITABLE_FIELDS = ['name', 'room_count', 'onboarding_start_date', 'pickup_schedule', 'address', 'phone_number', 'note', 'issued_linen_bag_orange', 'issued_linen_bag_yellow', 'issued_laundry_net_count'];
+const FACILITY_EDITABLE_FIELDS = ['name', 'facility_type', 'room_count', 'onboarding_start_date', 'pickup_schedule', 'address', 'phone_number', 'note', 'issued_linen_bag_orange', 'issued_linen_bag_yellow', 'issued_laundry_net_count'];
+
+const FACILITY_TYPES = ['介護施設', '自社', 'クリーニング所'];
 
 function parse_facility_input(array $post): array
 {
     $name = trim((string) ($post['name'] ?? ''));
+
+    $facilityType = trim((string) ($post['facility_type'] ?? ''));
+    $facilityType = in_array($facilityType, FACILITY_TYPES, true) ? $facilityType : null;
 
     $roomCountRaw = trim((string) ($post['room_count'] ?? ''));
     $roomCount = $roomCountRaw === '' ? null : (int) $roomCountRaw;
@@ -44,6 +49,7 @@ function parse_facility_input(array $post): array
 
     return [
         'name' => $name,
+        'facility_type' => $facilityType,
         'room_count' => $roomCount,
         'onboarding_start_date' => $onboardingStartDate,
         'pickup_schedule' => $pickupSchedule,
@@ -69,6 +75,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($values['name'] === '') {
                 $errorMessage = '施設名を入力してください。';
+            } elseif ($values['facility_type'] === null) {
+                $errorMessage = '施設種別を選択してください。';
             } elseif ($values['onboarding_start_date'] === false) {
                 $errorMessage = '受託開始日の形式が正しくありません。';
             } elseif ($values['room_count'] !== null && $values['room_count'] < 0) {
@@ -81,11 +89,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errorMessage = '交付洗濯ネット数は0以上の数値を入力してください。';
             } elseif ($action === 'create') {
                 $stmt = $pdo->prepare(
-                    'INSERT INTO facilities (name, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note, issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count, is_active)
-                     VALUES (:name, :room_count, :onboarding_start_date, :pickup_schedule, :address, :phone_number, :note, :issued_linen_bag_orange, :issued_linen_bag_yellow, :issued_laundry_net_count, 1)'
+                    'INSERT INTO facilities (name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note, issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count, is_active)
+                     VALUES (:name, :facility_type, :room_count, :onboarding_start_date, :pickup_schedule, :address, :phone_number, :note, :issued_linen_bag_orange, :issued_linen_bag_yellow, :issued_laundry_net_count, 1)'
                 );
                 $stmt->execute([
                     ':name' => $values['name'],
+                    ':facility_type' => $values['facility_type'],
                     ':room_count' => $values['room_count'],
                     ':onboarding_start_date' => $values['onboarding_start_date'],
                     ':pickup_schedule' => $values['pickup_schedule'],
@@ -103,7 +112,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $facilityId = (int) ($_POST['facility_id'] ?? 0);
                 $stmt = $pdo->prepare(
                     'UPDATE facilities
-                     SET name = :name, room_count = :room_count, onboarding_start_date = :onboarding_start_date,
+                     SET name = :name, facility_type = :facility_type, room_count = :room_count, onboarding_start_date = :onboarding_start_date,
                          pickup_schedule = :pickup_schedule, address = :address, phone_number = :phone_number, note = :note,
                          issued_linen_bag_orange = :issued_linen_bag_orange, issued_linen_bag_yellow = :issued_linen_bag_yellow,
                          issued_laundry_net_count = :issued_laundry_net_count
@@ -111,6 +120,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 );
                 $stmt->execute([
                     ':name' => $values['name'],
+                    ':facility_type' => $values['facility_type'],
                     ':room_count' => $values['room_count'],
                     ':onboarding_start_date' => $values['onboarding_start_date'],
                     ':pickup_schedule' => $values['pickup_schedule'],
@@ -148,7 +158,7 @@ $flash = pop_flash();
 $csrfToken = csrf_token();
 
 $facilitiesStmt = $pdo->query(
-    'SELECT id, name, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
+    'SELECT id, name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
             issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count, is_active
      FROM facilities ORDER BY is_active DESC, name'
 );
@@ -170,6 +180,7 @@ if (isset($_GET['edit'])) {
 $formAction = 'create';
 $formFacilityId = null;
 $formName = '';
+$formFacilityType = '介護施設';
 $formRoomCount = '';
 $formOnboardingStartDate = '';
 $formPickupSchedule = '';
@@ -184,6 +195,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formAction = (string) ($_POST['action'] ?? 'create');
     $formFacilityId = $formAction === 'update' ? (int) ($_POST['facility_id'] ?? 0) : null;
     $formName = (string) ($_POST['name'] ?? '');
+    $formFacilityType = (string) ($_POST['facility_type'] ?? '');
     $formRoomCount = (string) ($_POST['room_count'] ?? '');
     $formOnboardingStartDate = (string) ($_POST['onboarding_start_date'] ?? '');
     $formPickupSchedule = (string) ($_POST['pickup_schedule'] ?? '');
@@ -197,6 +209,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formAction = 'update';
     $formFacilityId = (int) $editingFacility['id'];
     $formName = $editingFacility['name'];
+    $formFacilityType = $editingFacility['facility_type'];
     $formRoomCount = $editingFacility['room_count'] !== null ? (string) $editingFacility['room_count'] : '';
     $formOnboardingStartDate = (string) ($editingFacility['onboarding_start_date'] ?? '');
     $formPickupSchedule = (string) ($editingFacility['pickup_schedule'] ?? '');
@@ -268,6 +281,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
             </div>
 
             <div class="form-row">
+                <label>施設種別</label>
+                <?php foreach (FACILITY_TYPES as $type): ?>
+                    <label style="width:auto; margin-right:12px; display:inline-block;">
+                        <input type="radio" name="facility_type" value="<?= htmlspecialchars($type, ENT_QUOTES, 'UTF-8') ?>" <?= $formFacilityType === $type ? 'checked' : '' ?> required>
+                        <?= htmlspecialchars($type, ENT_QUOTES, 'UTF-8') ?>
+                    </label>
+                <?php endforeach; ?>
+            </div>
+
+            <div class="form-row">
                 <label for="room_count">居室数</label>
                 <input type="number" id="room_count" name="room_count" min="0" step="1" value="<?= htmlspecialchars($formRoomCount, ENT_QUOTES, 'UTF-8') ?>">
             </div>
@@ -336,6 +359,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
             <thead>
                 <tr>
                     <th>施設名</th>
+                    <th>施設種別</th>
                     <th>居室数</th>
                     <th>受託開始日</th>
                     <th>集荷曜日</th>
@@ -353,6 +377,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
                 <?php foreach ($facilities as $facility): ?>
                     <tr>
                         <td><a href="/admin/facility_detail.php?id=<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></a></td>
+                        <td><?= htmlspecialchars($facility['facility_type'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= $facility['room_count'] !== null ? (int) $facility['room_count'] . '室' : '-' ?></td>
                         <td><?= $facility['onboarding_start_date'] !== null ? htmlspecialchars($facility['onboarding_start_date'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= $facility['pickup_schedule'] !== null ? htmlspecialchars($facility['pickup_schedule'], ENT_QUOTES, 'UTF-8') : '-' ?></td>

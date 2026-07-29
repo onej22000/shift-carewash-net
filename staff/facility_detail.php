@@ -8,7 +8,7 @@ $pdo = getPdo();
 $facilityId = (int) ($_GET['id'] ?? 0);
 
 $stmt = $pdo->prepare(
-    'SELECT id, name, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
+    'SELECT id, name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
             issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count, is_active
      FROM facilities WHERE id = :id'
 );
@@ -56,6 +56,10 @@ $facility = $stmt->fetch();
     <?php endif; ?>
 
     <div class="info-card">
+        <div class="info-row">
+            <div class="label">施設種別</div>
+            <div class="value"><?= htmlspecialchars($facility['facility_type'], ENT_QUOTES, 'UTF-8') ?></div>
+        </div>
         <div class="info-row">
             <div class="label">住所</div>
             <div class="value">

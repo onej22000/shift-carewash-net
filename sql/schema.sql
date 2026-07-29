@@ -93,6 +93,7 @@ CREATE TABLE shift_edit_logs (
 CREATE TABLE facilities (
     id                    INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     name                  VARCHAR(100) NOT NULL,
+    facility_type         ENUM('介護施設','自社','クリーニング所') NOT NULL DEFAULT '介護施設' COMMENT '施設種別',
     room_count            INT UNSIGNED NULL COMMENT '居室数',
     onboarding_start_date DATE NULL COMMENT '受託開始日',
     pickup_schedule       ENUM('月・木','火・金','水・土') NULL COMMENT '集荷曜日パターン',

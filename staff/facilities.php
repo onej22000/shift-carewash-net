@@ -38,7 +38,7 @@ $flash = pop_flash();
 $csrfToken = csrf_token();
 
 $facilitiesStmt = $pdo->query(
-    'SELECT id, name, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
+    'SELECT id, name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
             issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count, is_active
      FROM facilities ORDER BY is_active DESC, name'
 );
@@ -89,6 +89,7 @@ $facilities = $facilitiesStmt->fetchAll();
         <thead>
             <tr>
                 <th>施設名</th>
+                <th>施設種別</th>
                 <th>居室数</th>
                 <th>受託開始日</th>
                 <th>集荷曜日</th>
@@ -105,6 +106,7 @@ $facilities = $facilitiesStmt->fetchAll();
             <?php foreach ($facilities as $facility): ?>
                 <tr>
                     <td><a href="/staff/facility_detail.php?id=<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></a></td>
+                    <td><?= htmlspecialchars($facility['facility_type'], ENT_QUOTES, 'UTF-8') ?></td>
                     <td><?= $facility['room_count'] !== null ? (int) $facility['room_count'] . '室' : '-' ?></td>
                     <td><?= $facility['onboarding_start_date'] !== null ? htmlspecialchars($facility['onboarding_start_date'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                     <td><?= $facility['pickup_schedule'] !== null ? htmlspecialchars($facility['pickup_schedule'], ENT_QUOTES, 'UTF-8') : '-' ?></td>

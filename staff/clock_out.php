@@ -44,7 +44,7 @@ if ($isOnBreak) {
     exit;
 }
 
-$facilitiesStmt = $pdo->query('SELECT id, name FROM facilities WHERE is_active = 1 ORDER BY name');
+$facilitiesStmt = $pdo->query("SELECT id, name FROM facilities WHERE is_active = 1 AND facility_type = '介護施設' ORDER BY name");
 $facilities = $facilitiesStmt->fetchAll();
 $validFacilityIds = array_map('intval', array_column($facilities, 'id'));
 

@@ -25,7 +25,7 @@ if ($period !== 'all') {
     $params[':end'] = $end;
 }
 
-$facilitiesStmt = $pdo->query('SELECT id, name, is_active FROM facilities ORDER BY is_active DESC, name');
+$facilitiesStmt = $pdo->query("SELECT id, name, is_active FROM facilities WHERE facility_type = '介護施設' ORDER BY is_active DESC, name");
 $facilities = $facilitiesStmt->fetchAll();
 
 // 集荷人数（work_stage_records.stage='wash' かつ collection_cycle_id が設定された「人数確認」記録）と、
