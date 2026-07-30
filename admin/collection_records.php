@@ -199,6 +199,7 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
 $facilitiesStmt = $pdo->query('SELECT id, name FROM facilities ORDER BY name');
 $facilities = $facilitiesStmt->fetchAll();
 $validFacilityIds = array_map('intval', array_column($facilities, 'id'));
+$facilityNamesById = array_column($facilities, 'name', 'id');
 
 $cleaningFacilitiesStmt = $pdo->query("SELECT id, name FROM facilities WHERE facility_type = 'クリーニング所' ORDER BY name");
 $cleaningFacilities = $cleaningFacilitiesStmt->fetchAll();
@@ -259,6 +260,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     $deleteStmt = $pdo->prepare('UPDATE collection_cycles SET deleted_at = :deleted_at WHERE id = :id');
                     $deleteStmt->execute([':deleted_at' => (new DateTime())->format('Y-m-d H:i:s'), ':id' => $cycleId]);
+
+                    record_collection_cycle_issuance_stock_adjustment(
+                        $pdo, $cycle, null, $facilityNamesById[$cycle['facility_id']] ?? '', $admin['id']
+                    );
 
                     $pdo->commit();
                     set_flash('success', '集荷・配送記録を削除しました。');
@@ -333,6 +338,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ':new_value' => $values[$field],
                     ]);
                 }
+
+                record_collection_cycle_issuance_stock_adjustment(
+                    $pdo, null, $values, $facilityNamesById[$values['facility_id']] ?? '', $admin['id']
+                );
 
                 set_flash('success', '集荷・配送記録を登録しました。');
                 header('Location: ' . $backToListUrl);
@@ -412,6 +421,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ':id' => $cycleId,
                         ]);
 
+                        record_collection_cycle_issuance_stock_adjustment(
+                            $pdo, $cycle, $values, $facilityNamesById[$values['facility_id']] ?? '', $admin['id']
+                        );
+
                         $pdo->commit();
                         set_flash('success', $changedCount > 0
                             ? '集荷・配送記録を修正しました（' . $changedCount . '件のフィールドを変更）。'
@@ -478,7 +491,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && in_array((s
 }
 
 $facilitiesStmtAll = $facilities;
-$facilityNamesById = array_column($facilities, 'name', 'id');
 $employeeNamesById = array_column($employees, 'name', 'id');
 
 $selectedFacilityName = $facilityNamesById[$facilityId] ?? '';

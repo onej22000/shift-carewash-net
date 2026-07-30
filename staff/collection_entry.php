@@ -550,6 +550,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     $issuedBagBlue,
                                     $issuedLaundryNetCount
                                 );
+                                record_collection_cycle_issuance_stock_adjustment($pdo, null, [
+                                    'issued_bag_orange' => $issuedBagOrange,
+                                    'issued_bag_yellow' => $issuedBagYellow,
+                                    'issued_bag_blue' => $issuedBagBlue,
+                                    'issued_laundry_net_count' => $issuedLaundryNetCount,
+                                ], $facilityName, $staff['id']);
                             }
                             $pdo->commit();
                         } catch (\Throwable $e) {
@@ -600,6 +606,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     $deleteStmt = $pdo->prepare('UPDATE collection_cycles SET deleted_at = :deleted_at WHERE id = :id');
                     $deleteStmt->execute([':deleted_at' => (new DateTime())->format('Y-m-d H:i:s'), ':id' => $cycleId]);
+
+                    record_collection_cycle_issuance_stock_adjustment(
+                        $pdo, $cycle, null, $facilityNamesById[$cycle['facility_id']] ?? '', $staff['id']
+                    );
 
                     $pdo->commit();
                     set_flash('success', '集荷・配送記録を削除しました。');
@@ -689,6 +699,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ':remarks' => $values['remarks'],
                             ':id' => $cycleId,
                         ]);
+
+                        record_collection_cycle_issuance_stock_adjustment(
+                            $pdo, $cycle, $values, $facilityNamesById[$values['facility_id']] ?? '', $staff['id']
+                        );
 
                         $pdo->commit();
                         set_flash('success', $changedCount > 0

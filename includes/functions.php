@@ -1335,18 +1335,14 @@ function record_vehicle_maintenance_history(
 }
 
 /**
- * facilities.issued_linen_bag_orange/yellow・issued_laundry_net_count（施設への基準交付数）の
- * 新規登録・変更差分を、消耗品在庫（consumable_stock_transactions）の減産・増産として自動記録する。
- * 交付数が増えた分だけ在庫はマイナス、減った分（訂正等）はプラスになる。
+ * $fieldToItemType の各フィールドについて $before→$after の差分を、消耗品在庫
+ * （consumable_stock_transactions）の減産・増産として自動記録する共通処理。
+ * 値が増えた分（交付が増えた）だけ在庫はマイナス、減った分（訂正等）はプラスになる。
+ * $before/$afterがNULL、またはフィールドが存在しない場合は0として扱う
+ * （$before=NULL: 新規登録時。$after=NULL: レコード削除時＝交付の取り消し）。
  */
-function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, array $after, string $facilityName, int $createdBy): void
+function record_consumable_stock_issuance_delta(PDO $pdo, array $fieldToItemType, ?array $before, ?array $after, string $note, int $createdBy): void
 {
-    $fieldToItemType = [
-        'issued_linen_bag_orange' => 'linen_bag_orange',
-        'issued_linen_bag_yellow' => 'linen_bag_yellow',
-        'issued_laundry_net_count' => 'laundry_net',
-    ];
-
     $stmt = $pdo->prepare(
         'INSERT INTO consumable_stock_transactions (item_type, quantity, transaction_date, note, created_by)
          VALUES (:item_type, :quantity, :transaction_date, :note, :created_by)'
@@ -1365,10 +1361,38 @@ function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, arr
             ':item_type' => $itemType,
             ':quantity' => -$delta,
             ':transaction_date' => $today,
-            ':note' => $facilityName . 'への交付（自動記録）',
+            ':note' => $note,
             ':created_by' => $createdBy,
         ]);
     }
+}
+
+/**
+ * facilities.issued_linen_bag_orange/yellow・issued_laundry_net_count（施設への基準交付数）の
+ * 新規登録・変更差分を消耗品在庫に自動反映する。
+ */
+function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, array $after, string $facilityName, int $createdBy): void
+{
+    record_consumable_stock_issuance_delta($pdo, [
+        'issued_linen_bag_orange' => 'linen_bag_orange',
+        'issued_linen_bag_yellow' => 'linen_bag_yellow',
+        'issued_laundry_net_count' => 'laundry_net',
+    ], $before, $after, $facilityName . 'への交付（自動記録）', $createdBy);
+}
+
+/**
+ * collection_cycles.issued_bag_orange/yellow/blue・issued_laundry_net_count（集荷時に施設へ
+ * 渡した交換用の袋・ネット数）の新規登録・変更・削除を消耗品在庫に自動反映する。
+ * $after=NULLはサイクル削除（交付自体の取り消し）を表す。
+ */
+function record_collection_cycle_issuance_stock_adjustment(PDO $pdo, ?array $before, ?array $after, string $facilityName, int $createdBy): void
+{
+    record_consumable_stock_issuance_delta($pdo, [
+        'issued_bag_orange' => 'linen_bag_orange',
+        'issued_bag_yellow' => 'linen_bag_yellow',
+        'issued_bag_blue' => 'linen_bag_blue',
+        'issued_laundry_net_count' => 'laundry_net',
+    ], $before, $after, $facilityName . 'への交付（自動記録・集荷記録）', $createdBy);
 }
 
 /**
