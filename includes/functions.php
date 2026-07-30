@@ -1335,6 +1335,43 @@ function record_vehicle_maintenance_history(
 }
 
 /**
+ * facilities.issued_linen_bag_orange/yellow・issued_laundry_net_count（施設への基準交付数）の
+ * 新規登録・変更差分を、消耗品在庫（consumable_stock_transactions）の減産・増産として自動記録する。
+ * 交付数が増えた分だけ在庫はマイナス、減った分（訂正等）はプラスになる。
+ */
+function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, array $after, string $facilityName, int $createdBy): void
+{
+    $fieldToItemType = [
+        'issued_linen_bag_orange' => 'linen_bag_orange',
+        'issued_linen_bag_yellow' => 'linen_bag_yellow',
+        'issued_laundry_net_count' => 'laundry_net',
+    ];
+
+    $stmt = $pdo->prepare(
+        'INSERT INTO consumable_stock_transactions (item_type, quantity, transaction_date, note, created_by)
+         VALUES (:item_type, :quantity, :transaction_date, :note, :created_by)'
+    );
+    $today = (new DateTime())->format('Y-m-d');
+
+    foreach ($fieldToItemType as $field => $itemType) {
+        $oldValue = (int) ($before[$field] ?? 0);
+        $newValue = (int) ($after[$field] ?? 0);
+        $delta = $newValue - $oldValue;
+        if ($delta === 0) {
+            continue;
+        }
+
+        $stmt->execute([
+            ':item_type' => $itemType,
+            ':quantity' => -$delta,
+            ':transaction_date' => $today,
+            ':note' => $facilityName . 'への交付（自動記録）',
+            ':created_by' => $createdBy,
+        ]);
+    }
+}
+
+/**
  * vehicle_alert_settings の閾値と vehicle_maintenance の最新有効レコードから、
  * 車検・自賠責・任意保険（期限型）およびオイル・タイヤ交換（経過日数型）の警告を算出する。
  *

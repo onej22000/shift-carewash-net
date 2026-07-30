@@ -105,11 +105,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':issued_linen_bag_yellow' => $values['issued_linen_bag_yellow'],
                     ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                 ]);
+                record_facility_issuance_stock_adjustment($pdo, null, $values, $values['name'], $admin['id']);
                 set_flash('success', htmlspecialchars($values['name'], ENT_QUOTES, 'UTF-8') . 'を登録しました。');
                 header('Location: /admin/facilities.php');
                 exit;
             } else {
                 $facilityId = (int) ($_POST['facility_id'] ?? 0);
+                $beforeStmt = $pdo->prepare(
+                    'SELECT issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count FROM facilities WHERE id = :id'
+                );
+                $beforeStmt->execute([':id' => $facilityId]);
+                $beforeValues = $beforeStmt->fetch() ?: null;
+
                 $stmt = $pdo->prepare(
                     'UPDATE facilities
                      SET name = :name, facility_type = :facility_type, room_count = :room_count, onboarding_start_date = :onboarding_start_date,
@@ -132,6 +139,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                     ':id' => $facilityId,
                 ]);
+                record_facility_issuance_stock_adjustment($pdo, $beforeValues, $values, $values['name'], $admin['id']);
                 set_flash('success', htmlspecialchars($values['name'], ENT_QUOTES, 'UTF-8') . 'を更新しました。');
                 header('Location: /admin/facilities.php');
                 exit;
