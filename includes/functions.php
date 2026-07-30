@@ -1338,14 +1338,15 @@ function record_vehicle_maintenance_history(
  * $fieldToItemType の各フィールドについて $before→$after の差分を、消耗品在庫
  * （consumable_stock_transactions）の減産・増産として自動記録する共通処理。
  * 値が増えた分（交付が増えた）だけ在庫はマイナス、減った分（訂正等）はプラスになる。
- * $before/$afterがNULL、またはフィールドが存在しない場合は0として扱う
- * （$before=NULL: 新規登録時。$after=NULL: レコード削除時＝交付の取り消し）。
+ * $beforeがNULL、またはフィールドが存在しない場合は0として扱う（新規登録時）。
+ * facilities.issued_*（施設への基準交付数）専用。collection_cyclesの交付は
+ * record_collection_cycle_issuance_stock_adjustment()を使う（削除時の扱いが異なるため）。
  */
-function record_consumable_stock_issuance_delta(PDO $pdo, array $fieldToItemType, ?array $before, ?array $after, string $note, int $createdBy): void
+function record_consumable_stock_issuance_delta(PDO $pdo, array $fieldToItemType, ?array $before, array $after, string $reason, ?int $facilityId, string $note, int $createdBy): void
 {
     $stmt = $pdo->prepare(
-        'INSERT INTO consumable_stock_transactions (item_type, quantity, transaction_date, note, created_by)
-         VALUES (:item_type, :quantity, :transaction_date, :note, :created_by)'
+        'INSERT INTO consumable_stock_transactions (item_type, quantity, reason, facility_id, transaction_date, note, created_by)
+         VALUES (:item_type, :quantity, :reason, :facility_id, :transaction_date, :note, :created_by)'
     );
     $today = (new DateTime())->format('Y-m-d');
 
@@ -1360,6 +1361,8 @@ function record_consumable_stock_issuance_delta(PDO $pdo, array $fieldToItemType
         $stmt->execute([
             ':item_type' => $itemType,
             ':quantity' => -$delta,
+            ':reason' => $reason,
+            ':facility_id' => $facilityId,
             ':transaction_date' => $today,
             ':note' => $note,
             ':created_by' => $createdBy,
@@ -1371,28 +1374,90 @@ function record_consumable_stock_issuance_delta(PDO $pdo, array $fieldToItemType
  * facilities.issued_linen_bag_orange/yellow・issued_laundry_net_count（施設への基準交付数）の
  * 新規登録・変更差分を消耗品在庫に自動反映する。
  */
-function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, array $after, string $facilityName, int $createdBy): void
+function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, array $after, int $facilityId, string $facilityName, int $createdBy): void
 {
     record_consumable_stock_issuance_delta($pdo, [
         'issued_linen_bag_orange' => 'linen_bag_orange',
         'issued_linen_bag_yellow' => 'linen_bag_yellow',
         'issued_laundry_net_count' => 'laundry_net',
-    ], $before, $after, $facilityName . 'への交付（自動記録）', $createdBy);
+    ], $before, $after, 'issuance_to_facility', $facilityId, $facilityName . 'への交付（自動記録）', $createdBy);
 }
 
 /**
  * collection_cycles.issued_bag_orange/yellow/blue・issued_laundry_net_count（集荷時に施設へ
- * 渡した交換用の袋・ネット数）の新規登録・変更・削除を消耗品在庫に自動反映する。
- * $after=NULLはサイクル削除（交付自体の取り消し）を表す。
+ * 渡した交換用の袋・ネット数）の新規登録・変更を消耗品在庫に自動反映する。
+ *
+ * facilities版とは異なり、増えた分だけを一方向に減産する（$before→$afterで値が
+ * 減った場合や$after=NULLは何もしない）。集荷記録の削除・訂正による在庫の自動的な
+ * 戻し処理はここでは行わない —— 削除時はcancel_collection_cycle_issuance_stock_transactions()
+ * で「その記録が生んだ減産取引自体を取り消す」方式を使う（新たに戻し取引を作ると、
+ * 削除→作り直しのたびに±が二重に積み上がり相殺してしまうバグの原因になっていたため）。
+ * 交付数を訂正して増やした場合は、その増加分だけ追加で減産する。減らした場合は
+ * 何もしないため、必要なら消耗品在庫管理画面から手動で調整する。
  */
-function record_collection_cycle_issuance_stock_adjustment(PDO $pdo, ?array $before, ?array $after, string $facilityName, int $createdBy): void
-{
-    record_consumable_stock_issuance_delta($pdo, [
+function record_collection_cycle_issuance_stock_adjustment(
+    PDO $pdo,
+    ?array $before,
+    array $after,
+    int $facilityId,
+    string $facilityName,
+    int $collectionCycleId,
+    int $createdBy
+): void {
+    $fieldToItemType = [
         'issued_bag_orange' => 'linen_bag_orange',
         'issued_bag_yellow' => 'linen_bag_yellow',
         'issued_bag_blue' => 'linen_bag_blue',
         'issued_laundry_net_count' => 'laundry_net',
-    ], $before, $after, $facilityName . 'への交付（自動記録・集荷記録）', $createdBy);
+    ];
+
+    $stmt = $pdo->prepare(
+        'INSERT INTO consumable_stock_transactions
+            (item_type, quantity, reason, facility_id, collection_cycle_id, transaction_date, note, created_by)
+         VALUES
+            (:item_type, :quantity, \'issuance_to_facility\', :facility_id, :collection_cycle_id, :transaction_date, :note, :created_by)'
+    );
+    $today = (new DateTime())->format('Y-m-d');
+    $note = $facilityName . 'への交付（自動記録・集荷記録）';
+
+    foreach ($fieldToItemType as $field => $itemType) {
+        $oldValue = (int) ($before[$field] ?? 0);
+        $newValue = (int) ($after[$field] ?? 0);
+        $increase = $newValue - $oldValue;
+        if ($increase <= 0) {
+            continue;
+        }
+
+        $stmt->execute([
+            ':item_type' => $itemType,
+            ':quantity' => -$increase,
+            ':facility_id' => $facilityId,
+            ':collection_cycle_id' => $collectionCycleId,
+            ':transaction_date' => $today,
+            ':note' => $note,
+            ':created_by' => $createdBy,
+        ]);
+    }
+}
+
+/**
+ * 集荷・配送記録（collection_cycles）が削除された際、その記録から自動生成された
+ * 消耗品在庫の減産取引（collection_cycle_idで紐づくもの）を取り消す。新たに戻し
+ * （プラス）の取引を作るのではなく、元の減産取引自体をcanceled_atで無効化することで
+ * 二重の増減や相殺が発生しない。
+ */
+function cancel_collection_cycle_issuance_stock_transactions(PDO $pdo, int $collectionCycleId, int $canceledBy): void
+{
+    $stmt = $pdo->prepare(
+        'UPDATE consumable_stock_transactions
+         SET canceled_at = :canceled_at, canceled_by = :canceled_by
+         WHERE collection_cycle_id = :collection_cycle_id AND canceled_at IS NULL'
+    );
+    $stmt->execute([
+        ':canceled_at' => (new DateTime())->format('Y-m-d H:i:s'),
+        ':canceled_by' => $canceledBy,
+        ':collection_cycle_id' => $collectionCycleId,
+    ]);
 }
 
 /**

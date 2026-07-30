@@ -238,19 +238,26 @@ CREATE TABLE collection_cycle_edit_logs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='集荷・配送記録簿（collection_cycles）の追加・修正・削除履歴';
 
 CREATE TABLE consumable_stock_transactions (
-    id               INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    item_type        ENUM('linen_bag_orange','linen_bag_yellow','linen_bag_blue','laundry_net') NOT NULL COMMENT '品目種別',
-    quantity         INT NOT NULL COMMENT '増減数（入庫等プラス、出庫・使用等マイナス）',
-    transaction_date DATE NOT NULL COMMENT '発生日',
-    note             VARCHAR(255) NULL COMMENT '理由・備考',
-    created_by       INT UNSIGNED NOT NULL COMMENT '記録した管理者の従業員ID',
-    canceled_at      DATETIME NULL COMMENT '取り消し日時（NULLなら有効）',
-    canceled_by      INT UNSIGNED NULL COMMENT '取り消した管理者の従業員ID',
-    created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT fk_cst_created_by  FOREIGN KEY (created_by)  REFERENCES employees(id),
-    CONSTRAINT fk_cst_canceled_by FOREIGN KEY (canceled_by) REFERENCES employees(id),
-    INDEX idx_cst_item_type (item_type)
+    id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    item_type           ENUM('linen_bag_orange','linen_bag_yellow','linen_bag_blue','laundry_net') NOT NULL COMMENT '品目種別',
+    quantity            INT NOT NULL COMMENT '増減数（入庫等プラス、出庫・使用等マイナス）',
+    reason              ENUM('purchase','return_from_facility','disposal','loss','issuance_to_facility') NOT NULL COMMENT '増減理由（購入／施設等からの返却／廃棄／紛失／施設等への交付）',
+    facility_id         INT UNSIGNED NULL COMMENT '対象施設等（施設等への交付／施設等からの返却の場合のみ）',
+    collection_cycle_id INT UNSIGNED NULL COMMENT '発生源の集荷・配送記録（自動記録の場合のみ。この記録が削除された際、紐づく増減記録を取り消すために使用）',
+    transaction_date    DATE NOT NULL COMMENT '発生日',
+    note                VARCHAR(255) NULL COMMENT '理由・備考',
+    created_by          INT UNSIGNED NOT NULL COMMENT '記録した管理者の従業員ID',
+    canceled_at         DATETIME NULL COMMENT '取り消し日時（NULLなら有効）',
+    canceled_by         INT UNSIGNED NULL COMMENT '取り消した管理者の従業員ID',
+    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_cst_created_by       FOREIGN KEY (created_by)          REFERENCES employees(id),
+    CONSTRAINT fk_cst_canceled_by      FOREIGN KEY (canceled_by)         REFERENCES employees(id),
+    CONSTRAINT fk_cst_facility         FOREIGN KEY (facility_id)         REFERENCES facilities(id),
+    CONSTRAINT fk_cst_collection_cycle FOREIGN KEY (collection_cycle_id) REFERENCES collection_cycles(id),
+    INDEX idx_cst_item_type (item_type),
+    INDEX idx_cst_facility (facility_id),
+    INDEX idx_cst_collection_cycle (collection_cycle_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消耗品（リネン袋・洗濯ネット）在庫増減履歴';
 
 -- 車両マスタ

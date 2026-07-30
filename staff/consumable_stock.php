@@ -12,6 +12,14 @@ const CONSUMABLE_ITEM_LABELS = [
     'laundry_net' => '洗濯ネット',
 ];
 
+const CONSUMABLE_REASON_LABELS = [
+    'purchase' => '購入',
+    'return_from_facility' => '施設等からの返却',
+    'disposal' => '廃棄',
+    'loss' => '紛失',
+    'issuance_to_facility' => '施設等への交付',
+];
+
 // ---- 現在庫の集計 ----
 $stockTotals = array_fill_keys(array_keys(CONSUMABLE_ITEM_LABELS), 0);
 $totalsStmt = $pdo->query(
@@ -26,11 +34,12 @@ foreach ($totalsStmt->fetchAll() as $row) {
 
 // ---- 一覧の取得 ----
 $listStmt = $pdo->query(
-    "SELECT t.id, t.item_type, t.quantity, t.transaction_date, t.note, t.canceled_at, t.created_at,
-            creator.name AS created_by_name, canceler.name AS canceled_by_name
+    "SELECT t.id, t.item_type, t.quantity, t.reason, t.facility_id, t.transaction_date, t.note, t.canceled_at, t.created_at,
+            creator.name AS created_by_name, canceler.name AS canceled_by_name, f.name AS facility_name
      FROM consumable_stock_transactions t
      INNER JOIN employees creator ON creator.id = t.created_by
      LEFT JOIN employees canceler ON canceler.id = t.canceled_by
+     LEFT JOIN facilities f ON f.id = t.facility_id
      ORDER BY t.transaction_date DESC, t.id DESC
      LIMIT 300"
 );
@@ -93,7 +102,9 @@ $records = $listStmt->fetchAll();
                     <th>発生日</th>
                     <th>品目</th>
                     <th>増減数</th>
-                    <th>理由・備考</th>
+                    <th>理由</th>
+                    <th>対象施設等</th>
+                    <th>備考</th>
                     <th>登録者</th>
                     <th>状態</th>
                 </tr>
@@ -107,6 +118,8 @@ $records = $listStmt->fetchAll();
                         <td class="<?= (int) $record['quantity'] >= 0 ? 'qty-positive' : 'qty-negative' ?>">
                             <?= (int) $record['quantity'] >= 0 ? '+' : '' ?><?= (int) $record['quantity'] ?>
                         </td>
+                        <td><?= htmlspecialchars(CONSUMABLE_REASON_LABELS[$record['reason']] ?? $record['reason'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= $record['facility_name'] !== null ? htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= $record['note'] !== null ? htmlspecialchars($record['note'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= htmlspecialchars($record['created_by_name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td>

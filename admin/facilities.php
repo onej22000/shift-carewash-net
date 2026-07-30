@@ -105,7 +105,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':issued_linen_bag_yellow' => $values['issued_linen_bag_yellow'],
                     ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                 ]);
-                record_facility_issuance_stock_adjustment($pdo, null, $values, $values['name'], $admin['id']);
+                $newFacilityId = (int) $pdo->lastInsertId();
+                record_facility_issuance_stock_adjustment($pdo, null, $values, $newFacilityId, $values['name'], $admin['id']);
                 set_flash('success', htmlspecialchars($values['name'], ENT_QUOTES, 'UTF-8') . 'を登録しました。');
                 header('Location: /admin/facilities.php');
                 exit;
@@ -139,7 +140,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                     ':id' => $facilityId,
                 ]);
-                record_facility_issuance_stock_adjustment($pdo, $beforeValues, $values, $values['name'], $admin['id']);
+                record_facility_issuance_stock_adjustment($pdo, $beforeValues, $values, $facilityId, $values['name'], $admin['id']);
                 set_flash('success', htmlspecialchars($values['name'], ENT_QUOTES, 'UTF-8') . 'を更新しました。');
                 header('Location: /admin/facilities.php');
                 exit;

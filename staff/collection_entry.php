@@ -98,7 +98,7 @@ function insert_pickup(
     ?int $issuedBagYellow,
     ?int $issuedBagBlue,
     ?int $issuedLaundryNetCount
-): void {
+): int {
     $stmt = $pdo->prepare(
         'INSERT INTO collection_cycles
             (facility_id, pickup_date, pickup_bag_count, pickup_time, pickup_employee_id,
@@ -118,6 +118,8 @@ function insert_pickup(
         ':issued_bag_blue' => $issuedBagBlue,
         ':issued_laundry_net_count' => $issuedLaundryNetCount,
     ]);
+
+    return (int) $pdo->lastInsertId();
 }
 
 function update_return(PDO $pdo, int $cycleId, int $bagCount, string $returnDate, string $returnTime, int $employeeId): void
@@ -538,7 +540,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 update_return($pdo, $returnCycleId, $returnBagCount, $returnDate, $returnTime, $returnEmployeeId);
                             }
                             if ($wantsPickup) {
-                                insert_pickup(
+                                $newCycleId = insert_pickup(
                                     $pdo,
                                     $facilityId,
                                     $pickupBagCount,
@@ -555,7 +557,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     'issued_bag_yellow' => $issuedBagYellow,
                                     'issued_bag_blue' => $issuedBagBlue,
                                     'issued_laundry_net_count' => $issuedLaundryNetCount,
-                                ], $facilityName, $staff['id']);
+                                ], $facilityId, $facilityName, $newCycleId, $staff['id']);
                             }
                             $pdo->commit();
                         } catch (\Throwable $e) {
@@ -607,9 +609,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $deleteStmt = $pdo->prepare('UPDATE collection_cycles SET deleted_at = :deleted_at WHERE id = :id');
                     $deleteStmt->execute([':deleted_at' => (new DateTime())->format('Y-m-d H:i:s'), ':id' => $cycleId]);
 
-                    record_collection_cycle_issuance_stock_adjustment(
-                        $pdo, $cycle, null, $facilityNamesById[$cycle['facility_id']] ?? '', $staff['id']
-                    );
+                    cancel_collection_cycle_issuance_stock_transactions($pdo, $cycleId, $staff['id']);
 
                     $pdo->commit();
                     set_flash('success', '集荷・配送記録を削除しました。');
@@ -701,7 +701,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ]);
 
                         record_collection_cycle_issuance_stock_adjustment(
-                            $pdo, $cycle, $values, $facilityNamesById[$values['facility_id']] ?? '', $staff['id']
+                            $pdo, $cycle, $values, $values['facility_id'], $facilityNamesById[$values['facility_id']] ?? '', $cycleId, $staff['id']
                         );
 
                         $pdo->commit();

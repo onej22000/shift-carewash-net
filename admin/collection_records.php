@@ -261,9 +261,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $deleteStmt = $pdo->prepare('UPDATE collection_cycles SET deleted_at = :deleted_at WHERE id = :id');
                     $deleteStmt->execute([':deleted_at' => (new DateTime())->format('Y-m-d H:i:s'), ':id' => $cycleId]);
 
-                    record_collection_cycle_issuance_stock_adjustment(
-                        $pdo, $cycle, null, $facilityNamesById[$cycle['facility_id']] ?? '', $admin['id']
-                    );
+                    cancel_collection_cycle_issuance_stock_transactions($pdo, $cycleId, $admin['id']);
 
                     $pdo->commit();
                     set_flash('success', '集荷・配送記録を削除しました。');
@@ -340,7 +338,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 record_collection_cycle_issuance_stock_adjustment(
-                    $pdo, null, $values, $facilityNamesById[$values['facility_id']] ?? '', $admin['id']
+                    $pdo, null, $values, $values['facility_id'], $facilityNamesById[$values['facility_id']] ?? '', $newCycleId, $admin['id']
                 );
 
                 set_flash('success', '集荷・配送記録を登録しました。');
@@ -422,7 +420,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ]);
 
                         record_collection_cycle_issuance_stock_adjustment(
-                            $pdo, $cycle, $values, $facilityNamesById[$values['facility_id']] ?? '', $admin['id']
+                            $pdo, $cycle, $values, $values['facility_id'], $facilityNamesById[$values['facility_id']] ?? '', $cycleId, $admin['id']
                         );
 
                         $pdo->commit();

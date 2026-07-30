@@ -5,6 +5,11 @@ require_once __DIR__ . '/../includes/functions.php';
 $admin = require_login('admin');
 $pdo = getPdo();
 
+$facilitiesStmt = $pdo->query('SELECT id, name FROM facilities ORDER BY name');
+$facilities = $facilitiesStmt->fetchAll();
+$validFacilityIds = array_map('intval', array_column($facilities, 'id'));
+$facilityNamesById = array_column($facilities, 'name', 'id');
+
 const CONSUMABLE_ITEM_LABELS = [
     'linen_bag_orange' => 'リネン袋（オレンジ／集荷用）',
     'linen_bag_yellow' => 'リネン袋（黄／集荷用）',
@@ -12,12 +17,32 @@ const CONSUMABLE_ITEM_LABELS = [
     'laundry_net' => '洗濯ネット',
 ];
 
-function parse_consumable_stock_input(array $post): array
+const CONSUMABLE_REASON_LABELS = [
+    'purchase' => '購入',
+    'return_from_facility' => '施設等からの返却',
+    'disposal' => '廃棄',
+    'loss' => '紛失',
+    'issuance_to_facility' => '施設等への交付',
+];
+
+// この理由の場合のみ対象施設等の選択を必須にする（購入・廃棄・紛失は施設に紐づかない）
+const CONSUMABLE_REASONS_REQUIRING_FACILITY = ['return_from_facility', 'issuance_to_facility'];
+
+function parse_consumable_stock_input(array $post, array $validFacilityIds): array
 {
     $itemType = (string) ($post['item_type'] ?? '');
 
     $quantityRaw = trim((string) ($post['quantity'] ?? ''));
     $quantity = $quantityRaw === '' || !preg_match('/^-?\d+$/', $quantityRaw) ? null : (int) $quantityRaw;
+
+    $reason = (string) ($post['reason'] ?? '');
+    $reason = array_key_exists($reason, CONSUMABLE_REASON_LABELS) ? $reason : null;
+
+    $facilityIdRaw = trim((string) ($post['facility_id'] ?? ''));
+    $facilityId = $facilityIdRaw === '' ? null : (int) $facilityIdRaw;
+    if ($facilityId !== null && !in_array($facilityId, $validFacilityIds, true)) {
+        $facilityId = false;
+    }
 
     $transactionDateRaw = trim((string) ($post['transaction_date'] ?? ''));
     $transactionDate = null;
@@ -36,14 +61,29 @@ function parse_consumable_stock_input(array $post): array
     if ($quantity === null || $quantity === 0) {
         $errors[] = '増減数は0以外の整数を入力してください。';
     }
+    if ($reason === null) {
+        $errors[] = '増減理由を選択してください。';
+    }
+    if ($facilityId === false) {
+        $errors[] = '対象施設等が正しくありません。';
+    } elseif ($reason !== null && $facilityId === null && in_array($reason, CONSUMABLE_REASONS_REQUIRING_FACILITY, true)) {
+        $errors[] = '「' . CONSUMABLE_REASON_LABELS[$reason] . '」を選択した場合は対象施設等を選択してください。';
+    }
     if ($transactionDate === false || $transactionDate === null) {
         $errors[] = '発生日の形式が正しくありません。';
+    }
+
+    // 理由が施設等に紐づかない場合（購入・廃棄・紛失）は施設等の指定を無視する
+    if ($reason !== null && !in_array($reason, CONSUMABLE_REASONS_REQUIRING_FACILITY, true)) {
+        $facilityId = null;
     }
 
     return [
         [
             'item_type' => $itemType,
             'quantity' => $quantity,
+            'reason' => $reason,
+            'facility_id' => $facilityId === false ? null : $facilityId,
             'transaction_date' => $transactionDate,
             'note' => $note,
         ],
@@ -60,18 +100,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $action = (string) ($_POST['action'] ?? '');
 
         if ($action === 'create' || $action === 'update') {
-            [$values, $parseErrors] = parse_consumable_stock_input($_POST);
+            [$values, $parseErrors] = parse_consumable_stock_input($_POST, $validFacilityIds);
 
             if (!empty($parseErrors)) {
                 $errorMessage = implode(' ', $parseErrors);
             } elseif ($action === 'create') {
                 $stmt = $pdo->prepare(
-                    'INSERT INTO consumable_stock_transactions (item_type, quantity, transaction_date, note, created_by)
-                     VALUES (:item_type, :quantity, :transaction_date, :note, :created_by)'
+                    'INSERT INTO consumable_stock_transactions (item_type, quantity, reason, facility_id, transaction_date, note, created_by)
+                     VALUES (:item_type, :quantity, :reason, :facility_id, :transaction_date, :note, :created_by)'
                 );
                 $stmt->execute([
                     ':item_type' => $values['item_type'],
                     ':quantity' => $values['quantity'],
+                    ':reason' => $values['reason'],
+                    ':facility_id' => $values['facility_id'],
                     ':transaction_date' => $values['transaction_date'],
                     ':note' => $values['note'],
                     ':created_by' => $admin['id'],
@@ -90,12 +132,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } else {
                     $updateStmt = $pdo->prepare(
                         'UPDATE consumable_stock_transactions
-                         SET item_type = :item_type, quantity = :quantity, transaction_date = :transaction_date, note = :note
+                         SET item_type = :item_type, quantity = :quantity, reason = :reason, facility_id = :facility_id,
+                             transaction_date = :transaction_date, note = :note
                          WHERE id = :id'
                     );
                     $updateStmt->execute([
                         ':item_type' => $values['item_type'],
                         ':quantity' => $values['quantity'],
+                        ':reason' => $values['reason'],
+                        ':facility_id' => $values['facility_id'],
                         ':transaction_date' => $values['transaction_date'],
                         ':note' => $values['note'],
                         ':id' => $recordId,
@@ -162,6 +207,8 @@ $formAction = 'create';
 $formId = null;
 $formItemType = '';
 $formQuantity = '';
+$formReason = '';
+$formFacilityId = '';
 $formTransactionDate = (new DateTime())->format('Y-m-d');
 $formNote = '';
 
@@ -170,6 +217,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formId = $formAction === 'update' ? (int) ($_POST['id'] ?? 0) : null;
     $formItemType = (string) ($_POST['item_type'] ?? '');
     $formQuantity = (string) ($_POST['quantity'] ?? '');
+    $formReason = (string) ($_POST['reason'] ?? '');
+    $formFacilityId = (string) ($_POST['facility_id'] ?? '');
     $formTransactionDate = (string) ($_POST['transaction_date'] ?? '');
     $formNote = (string) ($_POST['note'] ?? '');
 } elseif ($editingRecord !== null) {
@@ -177,17 +226,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formId = (int) $editingRecord['id'];
     $formItemType = $editingRecord['item_type'];
     $formQuantity = (string) $editingRecord['quantity'];
+    $formReason = $editingRecord['reason'];
+    $formFacilityId = $editingRecord['facility_id'] !== null ? (string) $editingRecord['facility_id'] : '';
     $formTransactionDate = $editingRecord['transaction_date'];
     $formNote = (string) ($editingRecord['note'] ?? '');
 }
 
 // ---- 一覧の取得 ----
 $listStmt = $pdo->query(
-    "SELECT t.id, t.item_type, t.quantity, t.transaction_date, t.note, t.canceled_at, t.created_at,
-            creator.name AS created_by_name, canceler.name AS canceled_by_name
+    "SELECT t.id, t.item_type, t.quantity, t.reason, t.facility_id, t.transaction_date, t.note, t.canceled_at, t.created_at,
+            creator.name AS created_by_name, canceler.name AS canceled_by_name, f.name AS facility_name
      FROM consumable_stock_transactions t
      INNER JOIN employees creator ON creator.id = t.created_by
      LEFT JOIN employees canceler ON canceler.id = t.canceled_by
+     LEFT JOIN facilities f ON f.id = t.facility_id
      ORDER BY t.transaction_date DESC, t.id DESC
      LIMIT 300"
 );
@@ -284,12 +336,37 @@ $records = $listStmt->fetchAll();
             </div>
 
             <div class="form-row">
+                <label for="reason">増減理由</label>
+                <select id="reason" name="reason" required>
+                    <option value="">選択してください</option>
+                    <?php foreach (CONSUMABLE_REASON_LABELS as $reasonKey => $reasonLabel): ?>
+                        <option value="<?= htmlspecialchars($reasonKey, ENT_QUOTES, 'UTF-8') ?>" <?= $formReason === $reasonKey ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($reasonLabel, ENT_QUOTES, 'UTF-8') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div class="form-row">
+                <label for="facility_id">対象施設等</label>
+                <select id="facility_id" name="facility_id">
+                    <option value="">（該当なし）</option>
+                    <?php foreach ($facilities as $facility): ?>
+                        <option value="<?= (int) $facility['id'] ?>" <?= $formFacilityId === (string) $facility['id'] ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <div style="font-size:0.8em;color:#777;">「施設等からの返却」「施設等への交付」を選んだ場合は必須です。</div>
+            </div>
+
+            <div class="form-row">
                 <label for="transaction_date">発生日</label>
                 <input type="date" id="transaction_date" name="transaction_date" value="<?= htmlspecialchars($formTransactionDate, ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
 
             <div class="form-row">
-                <label for="note">理由・備考</label>
+                <label for="note">備考</label>
                 <input type="text" id="note" name="note" maxlength="255" value="<?= htmlspecialchars($formNote, ENT_QUOTES, 'UTF-8') ?>">
             </div>
 
@@ -312,7 +389,9 @@ $records = $listStmt->fetchAll();
                     <th>発生日</th>
                     <th>品目</th>
                     <th>増減数</th>
-                    <th>理由・備考</th>
+                    <th>理由</th>
+                    <th>対象施設等</th>
+                    <th>備考</th>
                     <th>登録者</th>
                     <th>状態</th>
                     <th>操作</th>
@@ -327,6 +406,8 @@ $records = $listStmt->fetchAll();
                         <td class="<?= (int) $record['quantity'] >= 0 ? 'qty-positive' : 'qty-negative' ?>">
                             <?= (int) $record['quantity'] >= 0 ? '+' : '' ?><?= (int) $record['quantity'] ?>
                         </td>
+                        <td><?= htmlspecialchars(CONSUMABLE_REASON_LABELS[$record['reason']] ?? $record['reason'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= $record['facility_name'] !== null ? htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= $record['note'] !== null ? htmlspecialchars($record['note'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= htmlspecialchars($record['created_by_name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td>
