@@ -32,14 +32,14 @@ foreach ($totalsStmt->fetchAll() as $row) {
     $stockTotals[$row['item_type']] = (int) $row['total'];
 }
 
-// ---- 一覧の取得 ----
+// ---- 一覧の取得（取り消し済みの記録は従業員には表示しない） ----
 $listStmt = $pdo->query(
-    "SELECT t.id, t.item_type, t.quantity, t.reason, t.facility_id, t.transaction_date, t.note, t.canceled_at, t.created_at,
-            creator.name AS created_by_name, canceler.name AS canceled_by_name, f.name AS facility_name
+    "SELECT t.id, t.item_type, t.quantity, t.reason, t.facility_id, t.transaction_date, t.note, t.created_at,
+            creator.name AS created_by_name, f.name AS facility_name
      FROM consumable_stock_transactions t
      INNER JOIN employees creator ON creator.id = t.created_by
-     LEFT JOIN employees canceler ON canceler.id = t.canceled_by
      LEFT JOIN facilities f ON f.id = t.facility_id
+     WHERE t.canceled_at IS NULL
      ORDER BY t.transaction_date DESC, t.id DESC
      LIMIT 300"
 );
@@ -67,10 +67,6 @@ $records = $listStmt->fetchAll();
         table.records th { background: #f5f5f5; }
         .qty-positive { color: #1e7e34; }
         .qty-negative { color: #b3261e; }
-        .status-badge { display: inline-block; font-size: 0.8em; padding: 2px 8px; border-radius: 10px; }
-        .status-active { background: #e6f4ea; color: #1e7e34; }
-        .status-canceled { background: #eee; color: #777; }
-        tr.canceled-row { color: #999; }
     </style>
 </head>
 <body>
@@ -106,13 +102,11 @@ $records = $listStmt->fetchAll();
                     <th>対象施設等</th>
                     <th>備考</th>
                     <th>登録者</th>
-                    <th>状態</th>
                 </tr>
             </thead>
             <tbody>
                 <?php foreach ($records as $record): ?>
-                    <?php $isCanceled = $record['canceled_at'] !== null; ?>
-                    <tr class="<?= $isCanceled ? 'canceled-row' : '' ?>">
+                    <tr>
                         <td><?= htmlspecialchars($record['transaction_date'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(CONSUMABLE_ITEM_LABELS[$record['item_type']] ?? $record['item_type'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td class="<?= (int) $record['quantity'] >= 0 ? 'qty-positive' : 'qty-negative' ?>">
@@ -122,13 +116,6 @@ $records = $listStmt->fetchAll();
                         <td><?= $record['facility_name'] !== null ? htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= $record['note'] !== null ? htmlspecialchars($record['note'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= htmlspecialchars($record['created_by_name'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td>
-                            <?php if ($isCanceled): ?>
-                                <span class="status-badge status-canceled">取消済み</span>
-                            <?php else: ?>
-                                <span class="status-badge status-active">有効</span>
-                            <?php endif; ?>
-                        </td>
                     </tr>
                 <?php endforeach; ?>
             </tbody>
