@@ -90,7 +90,7 @@ function resolve_entry_employee_id($raw, int $default, array $validEmployeeIds)
 function insert_pickup(
     PDO $pdo,
     int $facilityId,
-    int $bagCount,
+    ?int $bagCount,
     string $pickupDate,
     string $pickupTime,
     int $employeeId,
@@ -519,13 +519,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $returnTime = resolve_entry_time($_POST['return_time'] ?? '', $nowTimeStr);
                     $returnEmployeeId = resolve_entry_employee_id($_POST['return_employee_id'] ?? '', (int) $staff['id'], $validEmployeeIds);
 
-                    $wantsPickup = $pickupBagCount !== null;
+                    $wantsPickup = $pickupBagCount !== null || $issuedBagOrange !== null || $issuedBagYellow !== null
+                        || $issuedBagBlue !== null || $issuedLaundryNetCount !== null;
                     $wantsReturn = !empty($returnCandidates) && $returnBagCount !== null;
 
                     if ($wantsReturn && !in_array($returnCycleId, $validReturnIds, true)) {
                         $errorMessage = '返却対象のサイクルが無効です（既に他の記録で更新された可能性があります）。もう一度やり直してください。';
                     } elseif (!$wantsPickup && !$wantsReturn) {
-                        $errorMessage = '集荷・返却のいずれかにリネン袋数を入力してください。';
+                        $errorMessage = '集荷・交付・返却のいずれかに数量を入力してください。';
                     } elseif ($wantsPickup && ($pickupDate === false || $pickupTime === false || $pickupEmployeeId === false)) {
                         $errorMessage = '集荷の日付・時間・担当者の入力内容が正しくありません。';
                     } elseif ($wantsReturn && ($returnDate === false || $returnTime === false || $returnEmployeeId === false)) {
@@ -560,7 +561,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $parts[] = '返却（' . $returnBagCount . '袋）';
                         }
                         if ($wantsPickup) {
-                            $parts[] = '集荷（' . $pickupBagCount . '袋）';
+                            $parts[] = $pickupBagCount !== null ? '集荷（' . $pickupBagCount . '袋）' : '集荷（交付のみ）';
                         }
                         set_flash('success', implode('と', $parts) . 'を記録しました（' . $facilityName . '）。');
                         header('Location: /staff/collection_entry.php');
