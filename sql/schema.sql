@@ -392,7 +392,7 @@ CREATE TABLE vehicle_alert_settings (
 -- 連絡掲示板（ツリー無し。注意事項周知のためのシンプルな掲示板）
 CREATE TABLE board_posts (
     id          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    board_type  ENUM('driver','laundry') NOT NULL COMMENT '掲示板種別（driver=集荷ドライバー連絡掲示板／laundry=洗濯スタッフ連絡掲示板）',
+    board_type  ENUM('all','driver','laundry') NOT NULL COMMENT '掲示板種別（all=全員用連絡掲示板／driver=集荷ドライバー連絡掲示板／laundry=洗濯スタッフ連絡掲示板）',
     content     TEXT NOT NULL COMMENT '本文',
     created_by  INT UNSIGNED NOT NULL COMMENT '投稿した従業員/管理者',
     updated_by  INT UNSIGNED NULL COMMENT '最終編集した従業員/管理者（未編集ならNULL）',
@@ -402,4 +402,4 @@ CREATE TABLE board_posts (
     CONSTRAINT fk_board_posts_created_by FOREIGN KEY (created_by) REFERENCES employees(id),
     CONSTRAINT fk_board_posts_updated_by FOREIGN KEY (updated_by) REFERENCES employees(id),
     INDEX idx_board_posts_type (board_type, deleted_at, created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='ダッシュボード掲示板（集荷ドライバー連絡／洗濯スタッフ連絡）。管理者・従業員どちらも追加・編集・削除可能';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='ダッシュボード掲示板（全員用／集荷ドライバー連絡／洗濯スタッフ連絡）。管理者・従業員どちらも追加・編集・削除可能';

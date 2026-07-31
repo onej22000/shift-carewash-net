@@ -1,6 +1,7 @@
 <?php
 
 const BOARD_TYPES = [
+    'all' => '全員用連絡掲示板',
     'driver' => '集荷ドライバー連絡掲示板',
     'laundry' => '洗濯スタッフ連絡掲示板',
 ];
