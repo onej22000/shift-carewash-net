@@ -32,23 +32,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $name = trim((string) ($_POST['name'] ?? ''));
             $hourlyWageWeekday = (int) ($_POST['hourly_wage_weekday'] ?? -1);
             $hourlyWageHoliday = (int) ($_POST['hourly_wage_holiday'] ?? -1);
+            $commuteAllowanceType = (string) ($_POST['commute_allowance_type'] ?? 'daily');
+            $commuteAllowanceAmount = (int) ($_POST['commute_allowance_amount'] ?? -1);
 
             if ($name === '') {
                 $errorMessage = '氏名を入力してください。';
             } elseif ($hourlyWageWeekday < 0 || $hourlyWageHoliday < 0) {
                 $errorMessage = '時給は0以上で入力してください。';
+            } elseif (!in_array($commuteAllowanceType, ['daily', 'monthly'], true) || $commuteAllowanceAmount < 0) {
+                $errorMessage = '交通費の区分・金額を正しく入力してください。';
             } else {
                 $inviteCode = generate_invite_code();
                 $expiresAt = (new DateTime('+7 days'))->format('Y-m-d H:i:s');
 
                 $stmt = $pdo->prepare(
-                    "INSERT INTO employees (name, role, hourly_wage_weekday, hourly_wage_holiday, status, invite_code, invite_code_expires_at)
-                     VALUES (:name, 'staff', :hourly_wage_weekday, :hourly_wage_holiday, 'invited', :invite_code, :expires_at)"
+                    "INSERT INTO employees (name, role, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount, status, invite_code, invite_code_expires_at)
+                     VALUES (:name, 'staff', :hourly_wage_weekday, :hourly_wage_holiday, :commute_allowance_type, :commute_allowance_amount, 'invited', :invite_code, :expires_at)"
                 );
                 $stmt->execute([
                     ':name' => $name,
                     ':hourly_wage_weekday' => $hourlyWageWeekday,
                     ':hourly_wage_holiday' => $hourlyWageHoliday,
+                    ':commute_allowance_type' => $commuteAllowanceType,
+                    ':commute_allowance_amount' => $commuteAllowanceAmount,
                     ':invite_code' => $inviteCode,
                     ':expires_at' => $expiresAt,
                 ]);
@@ -61,23 +67,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $employeeId = (int) ($_POST['employee_id'] ?? 0);
             $hourlyWageWeekday = (int) ($_POST['hourly_wage_weekday'] ?? -1);
             $hourlyWageHoliday = (int) ($_POST['hourly_wage_holiday'] ?? -1);
+            $commuteAllowanceType = (string) ($_POST['commute_allowance_type'] ?? 'daily');
+            $commuteAllowanceAmount = (int) ($_POST['commute_allowance_amount'] ?? -1);
 
             if ($hourlyWageWeekday < 0 || $hourlyWageHoliday < 0) {
                 $errorMessage = '時給は0以上で入力してください。';
+            } elseif (!in_array($commuteAllowanceType, ['daily', 'monthly'], true) || $commuteAllowanceAmount < 0) {
+                $errorMessage = '交通費の区分・金額を正しく入力してください。';
             } else {
                 $stmt = $pdo->prepare(
-                    "UPDATE employees SET hourly_wage_weekday = :hourly_wage_weekday, hourly_wage_holiday = :hourly_wage_holiday
+                    "UPDATE employees SET hourly_wage_weekday = :hourly_wage_weekday, hourly_wage_holiday = :hourly_wage_holiday,
+                     commute_allowance_type = :commute_allowance_type, commute_allowance_amount = :commute_allowance_amount
                      WHERE id = :id AND role = 'staff'"
                 );
                 $stmt->execute([
                     ':hourly_wage_weekday' => $hourlyWageWeekday,
                     ':hourly_wage_holiday' => $hourlyWageHoliday,
+                    ':commute_allowance_type' => $commuteAllowanceType,
+                    ':commute_allowance_amount' => $commuteAllowanceAmount,
                     ':id' => $employeeId,
                 ]);
-                set_flash('success', '時給を更新しました。');
+                set_flash('success', '時給・交通費を更新しました。');
                 header('Location: /admin/employees.php');
                 exit;
             }
+        } elseif ($action === 'add_allowance') {
+            $employeeId = (int) ($_POST['employee_id'] ?? 0);
+            $allowanceName = trim((string) ($_POST['allowance_name'] ?? ''));
+            $allowanceAmount = (int) ($_POST['allowance_amount'] ?? -1);
+
+            $empCheckStmt = $pdo->prepare("SELECT id FROM employees WHERE id = :id AND role = 'staff'");
+            $empCheckStmt->execute([':id' => $employeeId]);
+
+            if ($allowanceName === '') {
+                $errorMessage = '手当名を入力してください。';
+            } elseif ($allowanceAmount < 0) {
+                $errorMessage = '手当の月額は0以上で入力してください。';
+            } elseif ($empCheckStmt->fetch() === false) {
+                $errorMessage = '対象の従業員が見つかりません。';
+            } else {
+                $stmt = $pdo->prepare(
+                    'INSERT INTO employee_allowances (employee_id, name, monthly_amount) VALUES (:employee_id, :name, :monthly_amount)'
+                );
+                $stmt->execute([
+                    ':employee_id' => $employeeId,
+                    ':name' => $allowanceName,
+                    ':monthly_amount' => $allowanceAmount,
+                ]);
+                set_flash('success', '手当を追加しました。');
+                header('Location: /admin/employees.php');
+                exit;
+            }
+        } elseif ($action === 'delete_allowance') {
+            $allowanceId = (int) ($_POST['allowance_id'] ?? 0);
+            $stmt = $pdo->prepare(
+                'DELETE ea FROM employee_allowances ea INNER JOIN employees e ON e.id = ea.employee_id
+                 WHERE ea.id = :id AND e.role = \'staff\''
+            );
+            $stmt->execute([':id' => $allowanceId]);
+            set_flash('success', '手当を削除しました。');
+            header('Location: /admin/employees.php');
+            exit;
         } elseif ($action === 'disable') {
             $employeeId = (int) ($_POST['employee_id'] ?? 0);
             $stmt = $pdo->prepare("UPDATE employees SET status = 'disabled' WHERE id = :id AND role = 'staff'");
@@ -143,12 +193,17 @@ if (isset($_SESSION['temp_pw_display'])) {
 }
 
 $employeesStmt = $pdo->query(
-    "SELECT id, name, login_id, hourly_wage_weekday, hourly_wage_holiday, status, invite_code, invite_code_expires_at
+    "SELECT id, name, login_id, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount, status, invite_code, invite_code_expires_at
      FROM employees
      WHERE role = 'staff'
      ORDER BY FIELD(status, 'invited', 'active', 'disabled'), name"
 );
 $employees = $employeesStmt->fetchAll();
+
+$allowancesByEmployee = [];
+foreach ($employees as $employee) {
+    $allowancesByEmployee[(int) $employee['id']] = get_employee_allowances($pdo, (int) $employee['id']);
+}
 
 $statusLabels = [
     'invited' => '招待中',
@@ -247,6 +302,19 @@ $nowStr = (new DateTime())->format('Y-m-d H:i:s');
                 <input type="number" id="hourly_wage_holiday" name="hourly_wage_holiday" min="0" step="1" required>
             </div>
 
+            <div class="form-row">
+                <label for="commute_allowance_type">交通費区分</label>
+                <select id="commute_allowance_type" name="commute_allowance_type">
+                    <option value="daily">日額（1出勤あたり）</option>
+                    <option value="monthly">月額（固定）</option>
+                </select>
+            </div>
+
+            <div class="form-row">
+                <label for="commute_allowance_amount">交通費金額（円）</label>
+                <input type="number" id="commute_allowance_amount" name="commute_allowance_amount" min="0" step="1" value="0" required>
+            </div>
+
             <button type="submit">登録して招待コードを発行</button>
         </form>
     </fieldset>
@@ -265,12 +333,15 @@ $nowStr = (new DateTime())->format('Y-m-d H:i:s');
                     <th>ログインID</th>
                     <th>平日時給</th>
                     <th>土日祝時給</th>
+                    <th>交通費</th>
+                    <th>手当</th>
                     <th>状態</th>
                     <th>操作</th>
                 </tr>
             </thead>
             <tbody>
                 <?php foreach ($employees as $employee): ?>
+                    <?php $employeeAllowances = $allowancesByEmployee[(int) $employee['id']] ?? []; ?>
                     <tr>
                         <td><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td>
@@ -282,6 +353,38 @@ $nowStr = (new DateTime())->format('Y-m-d H:i:s');
                         </td>
                         <td><?= number_format((int) $employee['hourly_wage_weekday']) ?>円</td>
                         <td><?= number_format((int) $employee['hourly_wage_holiday']) ?>円</td>
+                        <td>
+                            <?= $employee['commute_allowance_type'] === 'monthly' ? '月額' : '日額' ?>
+                            <?= number_format((int) $employee['commute_allowance_amount']) ?>円
+                        </td>
+                        <td>
+                            <?php if (empty($employeeAllowances)): ?>
+                                <span style="color:#aaa;">なし</span>
+                            <?php else: ?>
+                                <ul style="margin:0; padding-left:1.1em;">
+                                <?php foreach ($employeeAllowances as $allowance): ?>
+                                    <li>
+                                        <?= htmlspecialchars($allowance['name'], ENT_QUOTES, 'UTF-8') ?>
+                                        <?= number_format((int) $allowance['monthly_amount']) ?>円/月
+                                        <form method="post" action="/admin/employees.php" class="inline-form" onsubmit="return confirm('この手当を削除しますか？');">
+                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                            <input type="hidden" name="action" value="delete_allowance">
+                                            <input type="hidden" name="allowance_id" value="<?= (int) $allowance['id'] ?>">
+                                            <button type="submit" style="font-size:0.8em;">削除</button>
+                                        </form>
+                                    </li>
+                                <?php endforeach; ?>
+                                </ul>
+                            <?php endif; ?>
+                            <form method="post" action="/admin/employees.php" class="inline-form" style="margin-top:4px;">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                <input type="hidden" name="action" value="add_allowance">
+                                <input type="hidden" name="employee_id" value="<?= (int) $employee['id'] ?>">
+                                <input type="text" name="allowance_name" placeholder="手当名" maxlength="100" style="width:90px;" required>
+                                <input type="number" name="allowance_amount" placeholder="月額" min="0" step="1" style="width:70px;" required>円
+                                <button type="submit" style="font-size:0.85em;">+ 追加</button>
+                            </form>
+                        </td>
                         <td>
                             <span class="status-badge status-<?= htmlspecialchars($employee['status'], ENT_QUOTES, 'UTF-8') ?>">
                                 <?= htmlspecialchars($statusLabels[$employee['status']] ?? $employee['status'], ENT_QUOTES, 'UTF-8') ?>
@@ -308,7 +411,14 @@ $nowStr = (new DateTime())->format('Y-m-d H:i:s');
                                 <input type="hidden" name="employee_id" value="<?= (int) $employee['id'] ?>">
                                 平日<input type="number" name="hourly_wage_weekday" min="0" step="1" value="<?= (int) $employee['hourly_wage_weekday'] ?>">円
                                 土日祝<input type="number" name="hourly_wage_holiday" min="0" step="1" value="<?= (int) $employee['hourly_wage_holiday'] ?>">円
-                                <button type="submit">時給変更</button>
+                                <br>
+                                交通費
+                                <select name="commute_allowance_type">
+                                    <option value="daily" <?= $employee['commute_allowance_type'] === 'daily' ? 'selected' : '' ?>>日額</option>
+                                    <option value="monthly" <?= $employee['commute_allowance_type'] === 'monthly' ? 'selected' : '' ?>>月額</option>
+                                </select>
+                                <input type="number" name="commute_allowance_amount" min="0" step="1" value="<?= (int) $employee['commute_allowance_amount'] ?>">円
+                                <button type="submit">時給・交通費変更</button>
                             </form>
 
                             <?php if ($employee['status'] === 'active' && $employee['login_id'] !== null): ?>

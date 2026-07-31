@@ -41,7 +41,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $postYearMonth = (string) ($_POST['year_month'] ?? '');
 
         if (($action === 'confirm' || $action === 'reconfirm') && preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $postYearMonth)) {
-            $empStmt = $pdo->prepare("SELECT id, name, hourly_wage_weekday, hourly_wage_holiday FROM employees WHERE id = :id AND role = 'staff'");
+            $empStmt = $pdo->prepare("SELECT id, name, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount FROM employees WHERE id = :id AND role = 'staff'");
             $empStmt->execute([':id' => $employeeId]);
             $employee = $empStmt->fetch();
 
@@ -50,6 +50,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $summary = calc_wage_summary($pdo, $employee, $postYearMonth);
                 $totalWage = $summary['grand_total_wage'];
+                $commuteAllowanceTotal = calc_commute_allowance_total($employee, $summary['attendance_days']);
+                $allowanceTotal = sum_allowance_amounts(get_employee_allowances($pdo, $employeeId));
 
                 $existingStmt = $pdo->prepare(
                     'SELECT id FROM monthly_wages WHERE employee_id = :employee_id AND `year_month` = :year_month'
@@ -73,6 +75,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                  weekday_wage = :weekday_wage, weekday_overtime_wage = :weekday_overtime_wage,
                                  holiday_wage = :holiday_wage, holiday_overtime_wage = :holiday_overtime_wage,
                                  night_wage = :night_wage,
+                                 commute_allowance_type = :commute_allowance_type, commute_allowance_amount = :commute_allowance_amount,
+                                 commute_allowance_total = :commute_allowance_total, allowance_total = :allowance_total,
                                  confirmed_at = :confirmed_at, confirmed_by = :confirmed_by
                              WHERE id = :id'
                         );
@@ -91,6 +95,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ':holiday_wage' => $summary['holiday_wage'],
                             ':holiday_overtime_wage' => $summary['holiday_overtime_wage'],
                             ':night_wage' => $summary['night_wage'],
+                            ':commute_allowance_type' => $employee['commute_allowance_type'],
+                            ':commute_allowance_amount' => (int) $employee['commute_allowance_amount'],
+                            ':commute_allowance_total' => $commuteAllowanceTotal,
+                            ':allowance_total' => $allowanceTotal,
                             ':confirmed_at' => $confirmedAt,
                             ':confirmed_by' => $admin['id'],
                             ':id' => $existing['id'],
@@ -104,6 +112,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                  night_minutes,
                                  weekday_wage, weekday_overtime_wage, holiday_wage, holiday_overtime_wage,
                                  night_wage,
+                                 commute_allowance_type, commute_allowance_amount, commute_allowance_total, allowance_total,
                                  confirmed_at, confirmed_by
                              )
                              VALUES (
@@ -112,6 +121,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                  :night_minutes,
                                  :weekday_wage, :weekday_overtime_wage, :holiday_wage, :holiday_overtime_wage,
                                  :night_wage,
+                                 :commute_allowance_type, :commute_allowance_amount, :commute_allowance_total, :allowance_total,
                                  :confirmed_at, :confirmed_by
                              )'
                         );
@@ -132,6 +142,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ':holiday_wage' => $summary['holiday_wage'],
                             ':holiday_overtime_wage' => $summary['holiday_overtime_wage'],
                             ':night_wage' => $summary['night_wage'],
+                            ':commute_allowance_type' => $employee['commute_allowance_type'],
+                            ':commute_allowance_amount' => (int) $employee['commute_allowance_amount'],
+                            ':commute_allowance_total' => $commuteAllowanceTotal,
+                            ':allowance_total' => $allowanceTotal,
                             ':confirmed_at' => $confirmedAt,
                             ':confirmed_by' => $admin['id'],
                         ]);
@@ -159,14 +173,15 @@ if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $yearMonth)) {
 $prevMonth = (DateTime::createFromFormat('Y-m-d', $yearMonth . '-01'))->modify('-1 month')->format('Y-m');
 $nextMonth = (DateTime::createFromFormat('Y-m-d', $yearMonth . '-01'))->modify('+1 month')->format('Y-m');
 
-$employeesStmt = $pdo->query("SELECT id, name, hourly_wage_weekday, hourly_wage_holiday, status FROM employees WHERE role = 'staff' ORDER BY name");
+$employeesStmt = $pdo->query("SELECT id, name, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount, status FROM employees WHERE role = 'staff' ORDER BY name");
 $employees = $employeesStmt->fetchAll();
 
 $confirmedStmt = $pdo->prepare(
     'SELECT employee_id, total_work_minutes, hourly_wage_weekday, hourly_wage_holiday, total_wage,
             weekday_regular_minutes, weekday_overtime_minutes, holiday_regular_minutes, holiday_overtime_minutes,
             night_minutes,
-            weekday_wage, weekday_overtime_wage, holiday_wage, holiday_overtime_wage, night_wage, confirmed_at
+            weekday_wage, weekday_overtime_wage, holiday_wage, holiday_overtime_wage, night_wage,
+            commute_allowance_type, commute_allowance_amount, commute_allowance_total, allowance_total, confirmed_at
      FROM monthly_wages WHERE `year_month` = :year_month'
 );
 $confirmedStmt->execute([':year_month' => $yearMonth]);
@@ -176,8 +191,15 @@ foreach ($confirmedStmt->fetchAll() as $row) {
 }
 
 $summaries = [];
+$allowancesByEmployee = [];
+$commuteTotalsByEmployee = [];
+$allowanceTotalsByEmployee = [];
 foreach ($employees as $employee) {
-    $summaries[(int) $employee['id']] = calc_wage_summary($pdo, $employee, $yearMonth);
+    $employeeId = (int) $employee['id'];
+    $summaries[$employeeId] = calc_wage_summary($pdo, $employee, $yearMonth);
+    $allowancesByEmployee[$employeeId] = get_employee_allowances($pdo, $employeeId);
+    $commuteTotalsByEmployee[$employeeId] = calc_commute_allowance_total($employee, $summaries[$employeeId]['attendance_days']);
+    $allowanceTotalsByEmployee[$employeeId] = sum_allowance_amounts($allowancesByEmployee[$employeeId]);
 }
 
 $selectedEmployeeId = isset($_GET['employee_id']) ? (int) $_GET['employee_id'] : null;
@@ -262,6 +284,8 @@ foreach ($employees as $employee) {
                     <th>基本給</th>
                     <th>残業手当</th>
                     <th>深夜手当</th>
+                    <th>交通費</th>
+                    <th>手当</th>
                     <th>合計</th>
                     <th>状態</th>
                     <th>操作</th>
@@ -273,10 +297,8 @@ foreach ($employees as $employee) {
                     $employeeId = (int) $employee['id'];
                     $summary = $summaries[$employeeId];
                     $confirmed = $confirmedByEmployee[$employeeId] ?? null;
-                    // 通勤手当・手当その他は従業員マスタに項目が無いため、現時点では常に0円として扱う
-                    // （表示列からは外すが、合計への合算はこれまで通り行う）
-                    $commutingAllowance = 0;
-                    $otherAllowance = 0;
+                    $commutingAllowance = $commuteTotalsByEmployee[$employeeId];
+                    $otherAllowance = $allowanceTotalsByEmployee[$employeeId];
                     $provisionalTotal = $summary['grand_total_wage'] + $commutingAllowance + $otherAllowance;
                     ?>
                     <tr>
@@ -291,7 +313,21 @@ foreach ($employees as $employee) {
                         <td><?= number_format($summary['night_wage']) ?>円</td>
                         <td>
                             <?php if ($confirmed !== null): ?>
-                                <?= number_format((int) $confirmed['total_wage'] + $commutingAllowance + $otherAllowance) ?>円
+                                <?= number_format((int) $confirmed['commute_allowance_total']) ?>円
+                            <?php else: ?>
+                                <?= number_format($commutingAllowance) ?>円
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <?php if ($confirmed !== null): ?>
+                                <?= number_format((int) $confirmed['allowance_total']) ?>円
+                            <?php else: ?>
+                                <?= number_format($otherAllowance) ?>円
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <?php if ($confirmed !== null): ?>
+                                <?= number_format((int) $confirmed['total_wage'] + (int) $confirmed['commute_allowance_total'] + (int) $confirmed['allowance_total']) ?>円
                             <?php else: ?>
                                 <?= number_format($provisionalTotal) ?>円
                             <?php endif; ?>
@@ -409,6 +445,10 @@ foreach ($employees as $employee) {
     $summary = $summaries[$employeeId];
     $confirmed = $confirmedByEmployee[$employeeId] ?? null;
     $provisionalWage = $summary['grand_total_wage'];
+    $detailCommuteTotal = $commuteTotalsByEmployee[$employeeId];
+    $detailAllowanceTotal = $allowanceTotalsByEmployee[$employeeId];
+    $detailAllowances = $allowancesByEmployee[$employeeId];
+    $provisionalGrandTotal = $provisionalWage + $detailCommuteTotal + $detailAllowanceTotal;
     [$detailMonthStart, $detailMonthEnd] = get_month_range($yearMonth);
     $categoryMinutes = calc_category_minutes($pdo, $employeeId, $detailMonthStart, $detailMonthEnd);
     ?>
@@ -482,6 +522,49 @@ foreach ($employees as $employee) {
         </table>
         <p class="notice">深夜手当は上記の勤務時間・残業時間に含まれる深夜（22:00〜翌5:00）分に対する割増分のみを別建てで加算したものです（二重計上ではありません）。</p>
 
+        <h3>交通費・手当（基本給とは別建て）</h3>
+        <table class="wages">
+            <thead>
+                <tr>
+                    <th>項目</th>
+                    <th>内容</th>
+                    <th>金額</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>交通費</td>
+                    <td>
+                        <?php if ($selectedEmployee['commute_allowance_type'] === 'monthly'): ?>
+                            月額 <?= number_format((int) $selectedEmployee['commute_allowance_amount']) ?>円（固定）
+                        <?php else: ?>
+                            日額 <?= number_format((int) $selectedEmployee['commute_allowance_amount']) ?>円 × 出勤<?= $summary['attendance_days'] ?>日
+                        <?php endif; ?>
+                    </td>
+                    <td><?= number_format($detailCommuteTotal) ?>円</td>
+                </tr>
+                <?php if (empty($detailAllowances)): ?>
+                    <tr>
+                        <td>手当</td>
+                        <td>登録なし</td>
+                        <td>0円</td>
+                    </tr>
+                <?php else: ?>
+                    <?php foreach ($detailAllowances as $allowance): ?>
+                        <tr>
+                            <td>手当</td>
+                            <td><?= htmlspecialchars($allowance['name'], ENT_QUOTES, 'UTF-8') ?>（月額固定）</td>
+                            <td><?= number_format((int) $allowance['monthly_amount']) ?>円</td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+                <tr>
+                    <td colspan="2"><strong>交通費・手当 合計</strong></td>
+                    <td><strong><?= number_format($detailCommuteTotal + $detailAllowanceTotal) ?>円</strong></td>
+                </tr>
+            </tbody>
+        </table>
+
         <h3>業務種別ごとの時間（参考値・都度計算）</h3>
         <p class="notice">1シフトに複数の業務種別が選択されている場合は、優先順位（店舗＞洗濯代行＞集荷）で1つの種別にまとめて計上しています。同日に複数シフトがある場合は、各シフトの予定時間比率で実働時間を按分しています。シフトのない予定外出勤の時間はどの種別にも計上されません。この内訳は月次確定の対象外で、常に最新データから計算した参考値です。</p>
         <table class="wages">
@@ -502,7 +585,10 @@ foreach ($employees as $employee) {
         </table>
 
         <?php if ($confirmed !== null): ?>
-            <p class="amount confirmed">確定支給額: <?= number_format((int) $confirmed['total_wage']) ?>円</p>
+            <?php $confirmedGrandTotal = (int) $confirmed['total_wage'] + (int) $confirmed['commute_allowance_total'] + (int) $confirmed['allowance_total']; ?>
+            <p>確定支給額（時給分・基本給+残業+深夜）: <?= number_format((int) $confirmed['total_wage']) ?>円</p>
+            <p>確定時の交通費: <?= number_format((int) $confirmed['commute_allowance_total']) ?>円 / 確定時の手当合計: <?= number_format((int) $confirmed['allowance_total']) ?>円</p>
+            <p class="amount confirmed">確定支給合計額（時給分+交通費+手当）: <?= number_format($confirmedGrandTotal) ?>円</p>
             <p class="confirmed-meta">
                 確定日時: <?= htmlspecialchars($confirmed['confirmed_at'], ENT_QUOTES, 'UTF-8') ?> /
                 確定時の実働: <?= htmlspecialchars(format_minutes_as_hours((int) $confirmed['total_work_minutes']), ENT_QUOTES, 'UTF-8') ?> /
@@ -520,8 +606,12 @@ foreach ($employees as $employee) {
             <?php if ((int) $confirmed['total_work_minutes'] !== $summary['total_minutes']
                 || (int) $confirmed['night_minutes'] !== $summary['night_minutes']
                 || (int) $confirmed['hourly_wage_weekday'] !== (int) $selectedEmployee['hourly_wage_weekday']
-                || (int) $confirmed['hourly_wage_holiday'] !== (int) $selectedEmployee['hourly_wage_holiday']): ?>
-                <p class="notice">確定後にシフト・打刻・時給の変更があり、現在の実績（暫定<?= number_format($provisionalWage) ?>円）と確定済みの金額が一致していません。必要であれば再確定してください。</p>
+                || (int) $confirmed['hourly_wage_holiday'] !== (int) $selectedEmployee['hourly_wage_holiday']
+                || (int) $confirmed['commute_allowance_total'] !== $detailCommuteTotal
+                || $confirmed['commute_allowance_type'] !== $selectedEmployee['commute_allowance_type']
+                || (int) $confirmed['commute_allowance_amount'] !== (int) $selectedEmployee['commute_allowance_amount']
+                || (int) $confirmed['allowance_total'] !== $detailAllowanceTotal): ?>
+                <p class="notice">確定後にシフト・打刻・時給・交通費・手当の変更があり、現在の実績（暫定<?= number_format($provisionalGrandTotal) ?>円）と確定済みの金額が一致していません。必要であれば再確定してください。</p>
             <?php endif; ?>
 
             <form method="post" action="/admin/wages.php" onsubmit="return confirm('確定済みの金額を現在の実績で上書きします。よろしいですか？');">
@@ -532,7 +622,9 @@ foreach ($employees as $employee) {
                 <button type="submit">再確定する</button>
             </form>
         <?php else: ?>
-            <p class="amount provisional">暫定支給額: <?= number_format($provisionalWage) ?>円（未確定）</p>
+            <p>暫定支給額（時給分・基本給+残業+深夜）: <?= number_format($provisionalWage) ?>円</p>
+            <p>交通費: <?= number_format($detailCommuteTotal) ?>円 / 手当合計: <?= number_format($detailAllowanceTotal) ?>円</p>
+            <p class="amount provisional">暫定支給合計額（時給分+交通費+手当）: <?= number_format($provisionalGrandTotal) ?>円（未確定）</p>
 
             <form method="post" action="/admin/wages.php">
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">

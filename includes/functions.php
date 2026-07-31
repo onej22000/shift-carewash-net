@@ -489,6 +489,40 @@ function calc_wage_breakdown_from_daily_minutes(PDO $pdo, array $employee, array
     ];
 }
 
+/**
+ * 交通費の月間計上額を計算する。
+ * 日額区分: その月の実際の出勤日数（attendanceの日数）× 日額
+ * 月額区分: 出勤日数に関わらず固定額
+ */
+function calc_commute_allowance_total(array $employee, int $attendanceDays): int
+{
+    $amount = (int) ($employee['commute_allowance_amount'] ?? 0);
+
+    if (($employee['commute_allowance_type'] ?? 'daily') === 'monthly') {
+        return $amount;
+    }
+
+    return $amount * $attendanceDays;
+}
+
+function get_employee_allowances(PDO $pdo, int $employeeId): array
+{
+    $stmt = $pdo->prepare(
+        'SELECT id, name, monthly_amount FROM employee_allowances WHERE employee_id = :employee_id ORDER BY id'
+    );
+    $stmt->execute([':employee_id' => $employeeId]);
+    return $stmt->fetchAll();
+}
+
+function sum_allowance_amounts(array $allowances): int
+{
+    $total = 0;
+    foreach ($allowances as $allowance) {
+        $total += (int) $allowance['monthly_amount'];
+    }
+    return $total;
+}
+
 const MONTH_END_CORRECTION_EARLY_CLOCK_IN_GRACE_MINUTES = 5;
 
 /**

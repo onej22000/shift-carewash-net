@@ -11,6 +11,8 @@ CREATE TABLE employees (
     password_hash          VARCHAR(255) NULL COMMENT 'パスワードハッシュ',
     hourly_wage_weekday    INT UNSIGNED NOT NULL COMMENT '平日時給（円）',
     hourly_wage_holiday    INT UNSIGNED NOT NULL COMMENT '土日祝時給（円）',
+    commute_allowance_type   ENUM('daily','monthly') NOT NULL DEFAULT 'daily' COMMENT '交通費区分（日額/月額）',
+    commute_allowance_amount INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '交通費金額（円、日額区分なら1出勤あたり、月額区分なら固定月額）',
     status                 ENUM('invited','active','disabled') NOT NULL DEFAULT 'invited' COMMENT '登録状態',
     invite_code            VARCHAR(20)  NULL UNIQUE COMMENT '招待コード（本登録完了でNULLに戻す）',
     invite_code_expires_at DATETIME     NULL COMMENT '招待コード有効期限',
@@ -18,6 +20,17 @@ CREATE TABLE employees (
     created_at             DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at             DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='従業員・管理者アカウント';
+
+CREATE TABLE employee_allowances (
+    id             INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    employee_id    INT UNSIGNED NOT NULL COMMENT '従業員ID',
+    name           VARCHAR(100) NOT NULL COMMENT '手当名（自由入力、例: 役職手当）',
+    monthly_amount INT UNSIGNED NOT NULL COMMENT '月額（円、勤務日数に関わらず固定）',
+    created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_employee_allowances_employee FOREIGN KEY (employee_id) REFERENCES employees(id),
+    INDEX idx_employee_allowances_employee (employee_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='従業員ごとの手当（1人につき複数登録可、月額固定・出勤日数に関わらず計上）';
 
 CREATE TABLE holidays (
     `date` DATE PRIMARY KEY COMMENT '祝日日付',
@@ -177,6 +190,10 @@ CREATE TABLE monthly_wages (
     holiday_wage             INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '休日所定内賃金（円）',
     holiday_overtime_wage    INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '休日残業賃金（円、休日時給×1.25）',
     night_wage               INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '深夜手当（円、深夜労働時間に対する割増分のみ。基本給・残業手当とは別建て）',
+    commute_allowance_type   ENUM('daily','monthly') NOT NULL DEFAULT 'daily' COMMENT '確定時点の交通費区分',
+    commute_allowance_amount INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '確定時点の交通費設定額（円）',
+    commute_allowance_total  INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '確定時点の交通費計上額（円、日額区分なら出勤日数×金額）',
+    allowance_total          INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '確定時点の手当合計額（円、employee_allowancesの月額合算）',
     confirmed_at             DATETIME     NOT NULL COMMENT '締め処理を実行した日時',
     confirmed_by             INT UNSIGNED NULL COMMENT '締め処理を行った管理者のemployee_id',
     created_at               DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
