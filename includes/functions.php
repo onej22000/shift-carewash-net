@@ -1,5 +1,10 @@
 <?php
 
+const BOARD_TYPES = [
+    'driver' => '集荷ドライバー連絡掲示板',
+    'laundry' => '洗濯スタッフ連絡掲示板',
+];
+
 const SHIFT_CATEGORIES = ['店舗', '洗濯代行', '集荷']; // 優先順位順（業務種別按分で使用）
 const CATEGORY_COLORS = [
     '店舗' => '#0b5ed7',
@@ -1575,4 +1580,24 @@ function calc_vehicle_alerts(PDO $pdo, string $today): array
     }
 
     return $alerts;
+}
+
+/**
+ * 指定した掲示板種別の投稿一覧を新しい順で取得する。管理者・従業員どちらも投稿者になりうるため
+ * employeesを2回（投稿者・最終編集者）JOINする。
+ */
+function fetch_board_posts(PDO $pdo, string $boardType): array
+{
+    $stmt = $pdo->prepare(
+        'SELECT p.id, p.content, p.created_at, p.updated_at,
+                creator.name AS created_by_name, editor.name AS updated_by_name
+         FROM board_posts p
+         INNER JOIN employees creator ON creator.id = p.created_by
+         LEFT JOIN employees editor ON editor.id = p.updated_by
+         WHERE p.board_type = :board_type AND p.deleted_at IS NULL
+         ORDER BY p.created_at DESC, p.id DESC'
+    );
+    $stmt->execute([':board_type' => $boardType]);
+
+    return $stmt->fetchAll();
 }
