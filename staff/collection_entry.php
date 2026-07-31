@@ -609,6 +609,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $deleteStmt = $pdo->prepare('UPDATE collection_cycles SET deleted_at = :deleted_at WHERE id = :id');
                     $deleteStmt->execute([':deleted_at' => (new DateTime())->format('Y-m-d H:i:s'), ':id' => $cycleId]);
 
+                    reverse_collection_cycle_facility_issuance($pdo, $cycleId);
                     cancel_collection_cycle_issuance_stock_transactions($pdo, $cycleId, $staff['id']);
 
                     $pdo->commit();

@@ -6,6 +6,14 @@ const BOARD_TYPES = [
     'laundry' => '洗濯スタッフ連絡掲示板',
 ];
 
+// consumable_stock_transactions.item_type → facilities側の交付累計カラム名。
+// linen_bag_blueはfacilitiesに対応カラムが無いため意図的に含めない。
+const ITEM_TYPE_TO_FACILITY_ISSUED_COLUMN = [
+    'linen_bag_orange' => 'issued_linen_bag_orange',
+    'linen_bag_yellow' => 'issued_linen_bag_yellow',
+    'laundry_net' => 'issued_laundry_net_count',
+];
+
 const SHIFT_CATEGORIES = ['店舗', '洗濯代行', '集荷']; // 優先順位順（業務種別按分で使用）
 const CATEGORY_COLORS = [
     '店舗' => '#0b5ed7',
@@ -1400,6 +1408,10 @@ function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, arr
  * 削除→作り直しのたびに±が二重に積み上がり相殺してしまうバグの原因になっていたため）。
  * 交付数を訂正して増やした場合は、その増加分だけ追加で減産する。減らした場合は
  * 何もしないため、必要なら消耗品在庫管理画面から手動で調整する。
+ *
+ * 同じ増加分だけ、施設マスタ（facilities）側の交付累計カラムにも加算する
+ * （自社在庫は減、施設側在庫は増）。青（linen_bag_blue）はfacilitiesに対応カラムが
+ * 無いため対象外。
  */
 function record_collection_cycle_issuance_stock_adjustment(
     PDO $pdo,
@@ -1443,6 +1455,50 @@ function record_collection_cycle_issuance_stock_adjustment(
             ':note' => $note,
             ':created_by' => $createdBy,
         ]);
+
+        $facilityColumn = ITEM_TYPE_TO_FACILITY_ISSUED_COLUMN[$itemType] ?? null;
+        if ($facilityColumn !== null) {
+            $facilityStmt = $pdo->prepare(
+                "UPDATE facilities SET {$facilityColumn} = COALESCE({$facilityColumn}, 0) + :increase WHERE id = :facility_id"
+            );
+            $facilityStmt->execute([':increase' => $increase, ':facility_id' => $facilityId]);
+        }
+    }
+}
+
+/**
+ * 集荷・配送記録（collection_cycles）が削除された際、その記録がfacilities.issued_*に
+ * 加算した分を差し引く。consumable_stock_transactions側の「まだ取り消されていない
+ * この記録由来の交付取引」を(item_type, facility_id)単位で合算して使うため、
+ * facility_idが編集で変更されていた場合でも当時加算した施設に対して正しく戻せる。
+ * 呼び出しは必ずcancel_collection_cycle_issuance_stock_transactions()より前に行うこと
+ * （取消後はcanceled_at IS NOT NULLとなり合計から漏れるため）。
+ */
+function reverse_collection_cycle_facility_issuance(PDO $pdo, int $collectionCycleId): void
+{
+    $sumStmt = $pdo->prepare(
+        "SELECT item_type, facility_id, SUM(quantity) AS total_quantity
+         FROM consumable_stock_transactions
+         WHERE collection_cycle_id = :collection_cycle_id AND reason = 'issuance_to_facility' AND canceled_at IS NULL
+         GROUP BY item_type, facility_id"
+    );
+    $sumStmt->execute([':collection_cycle_id' => $collectionCycleId]);
+
+    foreach ($sumStmt->fetchAll() as $row) {
+        $facilityColumn = ITEM_TYPE_TO_FACILITY_ISSUED_COLUMN[$row['item_type']] ?? null;
+        if ($facilityColumn === null) {
+            continue;
+        }
+        // quantityは交付分がマイナスで記録されているため、符号反転すると加算した増加分になる。
+        $increaseToReverse = -(int) $row['total_quantity'];
+        if ($increaseToReverse <= 0) {
+            continue;
+        }
+
+        $updateStmt = $pdo->prepare(
+            "UPDATE facilities SET {$facilityColumn} = GREATEST(0, COALESCE({$facilityColumn}, 0) - :decrease) WHERE id = :facility_id"
+        );
+        $updateStmt->execute([':decrease' => $increaseToReverse, ':facility_id' => (int) $row['facility_id']]);
     }
 }
 
