@@ -97,7 +97,7 @@ $logs = $logsStmt->fetchAll();
     <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん（管理者） | <a href="/admin/work_stage_records.php">作業実績の管理</a> | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a></nav>
 </header>
 
-<p class="notice">管理者による作業実績（集荷・洗濯・乾燥・畳み）の追加・修正・削除履歴です（直近200件）。</p>
+<p class="notice">管理者による作業実績（集荷・洗濯代行）の追加・修正・削除履歴です（直近200件）。洗濯・乾燥・畳みは2026-08-06に「洗濯」1工程へ統合しましたが、統合前の記録は乾燥・畳みのまま表示されます。</p>
 
 <?php if (empty($logs)): ?>
     <p class="notice">修正履歴はまだありません。</p>

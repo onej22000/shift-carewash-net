@@ -170,7 +170,7 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
     </a>
     <a class="nav-card" href="/admin/work_speed.php">
         <h2>作業速度分析</h2>
-        <p>洗濯・乾燥・畳みの1人あたり所要時間を従業員別・施設別に確認します。</p>
+        <p>洗濯代行の1人あたり所要時間を従業員別・施設別に確認します。</p>
     </a>
     <a class="nav-card" href="/admin/attendance_edit_logs.php">
         <h2>打刻修正履歴</h2>
@@ -186,7 +186,7 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
     </a>
     <a class="nav-card" href="/admin/work_stage_records.php">
         <h2>作業実績の管理</h2>
-        <p>集荷・洗濯・乾燥・畳みの個別記録を一覧・登録・修正・削除します。</p>
+        <p>集荷・洗濯代行の個別記録を一覧・登録・修正・削除します。</p>
     </a>
     <a class="nav-card" href="/admin/work_stage_record_edit_logs.php">
         <h2>作業実績修正履歴</h2>
@@ -205,8 +205,8 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
         <p>集荷・配送記録の日時・担当者・場所から、施設間の移動時間を休憩控除の上で算出します。</p>
     </a>
     <a class="nav-card" href="/admin/collection_headcount.php">
-        <h2>集荷人数の確認</h2>
-        <p>到着済みリネン袋の中身（人数）を確認・登録し、既存の確認記録を修正・削除します。</p>
+        <h2>到着リネン袋の確認・返却リネン袋数の登録</h2>
+        <p>到着済みリネン袋の中身（人数）と、発送済みリネン袋の返却袋数を確認・登録し、既存の記録を修正・削除します。</p>
     </a>
     <a class="nav-card" href="/admin/consumable_stock.php">
         <h2>消耗品在庫管理</h2>

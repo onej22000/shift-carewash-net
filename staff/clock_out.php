@@ -5,15 +5,14 @@ require_once __DIR__ . '/../includes/functions.php';
 $staff = require_login('staff');
 $pdo = getPdo();
 
+// 集荷は集荷・配送記録簿（collection_cycles、staff/collection_entry.php）で管理するため、
+// 作業実績（work_stage_records）の対象からは外れた。洗濯・乾燥・畳みは2026-08-06に
+// 「洗濯」1工程へ統合した（stage ENUM自体は互換のため dry/fold を残しているが、以後は使わない）。
 $stageLabels = [
     'wash' => '洗濯',
-    'dry' => '乾燥',
-    'fold' => '畳み',
 ];
 
-// 集荷は集荷・配送記録簿（collection_cycles、staff/collection_entry.php）で管理するため、
-// 作業実績（work_stage_records）の対象からは外れた。退勤時に全工程必須となるのも
-// 洗濯代行区分のみ（集荷ドライバーはこの3工程を必ずしも行わないため）。
+// 退勤時に入力必須となるのも洗濯代行区分のみ（集荷ドライバーはこの工程を必ずしも行わないため）。
 const CATEGORIES_REQUIRING_ALL_STAGES = ['洗濯代行'];
 
 $openStmt = $pdo->prepare(
@@ -53,7 +52,7 @@ $errorMessage = '';
 /**
  * 人数は0も有効な入力として扱う（「実績なし」を明示的に記録するため）。
  * facility_idが未選択、またはperson_count欄が空欄のままの行は「未入力」として単に無視する。
- * work_stage_recordsは洗濯・乾燥・畳みのみが対象のため、区分は常に「洗濯代行」で固定する。
+ * work_stage_recordsは洗濯代行の作業実績のみが対象のため、区分は常に「洗濯代行」で固定する。
  *
  * @return list<array{stage:string, facility_id:int, person_count:int, category:string}>
  */
@@ -224,9 +223,9 @@ $csrfToken = csrf_token();
 <?php endif; ?>
 
 <?php if ($stagesRequired): ?>
-    <p class="notice">区分「<?= htmlspecialchars($defaultCategory, ENT_QUOTES, 'UTF-8') ?>」での退勤のため、洗濯・乾燥・畳みの3項目すべてに人数の入力が必須です。実績が無い項目には「0」を入力してください。送信すると退勤が確定します。</p>
+    <p class="notice">区分「<?= htmlspecialchars($defaultCategory, ENT_QUOTES, 'UTF-8') ?>」での退勤のため、洗濯の人数入力が必須です。実績が無い場合は「0」を入力してください。送信すると退勤が確定します。</p>
 <?php else: ?>
-    <p class="notice">退勤する前に、本日の洗濯・乾燥・畳みの実績を入力してください（実績がない工程は未入力のままで構いません）。送信すると退勤が確定します。</p>
+    <p class="notice">退勤する前に、本日の洗濯の実績を入力してください（実績がなければ未入力のままで構いません）。送信すると退勤が確定します。</p>
 <?php endif; ?>
 
 <?php if (empty($facilities)): ?>

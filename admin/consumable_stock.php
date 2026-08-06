@@ -28,6 +28,16 @@ const CONSUMABLE_REASON_LABELS = [
 // この理由の場合のみ対象施設等の選択を必須にする（購入・廃棄・紛失は施設に紐づかない）
 const CONSUMABLE_REASONS_REQUIRING_FACILITY = ['return_from_facility', 'issuance_to_facility'];
 
+// 増減理由ごとに許される増減数の符号。矛盾する符号での登録（例：「施設等への交付」を選びながら
+// プラスの数量を入力し、在庫が誤って増える方向に記録される）を防ぐための整合性チェックに使う。
+const CONSUMABLE_REASON_SIGN = [
+    'purchase' => 'positive',
+    'return_from_facility' => 'positive',
+    'disposal' => 'negative',
+    'loss' => 'negative',
+    'issuance_to_facility' => 'negative',
+];
+
 function parse_consumable_stock_input(array $post, array $validFacilityIds): array
 {
     $itemType = (string) ($post['item_type'] ?? '');
@@ -63,6 +73,14 @@ function parse_consumable_stock_input(array $post, array $validFacilityIds): arr
     }
     if ($reason === null) {
         $errors[] = '増減理由を選択してください。';
+    } elseif ($quantity !== null && $quantity !== 0 && isset(CONSUMABLE_REASON_SIGN[$reason])) {
+        $expectedSign = CONSUMABLE_REASON_SIGN[$reason];
+        $actualSign = $quantity > 0 ? 'positive' : 'negative';
+        if ($actualSign !== $expectedSign) {
+            $errors[] = $expectedSign === 'positive'
+                ? '「' . CONSUMABLE_REASON_LABELS[$reason] . '」は在庫が増えるため、プラスで入力してください。'
+                : '「' . CONSUMABLE_REASON_LABELS[$reason] . '」は在庫が減るため、マイナスで入力してください。';
+        }
     }
     if ($facilityId === false) {
         $errors[] = '対象施設等が正しくありません。';
@@ -332,7 +350,7 @@ $records = $listStmt->fetchAll();
             <div class="form-row">
                 <label for="quantity">増減数</label>
                 <input type="number" id="quantity" name="quantity" step="1" value="<?= htmlspecialchars($formQuantity, ENT_QUOTES, 'UTF-8') ?>" required>
-                <div style="font-size:0.8em;color:#777;">入庫・購入等はプラス、使用・廃棄等はマイナスで入力してください。</div>
+                <div style="font-size:0.8em;color:#777;">増減理由に応じて符号が決まります：購入・施設等からの返却＝プラス／廃棄・紛失・施設等への交付＝マイナス。矛盾する符号は登録時にエラーになります。</div>
             </div>
 
             <div class="form-row">

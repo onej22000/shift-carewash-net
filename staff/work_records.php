@@ -6,15 +6,11 @@ $staff = require_login('staff');
 $pdo = getPdo();
 
 // 集荷は集荷・配送記録簿（collection_cycles、staff/collection_entry.php）に一本化したため、
-// 作業実績（work_stage_records）の工程からは外した。残る洗濯・乾燥・畳みはすべて洗濯代行の
-// 作業のため、区分（category）は選択させず常に「洗濯代行」で固定する。
-const STAGE_LABELS = [
-    'wash' => '洗濯',
-    'dry' => '乾燥',
-    'fold' => '畳み',
-];
-
+// 作業実績（work_stage_records）の工程からは外した。洗濯・乾燥・畳みは2026-08-06に「洗濯」
+// 1工程へ統合したため、区分（category）・工程（stage）とも選択させず固定値で登録する。
 const WORK_RECORD_CATEGORY = '洗濯代行';
+const WORK_RECORD_STAGE = 'wash';
+const WORK_RECORD_STAGE_LABEL = '洗濯';
 
 // employee_idは常に本人（$staff['id']）に固定するため対象外。他人の記録は一覧にも出さず、編集・削除もできない。
 const WSR_EDITABLE_FIELDS = ['category', 'facility_id', 'stage', 'person_count', 'record_date', 'record_time'];
@@ -22,7 +18,6 @@ const WSR_EDITABLE_FIELDS = ['category', 'facility_id', 'stage', 'person_count',
 function parse_work_stage_record_input(array $post, array $validFacilityIds): array
 {
     $facilityId = (int) ($post['facility_id'] ?? 0);
-    $stage = (string) ($post['stage'] ?? '');
     $personCountRaw = trim((string) ($post['person_count'] ?? ''));
     $personCount = $personCountRaw === '' ? null : (int) $personCountRaw;
     $recordDateRaw = trim((string) ($post['record_date'] ?? ''));
@@ -42,9 +37,6 @@ function parse_work_stage_record_input(array $post, array $validFacilityIds): ar
     if (!in_array($facilityId, $validFacilityIds, true)) {
         $errors[] = '施設を選択してください。';
     }
-    if (!array_key_exists($stage, STAGE_LABELS)) {
-        $errors[] = '工程を選択してください。';
-    }
     if ($personCount === null || $personCount < 0) {
         $errors[] = '人数は0以上の数値を入力してください。';
     }
@@ -59,7 +51,7 @@ function parse_work_stage_record_input(array $post, array $validFacilityIds): ar
         [
             'category' => WORK_RECORD_CATEGORY,
             'facility_id' => $facilityId,
-            'stage' => $stage,
+            'stage' => WORK_RECORD_STAGE,
             'person_count' => $personCount,
             'record_date' => $recordDate,
             'record_time' => $recordTime,
@@ -260,7 +252,6 @@ if (isset($_GET['edit'])) {
 $formAction = 'create';
 $formId = null;
 $formFacilityId = '';
-$formStage = '';
 $formPersonCount = '';
 $formRecordDate = $today;
 $formRecordTime = $nowTime;
@@ -269,7 +260,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && in_array((s
     $formAction = (string) $_POST['action'];
     $formId = $formAction === 'update' ? (int) ($_POST['id'] ?? 0) : null;
     $formFacilityId = (string) ($_POST['facility_id'] ?? '');
-    $formStage = (string) ($_POST['stage'] ?? '');
     $formPersonCount = (string) ($_POST['person_count'] ?? '');
     $formRecordDate = (string) ($_POST['record_date'] ?? '');
     $formRecordTime = (string) ($_POST['record_time'] ?? '');
@@ -277,7 +267,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && in_array((s
     $formAction = 'update';
     $formId = (int) $editingRecord['id'];
     $formFacilityId = (string) $editingRecord['facility_id'];
-    $formStage = $editingRecord['stage'];
     $formPersonCount = (string) $editingRecord['person_count'];
     $formRecordDate = $editingRecord['record_date'];
     $formRecordTime = $editingRecord['record_time'] !== null ? substr($editingRecord['record_time'], 0, 5) : $nowTime;
@@ -379,18 +368,6 @@ $records = $listStmt->fetchAll();
             </div>
 
             <div class="form-row">
-                <label for="stage">工程</label>
-                <select id="stage" name="stage" required>
-                    <option value="">選択してください</option>
-                    <?php foreach (STAGE_LABELS as $stageKey => $stageLabel): ?>
-                        <option value="<?= htmlspecialchars($stageKey, ENT_QUOTES, 'UTF-8') ?>" <?= $formStage === $stageKey ? 'selected' : '' ?>>
-                            <?= htmlspecialchars($stageLabel, ENT_QUOTES, 'UTF-8') ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-
-            <div class="form-row">
                 <label for="person_count">人数</label>
                 <input type="number" id="person_count" name="person_count" min="0" step="1" value="<?= htmlspecialchars($formPersonCount, ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
@@ -433,7 +410,7 @@ $records = $listStmt->fetchAll();
                         <td><?= htmlspecialchars($record['record_date'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= $record['record_time'] !== null ? htmlspecialchars(substr($record['record_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= htmlspecialchars(STAGE_LABELS[$record['stage']] ?? $record['stage'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars(WORK_RECORD_STAGE_LABEL, ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= (int) $record['person_count'] ?>人</td>
                         <td><?= htmlspecialchars($record['created_at'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td>

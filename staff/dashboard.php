@@ -339,7 +339,7 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
             </tr>
             <tr>
                 <th rowspan="2">洗濯代行スタッフ用</th>
-                <td><a href="/staff/collection_headcount.php">到着リネン袋の洗濯ネット数（集荷人数）を確認・登録</a></td>
+                <td><a href="/staff/collection_headcount.php">到着リネン袋の確認・返却リネン袋数の登録</a></td>
             </tr>
             <tr>
                 <td><a href="/staff/work_records.php">作業実績を入力・編集する</a></td>

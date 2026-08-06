@@ -48,11 +48,12 @@ foreach ($attendanceStmt->fetchAll() as $row) {
     $minutesByEmployeeDay[(int) $row['employee_id']][$row['work_day']] = (int) $row['day_minutes'];
 }
 
-// ---- 従業員別: 洗濯/乾燥/畳みの作業人数(日次、施設・工程問わず合算) ----
+// ---- 従業員別: 洗濯代行の作業人数(日次、施設問わず合算) ----
+// 洗濯・乾燥・畳みは2026-08-06に「洗濯」1工程へ統合したため、stage='wash'のみで洗濯代行の全実績を表す。
 $stagePeopleStmt = $pdo->prepare(
     "SELECT employee_id, record_date, SUM(person_count) AS day_people
      FROM work_stage_records
-     WHERE stage IN ('wash','dry','fold') AND deleted_at IS NULL $stageDateCondition
+     WHERE stage = 'wash' AND deleted_at IS NULL $stageDateCondition
      GROUP BY employee_id, record_date"
 );
 $stagePeopleStmt->execute($stageParams);
@@ -87,23 +88,21 @@ foreach ($employees as $employee) {
     ];
 }
 
-// ---- 施設別: 洗濯/乾燥/畳みの人数合計(工程別・合計) ----
+// ---- 施設別: 洗濯代行の人数合計 ----
+// 洗濯・乾燥・畳みは2026-08-06に「洗濯」1工程へ統合したため、工程別の内訳ではなく施設別合計のみを出す。
 $facilityStmt = $pdo->prepare(
-    "SELECT w.facility_id, f.name AS facility_name, w.stage, SUM(w.person_count) AS total
+    "SELECT w.facility_id, f.name AS facility_name, SUM(w.person_count) AS total
      FROM work_stage_records w
      INNER JOIN facilities f ON f.id = w.facility_id
-     WHERE w.stage IN ('wash','dry','fold') AND w.deleted_at IS NULL $stageDateCondition
-     GROUP BY w.facility_id, f.name, w.stage"
+     WHERE w.stage = 'wash' AND w.deleted_at IS NULL $stageDateCondition
+     GROUP BY w.facility_id, f.name"
 );
 $facilityStmt->execute($stageParams);
 
 $facilityData = [];
 foreach ($facilityStmt->fetchAll() as $row) {
     $facilityId = (int) $row['facility_id'];
-    if (!isset($facilityData[$facilityId])) {
-        $facilityData[$facilityId] = ['name' => $row['facility_name'], 'stages' => []];
-    }
-    $facilityData[$facilityId]['stages'][$row['stage']] = (int) $row['total'];
+    $facilityData[$facilityId] = ['name' => $row['facility_name'], 'total' => (int) $row['total']];
 }
 ?>
 <!DOCTYPE html>
@@ -215,35 +214,24 @@ foreach ($facilityStmt->fetchAll() as $row) {
 </section>
 
 <section class="by-facility">
-    <h2>施設別 作業人数合計（工程別）</h2>
-    <p class="notice">区分の紐付けが無い作業実績も含めた、工程（洗濯/乾燥/畳み）単位の人数合計です。</p>
+    <h2>施設別 作業人数合計</h2>
+    <p class="notice">洗濯代行（洗濯・乾燥・畳みを2026-08-06に統合）の人数合計です。区分の紐付けが無い作業実績も含みます。</p>
 
     <?php if (empty($facilityData)): ?>
-        <p class="notice">対象期間に洗濯・乾燥・畳みの記録がありません。</p>
+        <p class="notice">対象期間に洗濯代行の記録がありません。</p>
     <?php else: ?>
         <table class="speed">
             <thead>
                 <tr>
                     <th>施設</th>
-                    <th>洗濯</th>
-                    <th>乾燥</th>
-                    <th>畳み</th>
-                    <th>合計</th>
+                    <th>洗濯代行 合計</th>
                 </tr>
             </thead>
             <tbody>
                 <?php foreach ($facilityData as $data): ?>
-                    <?php
-                    $wash = $data['stages']['wash'] ?? 0;
-                    $dry = $data['stages']['dry'] ?? 0;
-                    $fold = $data['stages']['fold'] ?? 0;
-                    ?>
                     <tr>
                         <td><?= htmlspecialchars($data['name'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= $wash ?>人</td>
-                        <td><?= $dry ?>人</td>
-                        <td><?= $fold ?>人</td>
-                        <td class="total-col"><?= $wash + $dry + $fold ?>人</td>
+                        <td class="total-col"><?= $data['total'] ?>人</td>
                     </tr>
                 <?php endforeach; ?>
             </tbody>

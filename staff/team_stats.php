@@ -47,11 +47,12 @@ foreach ($attendanceStmt->fetchAll() as $row) {
     $minutesByEmployeeDay[(int) $row['employee_id']][$row['work_day']] = (int) $row['day_minutes'];
 }
 
-// ---- 効率算出用：従業員別・日次の洗濯代行(洗濯/乾燥/畳み)人数 ----
+// ---- 効率算出用：従業員別・日次の洗濯代行人数 ----
+// 洗濯・乾燥・畳みは2026-08-06に「洗濯」1工程へ統合したため、stage='wash'のみで洗濯代行の全実績を表す。
 $stagePeopleStmt = $pdo->prepare(
     "SELECT employee_id, record_date, SUM(person_count) AS day_people
      FROM work_stage_records
-     WHERE stage IN ('wash','dry','fold') AND deleted_at IS NULL $stageDateCondition
+     WHERE stage = 'wash' AND deleted_at IS NULL $stageDateCondition
      GROUP BY employee_id, record_date"
 );
 $stagePeopleStmt->execute($stageParams);
@@ -60,11 +61,11 @@ foreach ($stagePeopleStmt->fetchAll() as $row) {
     $peopleByEmployeeDay[(int) $row['employee_id']][$row['record_date']] = (int) $row['day_people'];
 }
 
-// ---- 従業員別: 洗濯代行合計人数（洗濯+乾燥+畳み） ----
+// ---- 従業員別: 洗濯代行合計人数 ----
 $laundryStmt = $pdo->prepare(
     "SELECT employee_id, SUM(person_count) AS total
      FROM work_stage_records
-     WHERE stage IN ('wash','dry','fold') AND deleted_at IS NULL $stageDateCondition
+     WHERE stage = 'wash' AND deleted_at IS NULL $stageDateCondition
      GROUP BY employee_id"
 );
 $laundryStmt->execute($stageParams);
