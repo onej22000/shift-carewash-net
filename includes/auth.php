@@ -69,12 +69,12 @@ function login_employee(array $employee): void
 }
 
 // 共用アカウント（is_shared_account=1）はログイン後、通常のダッシュボードではなく
-// 専用の画面（集荷サイクルの人数確認・返却リネン袋数登録）へ遷移させる。
+// 専用の画面（集荷チェックリスト。人数確認・返却準備完了の登録はそこからリンクする）へ遷移させる。
 // login_idを条件に使うと将来IDを変更したときに気づかず壊れるため、is_shared_accountで判定する。
 function staff_landing_page(array $employee): string
 {
     return ((int) ($employee['is_shared_account'] ?? 0) === 1)
-        ? '/staff/collection_headcount.php'
+        ? '/staff/jiro_dashboard.php'
         : '/staff/dashboard.php';
 }
 

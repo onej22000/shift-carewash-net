@@ -1755,3 +1755,139 @@ function record_work_stage_employees(PDO $pdo, int $workStageRecordId, array $em
         ]);
     }
 }
+
+/**
+ * 本日の曜日に対応するfacilities.pickup_scheduleの値を返す（日曜は集荷日設定が無いためnull）。
+ */
+function todays_pickup_schedule_label(DateTime $today): ?string
+{
+    $map = [
+        '1' => '月・木', '4' => '月・木',
+        '2' => '火・金', '5' => '火・金',
+        '3' => '水・土', '6' => '水・土',
+    ];
+    return $map[$today->format('N')] ?? null;
+}
+
+/**
+ * 集荷ドライバーの出発前チェックリスト（staff/jiro_dashboard.phpの一覧、staff/dashboard.phpの
+ * サマリー表示）用のデータを組み立てる。
+ *
+ * 「返却は次回集荷と同じ訪問で行われることが多い」という業務フローのため、本日の集荷予定施設
+ * （facilities.pickup_scheduleが本日に該当・is_active=1）を上部に、それ以外で返却準備完了だが
+ * ドライバー未確定の施設（集荷が予定通りに進まなかった積み残しや変則訪問）を下部に分けて返す。
+ * 積み残し分を取りこぼさないよう、下部は施設のis_active状態に関わらず対象にする。
+ *
+ * 前回集荷袋数の色（オレンジ/黄）はfacilities.issued_linen_bag_orange/issued_linen_bag_yellowの
+ * うちどちらが設定されているかで判定する（施設ごとに1色運用のため）。返却は常に青袋。
+ */
+function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
+{
+    $todayScheduleLabel = todays_pickup_schedule_label($today);
+
+    $facilitiesStmt = $pdo->query(
+        "SELECT id, name, is_active, issued_linen_bag_orange, issued_linen_bag_yellow
+         FROM facilities
+         WHERE facility_type = '介護施設'"
+    );
+    $facilitiesById = array_column($facilitiesStmt->fetchAll(), null, 'id');
+
+    $todayFacilityIdSet = [];
+    if ($todayScheduleLabel !== null) {
+        $todayStmt = $pdo->prepare(
+            "SELECT id FROM facilities WHERE facility_type = '介護施設' AND is_active = 1 AND pickup_schedule = :schedule"
+        );
+        $todayStmt->execute([':schedule' => $todayScheduleLabel]);
+        $todayFacilityIdSet = array_flip(array_map('intval', array_column($todayStmt->fetchAll(), 'id')));
+    }
+
+    // 施設ごとの直近の集荷リネン袋数（pickup_bag_count入力済みの最新サイクル）。
+    // 「最新」はpickup_date基準（idではない）。管理者がadmin/collection_records.phpで過去日付の
+    // サイクルを後から手入力した場合、id順とpickup_date順がずれることがあるため。
+    $latestPickupStmt = $pdo->query(
+        'SELECT cc.facility_id, cc.pickup_bag_count
+         FROM collection_cycles cc
+         WHERE cc.deleted_at IS NULL AND cc.pickup_bag_count IS NOT NULL
+           AND cc.id = (
+               SELECT cc2.id FROM collection_cycles cc2
+               WHERE cc2.facility_id = cc.facility_id AND cc2.deleted_at IS NULL AND cc2.pickup_bag_count IS NOT NULL
+               ORDER BY cc2.pickup_date DESC, cc2.id DESC
+               LIMIT 1
+           )'
+    );
+    $latestPickupByFacility = [];
+    foreach ($latestPickupStmt->fetchAll() as $row) {
+        $latestPickupByFacility[(int) $row['facility_id']] = (int) $row['pickup_bag_count'];
+    }
+
+    // 集荷実績が一度もない施設の判定用（pickup_bag_countの有無に関わらず、サイクル自体が存在するか）
+    $historyStmt = $pdo->query('SELECT DISTINCT facility_id FROM collection_cycles WHERE deleted_at IS NULL');
+    $facilityIdsWithHistory = array_flip(array_map('intval', array_column($historyStmt->fetchAll(), 'facility_id')));
+
+    // 洗濯代行が返却準備完了を登録済みだが、ドライバーがまだ確認・確定していない分の合計（施設ごと）
+    $readyStmt = $pdo->query(
+        'SELECT facility_id, SUM(return_ready_bag_count) AS total
+         FROM collection_cycles
+         WHERE return_ready_bag_count IS NOT NULL AND return_bag_count IS NULL AND deleted_at IS NULL
+         GROUP BY facility_id'
+    );
+    $pendingReturnByFacility = [];
+    foreach ($readyStmt->fetchAll() as $row) {
+        $pendingReturnByFacility[(int) $row['facility_id']] = (int) $row['total'];
+    }
+
+    $buildRow = static function (array $facility) use ($latestPickupByFacility, $facilityIdsWithHistory, $pendingReturnByFacility): array {
+        $facilityId = (int) $facility['id'];
+        $lastPickupBagCount = $latestPickupByFacility[$facilityId] ?? null;
+        $lastPickupColor = $facility['issued_linen_bag_orange'] !== null
+            ? 'オレンジ'
+            : ($facility['issued_linen_bag_yellow'] !== null ? '黄' : null);
+        $returnReadyTotal = $pendingReturnByFacility[$facilityId] ?? 0;
+
+        return [
+            'facility_id' => $facilityId,
+            'facility_name' => $facility['name'],
+            'has_history' => isset($facilityIdsWithHistory[$facilityId]),
+            'last_pickup_bag_count' => $lastPickupBagCount,
+            'last_pickup_color' => $lastPickupColor,
+            'return_ready_total' => $returnReadyTotal,
+            'row_total' => (int) $lastPickupBagCount + $returnReadyTotal,
+        ];
+    };
+
+    $todayRows = [];
+    foreach ($todayFacilityIdSet as $facilityId => $unused) {
+        if (isset($facilitiesById[$facilityId])) {
+            $todayRows[] = $buildRow($facilitiesById[$facilityId]);
+        }
+    }
+    usort($todayRows, static fn (array $a, array $b): int => $a['facility_name'] <=> $b['facility_name']);
+
+    // 「その他の返却待ち」：返却準備完了・未確定の施設のうち、本日の集荷予定に含まれないもの
+    $otherRows = [];
+    foreach ($pendingReturnByFacility as $facilityId => $total) {
+        if (isset($todayFacilityIdSet[$facilityId]) || !isset($facilitiesById[$facilityId])) {
+            continue;
+        }
+        $otherRows[] = $buildRow($facilitiesById[$facilityId]);
+    }
+    usort($otherRows, static fn (array $a, array $b): int => $a['facility_name'] <=> $b['facility_name']);
+
+    $totals = ['orange' => 0, 'yellow' => 0, 'blue' => 0, 'total' => 0];
+    foreach (array_merge($todayRows, $otherRows) as $row) {
+        if ($row['last_pickup_color'] === 'オレンジ') {
+            $totals['orange'] += (int) $row['last_pickup_bag_count'];
+        } elseif ($row['last_pickup_color'] === '黄') {
+            $totals['yellow'] += (int) $row['last_pickup_bag_count'];
+        }
+        $totals['blue'] += $row['return_ready_total'];
+        $totals['total'] += $row['row_total'];
+    }
+
+    return [
+        'today_schedule_label' => $todayScheduleLabel,
+        'today_rows' => $todayRows,
+        'other_rows' => $otherRows,
+        'totals' => $totals,
+    ];
+}

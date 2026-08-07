@@ -7,13 +7,17 @@ $pdo = getPdo();
 
 // 共用アカウントが直接このURLに来た場合も、通常ダッシュボードは表示させず専用画面へ戻す。
 if ((int) ($staff['is_shared_account'] ?? 0) === 1) {
-    header('Location: /staff/collection_headcount.php');
+    header('Location: /staff/jiro_dashboard.php');
     exit;
 }
 
 $flash = pop_flash();
 
 $today = (new DateTime())->format('Y-m-d');
+
+$jiroChecklist = build_jiro_checklist_data($pdo, new DateTime());
+$jiroTodayFacilityCount = count($jiroChecklist['today_rows']);
+$jiroTodayBagTotal = array_sum(array_column($jiroChecklist['today_rows'], 'row_total'));
 
 // 自分が使用したことのある車両（vehicle_checksの記録から判定。専用の割当管理は無いため）の警告のみ表示する。
 $myVehicleIdsStmt = $pdo->prepare('SELECT DISTINCT vehicle_id FROM vehicle_checks WHERE employee_id = :employee_id AND deleted_at IS NULL');
@@ -451,6 +455,18 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
         </table>
     <?php endif; ?>
     <p style="margin-top:8px;"><a href="/staff/history.php">過去の打刻履歴を日付指定で見る →</a></p>
+</section>
+
+<section class="jiro-checklist-summary">
+    <h2>本日の集荷予定</h2>
+    <?php if ($jiroChecklist['today_schedule_label'] === null): ?>
+        <p class="notice">本日は集荷予定日ではありません。</p>
+    <?php elseif ($jiroTodayFacilityCount === 0): ?>
+        <p class="notice">本日の集荷予定に該当する施設はありません。</p>
+    <?php else: ?>
+        <p class="notice"><?= $jiroTodayFacilityCount ?>施設・合計<?= $jiroTodayBagTotal ?>袋の予定があります。</p>
+    <?php endif; ?>
+    <p><a href="/staff/jiro_dashboard.php">集荷チェックリストで詳細を見る →</a></p>
 </section>
 
 <section class="team-links">
