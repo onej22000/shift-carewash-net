@@ -5,7 +5,7 @@ start_session_once();
 
 $loggedInEmployee = current_employee();
 if ($loggedInEmployee !== null && $loggedInEmployee['role'] === 'staff') {
-    header('Location: /staff/dashboard.php');
+    header('Location: ' . staff_landing_page($loggedInEmployee));
     exit;
 }
 
@@ -21,7 +21,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $employee = attempt_login($loginId, $password, 'staff');
         if ($employee !== null) {
             login_employee($employee);
-            header('Location: /staff/dashboard.php');
+            header('Location: ' . staff_landing_page($employee));
             exit;
         }
 

@@ -5,10 +5,13 @@ require_once __DIR__ . '/../includes/functions.php';
 $staff = require_login('staff');
 $pdo = getPdo();
 
-// この画面で新規作成・修正するwork_stage_recordsのフィールド一覧（監査ログ用）。
-const HEADCOUNT_LOG_FIELDS = ['category', 'facility_id', 'collection_cycle_id', 'stage', 'person_count', 'record_date', 'record_time'];
-// 修正時にユーザーが変更できるのはこの3項目のみ（施設・工程・紐づくサイクルは確認記録の性質上変えない）。
-const HEADCOUNT_EDITABLE_FIELDS = ['person_count', 'record_date', 'record_time'];
+// この画面で新規作成・修正するwork_stage_recordsのフィールド一覧（監査ログ用）。employee_idsは
+// work_stage_records自体のカラムではなくwork_stage_record_employees側の参加者一覧のため、
+// 汎用の差分ログ処理（$recordのカラム値と比較する処理）とは別に個別でログを記録する。
+const HEADCOUNT_LOG_FIELDS = ['category', 'facility_id', 'collection_cycle_id', 'stage', 'person_count', 'record_date', 'record_time', 'completed_at'];
+// 修正時にユーザーが変更できるのはこの項目のみ（施設・工程・紐づくサイクルは確認記録の性質上変えない）。
+// person_count・completed_atは参加者選択（employee_ids、別ロジックで扱う）から自動で算出・更新する。
+const HEADCOUNT_EDITABLE_FIELDS = ['person_count', 'record_date', 'record_time', 'completed_at'];
 
 // 返却リネン袋数登録で書き込むcollection_cyclesのフィールド一覧（監査ログ用）。
 const RETURN_LOG_FIELDS = ['return_bag_count', 'return_date', 'return_time', 'return_employee_id'];
@@ -95,10 +98,18 @@ function resolve_return_employee_id($raw, int $default, array $validEmployeeIds)
     return in_array($id, $validEmployeeIds, true) ? $id : false;
 }
 
-function parse_headcount_edit_input(array $post): array
+function parse_headcount_edit_input(array $post, array $validEmployeeIds): array
 {
-    $personCountRaw = trim((string) ($post['person_count'] ?? ''));
-    $personCount = ($personCountRaw !== '' && ctype_digit($personCountRaw)) ? (int) $personCountRaw : null;
+    $employeeIds = [];
+    foreach ((array) ($post['employee_ids'] ?? []) as $rawEmployeeId) {
+        $employeeId = (int) $rawEmployeeId;
+        if (in_array($employeeId, $validEmployeeIds, true)) {
+            $employeeIds[] = $employeeId;
+        }
+    }
+    $employeeIds = array_values(array_unique($employeeIds));
+    $personCount = count($employeeIds);
+
     $recordDateRaw = trim((string) ($post['record_date'] ?? ''));
     $recordDate = null;
     if ($recordDateRaw !== '') {
@@ -113,9 +124,6 @@ function parse_headcount_edit_input(array $post): array
     }
 
     $errors = [];
-    if ($personCount === null) {
-        $errors[] = '人数は0以上の整数を入力してください。';
-    }
     if ($recordDate === false || $recordDate === null) {
         $errors[] = '確認日の形式が正しくありません。';
     }
@@ -123,8 +131,18 @@ function parse_headcount_edit_input(array $post): array
         $errors[] = '確認時刻の形式が正しくありません。';
     }
 
+    $completedAt = ($recordDate !== null && $recordDate !== false && $recordTime !== null && $recordTime !== false)
+        ? $recordDate . ' ' . $recordTime
+        : null;
+
     return [
-        ['person_count' => $personCount, 'record_date' => $recordDate, 'record_time' => $recordTime],
+        [
+            'person_count' => $personCount,
+            'record_date' => $recordDate,
+            'record_time' => $recordTime,
+            'completed_at' => $completedAt,
+            'employee_ids' => $employeeIds,
+        ],
         $errors,
     ];
 }
@@ -215,8 +233,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         } elseif ($action === 'confirm_headcount') {
             $cycleId = (int) ($_POST['cycle_id'] ?? 0);
-            $personCountRaw = trim((string) ($_POST['person_count'] ?? ''));
-            $personCount = $personCountRaw === '' ? null : ($personCountRaw === '0' || ctype_digit($personCountRaw) ? (int) $personCountRaw : null);
+            $employeeIds = [];
+            foreach ((array) ($_POST['employee_ids'] ?? []) as $rawEmployeeId) {
+                $employeeId = (int) $rawEmployeeId;
+                if (in_array($employeeId, $validEmployeeIds, true)) {
+                    $employeeIds[] = $employeeId;
+                }
+            }
+            $employeeIds = array_values(array_unique($employeeIds));
+            $personCount = count($employeeIds);
 
             // 再表示までの間に他のスタッフが確認済みにした可能性があるため、直前に候補を再取得して検証する。
             $unconfirmedCycles = find_unconfirmed_cycles($pdo);
@@ -227,54 +252,73 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if (!isset($unconfirmedById[$cycleId])) {
                 $errorMessage = '対象のサイクルは既に確認済みか、無効です。もう一度やり直してください。';
-            } elseif ($personCount === null || $personCountRaw === '' || !ctype_digit($personCountRaw)) {
-                $errorMessage = '人数は0以上の整数を入力してください。';
             } else {
                 $cycle = $unconfirmedById[$cycleId];
                 $now = new DateTime();
 
-                $insertStmt = $pdo->prepare(
-                    "INSERT INTO work_stage_records
-                        (employee_id, category, facility_id, collection_cycle_id, stage, person_count, record_date, record_time)
-                     VALUES
-                        (:employee_id, '洗濯代行', :facility_id, :collection_cycle_id, 'wash', :person_count, :record_date, :record_time)"
-                );
-                $insertStmt->execute([
-                    ':employee_id' => $staff['id'],
-                    ':facility_id' => $cycle['facility_id'],
-                    ':collection_cycle_id' => $cycleId,
-                    ':person_count' => $personCount,
-                    ':record_date' => $now->format('Y-m-d'),
-                    ':record_time' => $now->format('H:i:s'),
-                ]);
-                $newRecordId = (int) $pdo->lastInsertId();
+                try {
+                    $pdo->beginTransaction();
 
-                $logStmt = $pdo->prepare(
-                    'INSERT INTO work_stage_record_edit_logs (work_stage_record_id, edited_by, action, field_name, old_value, new_value)
-                     VALUES (:record_id, :edited_by, :action, :field_name, NULL, :new_value)'
-                );
-                $newValues = [
-                    'category' => '洗濯代行',
-                    'facility_id' => $cycle['facility_id'],
-                    'collection_cycle_id' => $cycleId,
-                    'stage' => 'wash',
-                    'person_count' => $personCount,
-                    'record_date' => $now->format('Y-m-d'),
-                    'record_time' => $now->format('H:i:s'),
-                ];
-                foreach (HEADCOUNT_LOG_FIELDS as $field) {
+                    $insertStmt = $pdo->prepare(
+                        "INSERT INTO work_stage_records
+                            (employee_id, category, facility_id, collection_cycle_id, stage, person_count, record_date, record_time, completed_at)
+                         VALUES
+                            (:employee_id, '洗濯代行', :facility_id, :collection_cycle_id, 'wash', :person_count, :record_date, :record_time, :completed_at)"
+                    );
+                    $insertStmt->execute([
+                        ':employee_id' => $staff['id'],
+                        ':facility_id' => $cycle['facility_id'],
+                        ':collection_cycle_id' => $cycleId,
+                        ':person_count' => $personCount,
+                        ':record_date' => $now->format('Y-m-d'),
+                        ':record_time' => $now->format('H:i:s'),
+                        ':completed_at' => $now->format('Y-m-d H:i:s'),
+                    ]);
+                    $newRecordId = (int) $pdo->lastInsertId();
+
+                    if (!empty($employeeIds)) {
+                        record_work_stage_employees($pdo, $newRecordId, $employeeIds, $now);
+                    }
+
+                    $logStmt = $pdo->prepare(
+                        'INSERT INTO work_stage_record_edit_logs (work_stage_record_id, edited_by, action, field_name, old_value, new_value)
+                         VALUES (:record_id, :edited_by, :action, :field_name, NULL, :new_value)'
+                    );
+                    $newValues = [
+                        'category' => '洗濯代行',
+                        'facility_id' => $cycle['facility_id'],
+                        'collection_cycle_id' => $cycleId,
+                        'stage' => 'wash',
+                        'person_count' => $personCount,
+                        'record_date' => $now->format('Y-m-d'),
+                        'record_time' => $now->format('H:i:s'),
+                        'completed_at' => $now->format('Y-m-d H:i:s'),
+                    ];
+                    foreach (HEADCOUNT_LOG_FIELDS as $field) {
+                        $logStmt->execute([
+                            ':record_id' => $newRecordId,
+                            ':edited_by' => $staff['id'],
+                            ':action' => 'create',
+                            ':field_name' => $field,
+                            ':new_value' => $newValues[$field],
+                        ]);
+                    }
                     $logStmt->execute([
                         ':record_id' => $newRecordId,
                         ':edited_by' => $staff['id'],
                         ':action' => 'create',
-                        ':field_name' => $field,
-                        ':new_value' => $newValues[$field],
+                        ':field_name' => 'employee_ids',
+                        ':new_value' => implode(',', $employeeIds),
                     ]);
-                }
 
-                set_flash('success', htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $cycle['pickup_date'] . '集荷分）の人数（' . $personCount . '人）を確認・登録しました。');
-                header('Location: /staff/collection_headcount.php');
-                exit;
+                    $pdo->commit();
+                    set_flash('success', htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $cycle['pickup_date'] . '集荷分）の人数（' . $personCount . '人）を確認・登録しました。');
+                    header('Location: /staff/collection_headcount.php');
+                    exit;
+                } catch (\Throwable $e) {
+                    $pdo->rollBack();
+                    $errorMessage = '登録に失敗しました。もう一度お試しください。';
+                }
             }
         } elseif ($action === 'delete_headcount') {
             $recordId = (int) ($_POST['id'] ?? 0);
@@ -319,7 +363,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         } elseif ($action === 'edit_headcount') {
             $recordId = (int) ($_POST['id'] ?? 0);
-            [$values, $parseErrors] = parse_headcount_edit_input($_POST);
+            [$values, $parseErrors] = parse_headcount_edit_input($_POST, $validEmployeeIds);
 
             if (!empty($parseErrors)) {
                 $errorMessage = implode(' ', $parseErrors);
@@ -331,6 +375,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($record === false) {
                     $errorMessage = '対象の確認記録が見つかりません。';
                 } else {
+                    $oldEmployeeIdsStmt = $pdo->prepare('SELECT employee_id FROM work_stage_record_employees WHERE work_stage_record_id = :id ORDER BY employee_id');
+                    $oldEmployeeIdsStmt->execute([':id' => $recordId]);
+                    $oldEmployeeIds = array_map('intval', array_column($oldEmployeeIdsStmt->fetchAll(), 'employee_id'));
+                    $newEmployeeIds = $values['employee_ids'];
+                    sort($oldEmployeeIds);
+                    $sortedNewEmployeeIds = $newEmployeeIds;
+                    sort($sortedNewEmployeeIds);
+                    $employeeIdsChanged = $oldEmployeeIds !== $sortedNewEmployeeIds;
+                    // completed_atが変わった場合、既存参加者のstarted_atは古いcompleted_atを起点に
+                    // 計算済みのため、参加者に変更が無くても開始時刻を計算し直す必要がある。
+                    $completedAtChanged = (string) $values['completed_at'] !== (string) $record['completed_at'];
+                    $employeesNeedRecompute = $employeeIdsChanged || $completedAtChanged;
+
                     try {
                         $pdo->beginTransaction();
 
@@ -353,16 +410,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ]);
                             $changedCount++;
                         }
+                        if ($employeeIdsChanged) {
+                            $logStmt->execute([
+                                ':record_id' => $recordId,
+                                ':edited_by' => $staff['id'],
+                                ':action' => 'update',
+                                ':field_name' => 'employee_ids',
+                                ':old_value' => implode(',', $oldEmployeeIds),
+                                ':new_value' => implode(',', $newEmployeeIds),
+                            ]);
+                            $changedCount++;
+                        }
 
                         $updateStmt = $pdo->prepare(
-                            'UPDATE work_stage_records SET person_count = :person_count, record_date = :record_date, record_time = :record_time WHERE id = :id'
+                            'UPDATE work_stage_records SET person_count = :person_count, record_date = :record_date, record_time = :record_time, completed_at = :completed_at WHERE id = :id'
                         );
                         $updateStmt->execute([
                             ':person_count' => $values['person_count'],
                             ':record_date' => $values['record_date'],
                             ':record_time' => $values['record_time'],
+                            ':completed_at' => $values['completed_at'],
                             ':id' => $recordId,
                         ]);
+
+                        if ($employeesNeedRecompute) {
+                            $deleteEmployeesStmt = $pdo->prepare('DELETE FROM work_stage_record_employees WHERE work_stage_record_id = :id');
+                            $deleteEmployeesStmt->execute([':id' => $recordId]);
+                            if (!empty($newEmployeeIds)) {
+                                record_work_stage_employees($pdo, $recordId, $newEmployeeIds, new DateTime($values['completed_at']));
+                            }
+                        }
 
                         $pdo->commit();
                         set_flash('success', $changedCount > 0
@@ -401,11 +478,18 @@ if (isset($_GET['edit'])) {
     }
 }
 
+$editingRecordEmployeeIds = [];
+if ($editingRecord !== null) {
+    $editingEmployeeIdsStmt = $pdo->prepare('SELECT employee_id FROM work_stage_record_employees WHERE work_stage_record_id = :id');
+    $editingEmployeeIdsStmt->execute([':id' => (int) $editingRecord['id']]);
+    $editingRecordEmployeeIds = array_map('intval', array_column($editingEmployeeIdsStmt->fetchAll(), 'employee_id'));
+}
+
 $editFormValues = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($_POST['action'] ?? '') === 'edit_headcount') {
     $editFormValues = [
         'id' => (int) ($_POST['id'] ?? 0),
-        'person_count' => (string) ($_POST['person_count'] ?? ''),
+        'employee_ids' => array_map('intval', (array) ($_POST['employee_ids'] ?? [])),
         'record_date' => (string) ($_POST['record_date'] ?? ''),
         'record_time' => (string) ($_POST['record_time'] ?? ''),
         'facility_name' => $editingRecord['facility_name'] ?? '',
@@ -414,7 +498,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($
 } elseif ($editingRecord !== null) {
     $editFormValues = [
         'id' => (int) $editingRecord['id'],
-        'person_count' => (string) $editingRecord['person_count'],
+        'employee_ids' => $editingRecordEmployeeIds,
         'record_date' => $editingRecord['record_date'],
         'record_time' => $editingRecord['record_time'] !== null ? substr($editingRecord['record_time'], 0, 5) : '',
         'facility_name' => $editingRecord['facility_name'],
@@ -437,6 +521,24 @@ $recentStmt = $pdo->query(
      LIMIT 30"
 );
 $recentConfirmations = $recentStmt->fetchAll();
+
+// ---- 直近確認分の参加者名をまとめて取得（一覧に表示するため） ----
+$recentParticipantsByRecordId = [];
+if (!empty($recentConfirmations)) {
+    $recentIds = array_column($recentConfirmations, 'id');
+    $placeholders = implode(',', array_fill(0, count($recentIds), '?'));
+    $participantsStmt = $pdo->prepare(
+        "SELECT wse.work_stage_record_id, e.name
+         FROM work_stage_record_employees wse
+         INNER JOIN employees e ON e.id = wse.employee_id
+         WHERE wse.work_stage_record_id IN ($placeholders)
+         ORDER BY e.name"
+    );
+    $participantsStmt->execute($recentIds);
+    foreach ($participantsStmt->fetchAll() as $row) {
+        $recentParticipantsByRecordId[(int) $row['work_stage_record_id']][] = $row['name'];
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="ja">
@@ -466,7 +568,7 @@ $recentConfirmations = $recentStmt->fetchAll();
 <body>
 <header>
     <h1>到着リネン袋の確認・返却リネン袋数の登録</h1>
-    <nav><a href="/staff/dashboard.php">ダッシュボードに戻る</a> | <a href="/staff/logout.php">ログアウト</a></nav>
+    <nav><?php if ((int) ($staff['is_shared_account'] ?? 0) !== 1): ?><a href="/staff/dashboard.php">ダッシュボードに戻る</a> | <?php endif; ?><a href="/staff/logout.php">ログアウト</a></nav>
 </header>
 
 <?php if ($flash !== null): ?>
@@ -487,8 +589,12 @@ $recentConfirmations = $recentStmt->fetchAll();
             <input type="hidden" name="id" value="<?= (int) $editFormValues['id'] ?>">
 
             <div class="form-row">
-                <label for="e_person_count">確認人数</label>
-                <input type="number" id="e_person_count" name="person_count" min="0" step="1" value="<?= htmlspecialchars($editFormValues['person_count'], ENT_QUOTES, 'UTF-8') ?>" required>
+                <label for="e_employee_ids">参加した従業員</label>
+                <select id="e_employee_ids" name="employee_ids[]" multiple size="<?= max(2, min(6, count($employees))) ?>">
+                    <?php foreach ($employees as $employee): ?>
+                        <option value="<?= (int) $employee['id'] ?>" <?= in_array((int) $employee['id'], $editFormValues['employee_ids'], true) ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                    <?php endforeach; ?>
+                </select>
             </div>
             <div class="form-row">
                 <label for="e_record_date">確認日</label>
@@ -508,7 +614,7 @@ $recentConfirmations = $recentStmt->fetchAll();
 
 <section class="unconfirmed-list">
     <h2>人数未確認の集荷サイクル</h2>
-    <p class="notice">クリーニング所に到着済みのリネン袋のうち、中身（人数）がまだ確認されていないものです。袋を開けて確認した人数を入力してください。入力すると作業実績（洗濯工程）として登録され、この一覧から消えます。</p>
+    <p class="notice">クリーニング所に到着済みのリネン袋のうち、中身（人数）がまだ確認されていないものです。袋を開けて確認し、実際に参加した従業員を選択してください。入力すると作業実績（洗濯工程）として登録され、この一覧から消えます。</p>
 
     <?php if (empty($unconfirmedCycles)): ?>
         <p class="notice">現在、人数未確認の集荷サイクルはありません。</p>
@@ -521,7 +627,7 @@ $recentConfirmations = $recentStmt->fetchAll();
                     <th>集荷リネン袋数</th>
                     <th>到着リネン袋数</th>
                     <th>到着時刻</th>
-                    <th>確認人数</th>
+                    <th>参加した従業員（複数選択可）</th>
                     <th></th>
                 </tr>
             </thead>
@@ -537,7 +643,13 @@ $recentConfirmations = $recentStmt->fetchAll();
                             <td><?= $cycle['pickup_bag_count'] !== null ? (int) $cycle['pickup_bag_count'] . '袋' : '-' ?></td>
                             <td><?= (int) $cycle['arrival_bag_count'] ?>袋</td>
                             <td><?= $cycle['arrival_time'] !== null ? htmlspecialchars(substr($cycle['arrival_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '-' ?></td>
-                            <td><input type="number" name="person_count" min="0" step="1" required></td>
+                            <td>
+                                <select name="employee_ids[]" multiple size="<?= max(2, min(6, count($employees))) ?>">
+                                    <?php foreach ($employees as $employee): ?>
+                                        <option value="<?= (int) $employee['id'] ?>" <?= (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </td>
                             <td><button type="submit">確認して登録</button></td>
                         </form>
                     </tr>
@@ -610,6 +722,7 @@ $recentConfirmations = $recentStmt->fetchAll();
                     <th>施設</th>
                     <th>集荷日</th>
                     <th>確認人数</th>
+                    <th>参加した従業員</th>
                     <th>確認日時</th>
                     <th>操作</th>
                 </tr>
@@ -620,6 +733,7 @@ $recentConfirmations = $recentStmt->fetchAll();
                         <td><?= htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($record['pickup_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= (int) $record['person_count'] ?>人</td>
+                        <td><?= !empty($recentParticipantsByRecordId[(int) $record['id']]) ? htmlspecialchars(implode('・', $recentParticipantsByRecordId[(int) $record['id']]), ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= htmlspecialchars($record['record_date'], ENT_QUOTES, 'UTF-8') ?> <?= $record['record_time'] !== null ? htmlspecialchars(substr($record['record_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '' ?></td>
                         <td>
                             <a href="/staff/collection_headcount.php?edit=<?= (int) $record['id'] ?>">編集</a>

@@ -1692,3 +1692,66 @@ function fetch_board_posts(PDO $pdo, string $boardType): array
 
     return $stmt->fetchAll();
 }
+
+/**
+ * work_stage_record_employees.started_at の算出: その従業員自身の直前のセッション
+ * （work_stage_records.completed_at が今回より前で最も新しいもの）のcompleted_atを使う。
+ * その日まだ何も参加していなければ、当日の洗濯代行区分での出勤時刻（attendance.clock_in_at）を使う。
+ * どちらも無い場合は今回のcompleted_at自体を使う（開始時刻不明のまま作業時間0にするよりまし）。
+ */
+function resolve_work_stage_started_at(PDO $pdo, int $employeeId, DateTime $completedAt): string
+{
+    $completedAtStr = $completedAt->format('Y-m-d H:i:s');
+
+    $prevStmt = $pdo->prepare(
+        'SELECT wsr.completed_at
+         FROM work_stage_record_employees wse
+         INNER JOIN work_stage_records wsr ON wsr.id = wse.work_stage_record_id
+         WHERE wse.employee_id = :employee_id
+           AND wsr.completed_at IS NOT NULL AND wsr.completed_at < :completed_at
+           AND wsr.deleted_at IS NULL
+         ORDER BY wsr.completed_at DESC
+         LIMIT 1'
+    );
+    $prevStmt->execute([':employee_id' => $employeeId, ':completed_at' => $completedAtStr]);
+    $prevCompletedAt = $prevStmt->fetchColumn();
+    if ($prevCompletedAt !== false) {
+        return $prevCompletedAt;
+    }
+
+    $clockInStmt = $pdo->prepare(
+        "SELECT clock_in_at
+         FROM attendance
+         WHERE employee_id = :employee_id AND category = '洗濯代行'
+           AND DATE(clock_in_at) = :work_date AND deleted_at IS NULL
+         ORDER BY clock_in_at ASC
+         LIMIT 1"
+    );
+    $clockInStmt->execute([':employee_id' => $employeeId, ':work_date' => $completedAt->format('Y-m-d')]);
+    $clockInAt = $clockInStmt->fetchColumn();
+
+    return $clockInAt !== false ? $clockInAt : $completedAtStr;
+}
+
+/**
+ * work_stage_records 1件（1セッション）の参加者を work_stage_record_employees に記録する。
+ * completed_at はセッション共通の1つ、started_at は参加者ごとにresolve_work_stage_started_atで算出する。
+ *
+ * @param list<int> $employeeIds
+ */
+function record_work_stage_employees(PDO $pdo, int $workStageRecordId, array $employeeIds, DateTime $completedAt): void
+{
+    $insertStmt = $pdo->prepare(
+        'INSERT INTO work_stage_record_employees (work_stage_record_id, employee_id, started_at)
+         VALUES (:work_stage_record_id, :employee_id, :started_at)'
+    );
+
+    foreach (array_unique($employeeIds) as $employeeId) {
+        $startedAt = resolve_work_stage_started_at($pdo, $employeeId, $completedAt);
+        $insertStmt->execute([
+            ':work_stage_record_id' => $workStageRecordId,
+            ':employee_id' => $employeeId,
+            ':started_at' => $startedAt,
+        ]);
+    }
+}

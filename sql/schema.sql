@@ -13,6 +13,7 @@ CREATE TABLE employees (
     hourly_wage_holiday    INT UNSIGNED NOT NULL COMMENT '土日祝時給（円）',
     commute_allowance_type   ENUM('daily','monthly') NOT NULL DEFAULT 'daily' COMMENT '交通費区分（日額/月額）',
     commute_allowance_amount INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '交通費金額（円、日額区分なら1出勤あたり、月額区分なら固定月額）',
+    is_shared_account      TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '共用アカウント（複数人が1つのログインを使い回す）か。ログイン後の遷移先判定にのみ使用し、業務ロジックの条件にはlogin_idではなくこちらを使う',
     status                 ENUM('invited','active','disabled') NOT NULL DEFAULT 'invited' COMMENT '登録状態',
     invite_code            VARCHAR(20)  NULL UNIQUE COMMENT '招待コード（本登録完了でNULLに戻す）',
     invite_code_expires_at DATETIME     NULL COMMENT '招待コード有効期限',
@@ -150,6 +151,7 @@ CREATE TABLE work_stage_records (
     person_count      INT UNSIGNED NOT NULL COMMENT '人数',
     record_date       DATE NOT NULL COMMENT '作業日',
     record_time       TIME NULL COMMENT '作業時刻（列追加前に登録された記録はNULL）',
+    completed_at      DATETIME NULL COMMENT '作業完了時刻（このセッションの参加者全員に共通。work_stage_record_employees.started_atの起点として使う。列追加前に登録された記録はNULL）',
     deleted_at        DATETIME NULL COMMENT '論理削除日時（管理者による削除、NULLなら有効）',
     created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_wsr_employee FOREIGN KEY (employee_id) REFERENCES employees(id),
@@ -158,6 +160,18 @@ CREATE TABLE work_stage_records (
     INDEX idx_wsr_facility_stage (facility_id, stage),
     INDEX idx_wsr_date (record_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='洗濯代行 工程別作業記録';
+
+CREATE TABLE work_stage_record_employees (
+    id                    INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    work_stage_record_id INT UNSIGNED NOT NULL COMMENT '対象の作業実績（work_stage_records.id）',
+    employee_id           INT UNSIGNED NOT NULL COMMENT '参加した従業員ID',
+    started_at             DATETIME NOT NULL COMMENT 'この従業員の開始時刻（本人の直前の完了セッションのcompleted_at、無ければ当日の洗濯代行出勤時刻）',
+    created_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_wse_record   FOREIGN KEY (work_stage_record_id) REFERENCES work_stage_records(id),
+    CONSTRAINT fk_wse_employee FOREIGN KEY (employee_id) REFERENCES employees(id),
+    INDEX idx_wse_record (work_stage_record_id),
+    INDEX idx_wse_employee_started (employee_id, started_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='work_stage_records（作業実績セッション）の参加者ごとの開始時刻';
 
 CREATE TABLE work_stage_record_edit_logs (
     id                    INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

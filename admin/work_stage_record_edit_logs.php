@@ -13,6 +13,8 @@ const FIELD_LABELS = [
     'person_count' => '人数',
     'record_date' => '作業日',
     'record_time' => '作業時刻',
+    'completed_at' => '完了時刻',
+    'employee_ids' => '参加した従業員',
 ];
 
 const STAGE_VALUE_LABELS = [
@@ -41,6 +43,16 @@ function format_wsr_log_value(?string $fieldName, ?string $value, array $employe
     }
     if ($fieldName === 'stage') {
         return STAGE_VALUE_LABELS[$value] ?? $value;
+    }
+    if ($fieldName === 'employee_ids') {
+        if ($value === '') {
+            return '（参加者なし）';
+        }
+        $names = array_map(
+            static fn (string $id): string => $employeeNames[(int) $id] ?? ('ID:' . $id),
+            explode(',', $value)
+        );
+        return implode('・', $names);
     }
     return $value;
 }

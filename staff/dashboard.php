@@ -5,6 +5,12 @@ require_once __DIR__ . '/../includes/functions.php';
 $staff = require_login('staff');
 $pdo = getPdo();
 
+// 共用アカウントが直接このURLに来た場合も、通常ダッシュボードは表示させず専用画面へ戻す。
+if ((int) ($staff['is_shared_account'] ?? 0) === 1) {
+    header('Location: /staff/collection_headcount.php');
+    exit;
+}
+
 $flash = pop_flash();
 
 $today = (new DateTime())->format('Y-m-d');

@@ -47,34 +47,41 @@ $facilitiesStmt = $pdo->query("SELECT id, name FROM facilities WHERE is_active =
 $facilities = $facilitiesStmt->fetchAll();
 $validFacilityIds = array_map('intval', array_column($facilities, 'id'));
 
+$employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' ORDER BY name");
+$employees = $employeesStmt->fetchAll();
+$validEmployeeIds = array_map('intval', array_column($employees, 'id'));
+
 $errorMessage = '';
 
 /**
- * 人数は0も有効な入力として扱う（「実績なし」を明示的に記録するため）。
- * facility_idが未選択、またはperson_count欄が空欄のままの行は「未入力」として単に無視する。
+ * facility_idが未選択の行は「未入力」として単に無視する。参加者0人（誰も選択しない）は
+ * 「実績なし」を明示的に記録するための有効な入力として扱う。
  * work_stage_recordsは洗濯代行の作業実績のみが対象のため、区分は常に「洗濯代行」で固定する。
  *
- * @return list<array{stage:string, facility_id:int, person_count:int, category:string}>
+ * @param list<list<string>> $employeeIdGroups 行ごとの選択済み従業員IDリスト（同じ添字で対応）
+ * @return list<array{stage:string, facility_id:int, employee_ids:list<int>, category:string}>
  */
-function collect_stage_rows(string $stage, array $facilityIds, array $personCounts, array $validFacilityIds): array
+function collect_stage_rows(string $stage, array $facilityIds, array $employeeIdGroups, array $validFacilityIds, array $validEmployeeIds): array
 {
     $rows = [];
     foreach ($facilityIds as $index => $rawFacilityId) {
         $facilityId = (int) $rawFacilityId;
-        $rawPersonCount = trim((string) ($personCounts[$index] ?? ''));
 
-        if ($facilityId <= 0 || $rawPersonCount === '') {
-            continue;
-        }
-        if (!in_array($facilityId, $validFacilityIds, true)) {
-            continue;
-        }
-        $personCount = (int) $rawPersonCount;
-        if ($personCount < 0) {
+        if ($facilityId <= 0 || !in_array($facilityId, $validFacilityIds, true)) {
             continue;
         }
 
-        $rows[] = ['stage' => $stage, 'facility_id' => $facilityId, 'person_count' => $personCount, 'category' => '洗濯代行'];
+        $rawEmployeeIds = $employeeIdGroups[$index] ?? [];
+        $employeeIds = [];
+        foreach ((array) $rawEmployeeIds as $rawEmployeeId) {
+            $employeeId = (int) $rawEmployeeId;
+            if (in_array($employeeId, $validEmployeeIds, true)) {
+                $employeeIds[] = $employeeId;
+            }
+        }
+        $employeeIds = array_values(array_unique($employeeIds));
+
+        $rows[] = ['stage' => $stage, 'facility_id' => $facilityId, 'employee_ids' => $employeeIds, 'category' => '洗濯代行'];
     }
 
     return $rows;
@@ -92,8 +99,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stageRows = collect_stage_rows(
                 $stageKey,
                 $_POST[$stageKey . '_facility_id'] ?? [],
-                $_POST[$stageKey . '_person_count'] ?? [],
-                $validFacilityIds
+                $_POST[$stageKey . '_employee_ids'] ?? [],
+                $validFacilityIds,
+                $validEmployeeIds
             );
             $rows = array_merge($rows, $stageRows);
         }
@@ -109,7 +117,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $missingStages = array_diff(array_keys($stageLabels), $presentStages);
             if (!empty($missingStages)) {
                 $missingLabels = array_map(static fn (string $s): string => $stageLabels[$s], $missingStages);
-                $errorMessage = implode('・', $missingLabels) . 'の人数を入力してください（実績が無い場合も0を入力してください）。';
+                $errorMessage = implode('・', $missingLabels) . 'の施設を入力してください（実績が無い場合も施設のみ選択し、参加者は未選択のままで構いません）。';
             }
         }
 
@@ -125,8 +133,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $pdo->beginTransaction();
 
             $insertStmt = $pdo->prepare(
-                'INSERT INTO work_stage_records (employee_id, category, facility_id, stage, person_count, record_date)
-                 VALUES (:employee_id, :category, :facility_id, :stage, :person_count, :record_date)'
+                'INSERT INTO work_stage_records (employee_id, category, facility_id, stage, person_count, record_date, completed_at)
+                 VALUES (:employee_id, :category, :facility_id, :stage, :person_count, :record_date, :completed_at)'
             );
             foreach ($rows as $row) {
                 $insertStmt->execute([
@@ -134,9 +142,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':category' => $row['category'],
                     ':facility_id' => $row['facility_id'],
                     ':stage' => $row['stage'],
-                    ':person_count' => $row['person_count'],
+                    ':person_count' => count($row['employee_ids']),
                     ':record_date' => $today,
+                    ':completed_at' => $clockOutAt->format('Y-m-d H:i:s'),
                 ]);
+                if (!empty($row['employee_ids'])) {
+                    record_work_stage_employees($pdo, (int) $pdo->lastInsertId(), $row['employee_ids'], $clockOutAt);
+                }
             }
 
             $updateStmt = $pdo->prepare(
@@ -223,7 +235,7 @@ $csrfToken = csrf_token();
 <?php endif; ?>
 
 <?php if ($stagesRequired): ?>
-    <p class="notice">区分「<?= htmlspecialchars($defaultCategory, ENT_QUOTES, 'UTF-8') ?>」での退勤のため、洗濯の人数入力が必須です。実績が無い場合は「0」を入力してください。送信すると退勤が確定します。</p>
+    <p class="notice">区分「<?= htmlspecialchars($defaultCategory, ENT_QUOTES, 'UTF-8') ?>」での退勤のため、洗濯の施設入力が必須です。実績が無い場合は施設のみ選択し、参加した従業員は未選択のままで送信してください。送信すると退勤が確定します。</p>
 <?php else: ?>
     <p class="notice">退勤する前に、本日の洗濯の実績を入力してください（実績がなければ未入力のままで構いません）。送信すると退勤が確定します。</p>
 <?php endif; ?>
@@ -244,7 +256,7 @@ $csrfToken = csrf_token();
                 <thead>
                     <tr>
                         <th>施設</th>
-                        <th>人数</th>
+                        <th>参加した従業員（複数選択可）</th>
                         <th></th>
                     </tr>
                 </thead>
@@ -258,7 +270,13 @@ $csrfToken = csrf_token();
                                 <?php endforeach; ?>
                             </select>
                         </td>
-                        <td><input type="number" name="<?= htmlspecialchars($stageKey, ENT_QUOTES, 'UTF-8') ?>_person_count[]" min="0" step="1"></td>
+                        <td>
+                            <select class="employee-select" multiple size="<?= max(2, min(6, count($employees))) ?>">
+                                <?php foreach ($employees as $employee): ?>
+                                    <option value="<?= (int) $employee['id'] ?>" <?= (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
                         <td><button type="button" onclick="removeRow(this, '<?= htmlspecialchars($stageKey, ENT_QUOTES, 'UTF-8') ?>')">削除</button></td>
                     </tr>
                 </tbody>
@@ -271,11 +289,35 @@ $csrfToken = csrf_token();
 </form>
 
 <script>
+var stageKeys = <?= json_encode(array_keys($stageLabels)) ?>;
+
+// employee-select（複数選択）は行の追加・削除で位置がずれるため、送信直前にDOM上の並び順で
+// stage_employee_ids[行番号][] という名前を振り直す（nameを常に固定にすると、PHP側で
+// 同じ行のselectで選んだ複数値がバラバラの行として展開されてしまうため、行ごとに明示的な番号が必要）。
+function renumberEmployeeSelects() {
+    stageKeys.forEach(function (stage) {
+        var rows = document.querySelectorAll('#rows-table-' + stage + ' tbody tr');
+        rows.forEach(function (row, index) {
+            var select = row.querySelector('.employee-select');
+            if (select) {
+                select.name = stage + '_employee_ids[' + index + '][]';
+            }
+        });
+    });
+}
+
 function addRow(stage) {
     var tbody = document.querySelector('#rows-table-' + stage + ' tbody');
     var template = tbody.querySelector('tr');
     var clone = template.cloneNode(true);
-    clone.querySelectorAll('select, input').forEach(function (el) { el.value = ''; });
+    clone.querySelectorAll('select').forEach(function (el) {
+        if (el.multiple) {
+            Array.prototype.forEach.call(el.options, function (opt) { opt.selected = false; });
+        } else {
+            el.value = '';
+        }
+    });
+    clone.querySelectorAll('input').forEach(function (el) { el.value = ''; });
     tbody.appendChild(clone);
 }
 
@@ -295,6 +337,7 @@ document.getElementById('clock-out-form').addEventListener('submit', function (e
     }
 
     e.preventDefault();
+    renumberEmployeeSelects();
     button.disabled = true;
     button.textContent = '処理中...';
 

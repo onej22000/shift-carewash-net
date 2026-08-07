@@ -36,7 +36,7 @@ function attempt_login(string $loginId, string $password, string $expectedRole):
 {
     $pdo = getPdo();
     $stmt = $pdo->prepare(
-        'SELECT id, name, role, login_id, password_hash, status
+        'SELECT id, name, role, login_id, password_hash, status, is_shared_account
          FROM employees
          WHERE login_id = :login_id AND role = :role AND status = "active"
          LIMIT 1'
@@ -68,6 +68,16 @@ function login_employee(array $employee): void
     refresh_session_cookie();
 }
 
+// 共用アカウント（is_shared_account=1）はログイン後、通常のダッシュボードではなく
+// 専用の画面（集荷サイクルの人数確認・返却リネン袋数登録）へ遷移させる。
+// login_idを条件に使うと将来IDを変更したときに気づかず壊れるため、is_shared_accountで判定する。
+function staff_landing_page(array $employee): string
+{
+    return ((int) ($employee['is_shared_account'] ?? 0) === 1)
+        ? '/staff/collection_headcount.php'
+        : '/staff/dashboard.php';
+}
+
 function current_employee(): ?array
 {
     start_session_once();
@@ -91,7 +101,7 @@ function current_employee(): ?array
 
     $pdo = getPdo();
     $stmt = $pdo->prepare(
-        'SELECT id, name, role, login_id, status
+        'SELECT id, name, role, login_id, status, is_shared_account
          FROM employees
          WHERE id = :id AND status = "active"
          LIMIT 1'
