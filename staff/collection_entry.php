@@ -190,6 +190,9 @@ function format_cycle_candidate_label(array $cycle, array $facilityNamesById = [
     if ($cycle['dispatch_bag_count'] !== null) {
         $parts[] = '発送' . (int) $cycle['dispatch_bag_count'] . '袋';
     }
+    if (($cycle['return_ready_bag_count'] ?? null) !== null) {
+        $parts[] = '洗濯代行登録' . (int) $cycle['return_ready_bag_count'] . '袋';
+    }
     return $parts[0] . '（' . implode('／', array_slice($parts, 1)) . '）';
 }
 
@@ -948,7 +951,11 @@ function format_stage_cell($bagCount, $time): string
                         <?php endif; ?>
                         <div class="form-row">
                             <label for="return_bag_count">返却リネン袋数</label>
-                            <input type="number" id="return_bag_count" name="return_bag_count" min="0" step="1">
+                            <?php $readyBagCount = $step2['return_candidates'][0]['return_ready_bag_count'] ?? null; ?>
+                            <input type="number" id="return_bag_count" name="return_bag_count" min="0" step="1" value="<?= $readyBagCount !== null ? (int) $readyBagCount : '' ?>">
+                            <?php if ($readyBagCount !== null): ?>
+                                <p class="notice">洗濯代行が登録した数（<?= (int) $readyBagCount ?>袋）を初期値にしています。実際の数と違う場合は修正してください。</p>
+                            <?php endif; ?>
                         </div>
                         <div class="form-grid">
                             <div class="form-row">

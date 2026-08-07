@@ -487,6 +487,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && in_array((s
             $formValues[$field] = (string) $value;
         }
     }
+    // 洗濯代行がcollection_headcount.phpで登録した返却準備完了の数（参考値）を、
+    // まだ返却が確定していない（return_bag_count未入力の）場合のみ初期値として提案する。
+    if ($formValues['return_bag_count'] === '' && $editingCycle['return_ready_bag_count'] !== null) {
+        $formValues['return_bag_count'] = (string) $editingCycle['return_ready_bag_count'];
+    }
 }
 
 $facilitiesStmtAll = $facilities;
@@ -736,6 +741,9 @@ function cr_issued(array $record): string
                 <div class="form-row">
                     <label for="f_return_bag_count">返却リネン袋数</label>
                     <input type="number" id="f_return_bag_count" name="return_bag_count" min="0" step="1" value="<?= htmlspecialchars($formValues['return_bag_count'], ENT_QUOTES, 'UTF-8') ?>">
+                    <?php if ($editingCycle !== null && $editingCycle['return_ready_bag_count'] !== null): ?>
+                        <p class="notice">洗濯代行が登録した数（<?= (int) $editingCycle['return_ready_bag_count'] ?>袋）を初期値にしています。実際の数と違う場合は修正してください。</p>
+                    <?php endif; ?>
                 </div>
                 <div class="form-row">
                     <label for="f_return_date">返却日</label>

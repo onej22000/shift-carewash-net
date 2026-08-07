@@ -13,8 +13,11 @@ const HEADCOUNT_LOG_FIELDS = ['category', 'facility_id', 'collection_cycle_id', 
 // person_count・completed_atは参加者選択（employee_ids、別ロジックで扱う）から自動で算出・更新する。
 const HEADCOUNT_EDITABLE_FIELDS = ['person_count', 'record_date', 'record_time', 'completed_at'];
 
-// 返却リネン袋数登録で書き込むcollection_cyclesのフィールド一覧（監査ログ用）。
-const RETURN_LOG_FIELDS = ['return_bag_count', 'return_date', 'return_time', 'return_employee_id'];
+// 返却準備完了登録で書き込むcollection_cyclesのフィールド一覧（監査ログ用）。
+// ここで登録するのは洗濯代行による「返却できる状態になった」という参考値（return_ready_*）であり、
+// 実際の返却記録（return_bag_count等）はドライバーがstaff/collection_entry.php・admin/collection_records.php
+// で確認・記録した時点で確定する。
+const RETURN_READY_LOG_FIELDS = ['return_ready_bag_count', 'return_ready_at', 'return_ready_employee_id'];
 
 function find_unconfirmed_cycles(PDO $pdo): array
 {
@@ -31,20 +34,19 @@ function find_unconfirmed_cycles(PDO $pdo): array
 }
 
 /**
- * クリーニング所発送済み（dispatch_bag_count入力済み）だが、まだ返却リネン袋数
- * （collection_cycles.return_bag_count）が登録されていない集荷サイクルを、古い順に返す。
- * staff/collection_entry.php・collection_records.phpの「返却」欄と同じ対象条件
- * （dispatch_bag_count IS NOT NULL AND return_bag_count IS NULL）を使うため、
- * どちらの画面で先に登録しても、もう一方の一覧からは自動的に消える。
+ * クリーニング所発送済み（dispatch_bag_count入力済み）だが、まだ返却準備完了
+ * （collection_cycles.return_ready_bag_count）を登録していない集荷サイクルを、古い順に返す。
+ * ここで登録した値はドライバーの最終確認（return_bag_count）の初期値として使われるだけなので、
+ * 二重登録防止のためこの条件で絞る（return_bag_countではなくreturn_ready_bag_countを見る）。
  */
-function find_unreturned_cycles(PDO $pdo): array
+function find_pending_return_ready_cycles(PDO $pdo): array
 {
     $stmt = $pdo->query(
         "SELECT cc.id, cc.facility_id, cc.pickup_date, cc.dispatch_bag_count, cc.dispatch_date,
                 f.name AS facility_name
          FROM collection_cycles cc
          INNER JOIN facilities f ON f.id = cc.facility_id
-         WHERE cc.dispatch_bag_count IS NOT NULL AND cc.return_bag_count IS NULL AND cc.deleted_at IS NULL
+         WHERE cc.dispatch_bag_count IS NOT NULL AND cc.return_ready_bag_count IS NULL AND cc.deleted_at IS NULL
          ORDER BY cc.pickup_date ASC, cc.id ASC"
     );
     return $stmt->fetchAll();
@@ -163,45 +165,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($action === 'register_return') {
             $cycleId = (int) ($_POST['cycle_id'] ?? 0);
 
-            $unreturnedCycles = find_unreturned_cycles($pdo);
-            $unreturnedById = [];
-            foreach ($unreturnedCycles as $cycle) {
-                $unreturnedById[(int) $cycle['id']] = $cycle;
+            $pendingReadyCycles = find_pending_return_ready_cycles($pdo);
+            $pendingReadyById = [];
+            foreach ($pendingReadyCycles as $cycle) {
+                $pendingReadyById[(int) $cycle['id']] = $cycle;
             }
 
-            $returnBagCount = parse_return_bag_count($_POST['return_bag_count'] ?? '');
-            $returnDate = cc_parse_return_date($_POST['return_date'] ?? '');
-            $returnTime = cc_parse_return_time($_POST['return_time'] ?? '');
-            $returnEmployeeId = cc_parse_return_employee_id($_POST['return_employee_id'] ?? '', $validEmployeeIds);
+            $returnReadyBagCount = parse_return_bag_count($_POST['return_bag_count'] ?? '');
+            $returnReadyDate = cc_parse_return_date($_POST['return_date'] ?? '');
+            $returnReadyTime = cc_parse_return_time($_POST['return_time'] ?? '');
+            $returnReadyEmployeeId = cc_parse_return_employee_id($_POST['return_employee_id'] ?? '', $validEmployeeIds);
 
-            if (!isset($unreturnedById[$cycleId])) {
-                $errorMessage = '対象のサイクルは既に返却登録済みか、無効です。もう一度やり直してください。';
-            } elseif ($returnBagCount === null) {
+            if (!isset($pendingReadyById[$cycleId])) {
+                $errorMessage = '対象のサイクルは既に返却準備完了を登録済みか、無効です。もう一度やり直してください。';
+            } elseif ($returnReadyBagCount === null) {
                 $errorMessage = '返却リネン袋数は0以上の整数を入力してください。';
-            } elseif ($returnDate === false || $returnDate === null) {
-                $errorMessage = '返却日の形式が正しくありません。';
-            } elseif ($returnTime === false || $returnTime === null) {
-                $errorMessage = '返却時間の形式が正しくありません。';
-            } elseif ($returnEmployeeId === false) {
-                $errorMessage = '返却担当者が正しくありません。';
+            } elseif ($returnReadyDate === false || $returnReadyDate === null) {
+                $errorMessage = '登録日の形式が正しくありません。';
+            } elseif ($returnReadyTime === false || $returnReadyTime === null) {
+                $errorMessage = '登録時間の形式が正しくありません。';
+            } elseif ($returnReadyEmployeeId === false) {
+                $errorMessage = '登録担当者が正しくありません。';
             } else {
-                $cycle = $unreturnedById[$cycleId];
+                $cycle = $pendingReadyById[$cycleId];
+                $returnReadyAt = $returnReadyDate . ' ' . $returnReadyTime;
 
                 try {
                     $pdo->beginTransaction();
 
                     $newValues = [
-                        'return_bag_count' => $returnBagCount,
-                        'return_date' => $returnDate,
-                        'return_time' => $returnTime,
-                        'return_employee_id' => $returnEmployeeId,
+                        'return_ready_bag_count' => $returnReadyBagCount,
+                        'return_ready_at' => $returnReadyAt,
+                        'return_ready_employee_id' => $returnReadyEmployeeId,
                     ];
 
                     $logStmt = $pdo->prepare(
                         'INSERT INTO collection_cycle_edit_logs (collection_cycle_id, edited_by, action, field_name, old_value, new_value)
                          VALUES (:cycle_id, :edited_by, :action, :field_name, NULL, :new_value)'
                     );
-                    foreach (RETURN_LOG_FIELDS as $field) {
+                    foreach (RETURN_READY_LOG_FIELDS as $field) {
                         $logStmt->execute([
                             ':cycle_id' => $cycleId,
                             ':edited_by' => $admin['id'],
@@ -213,20 +215,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     $updateStmt = $pdo->prepare(
                         'UPDATE collection_cycles
-                         SET return_bag_count = :return_bag_count, return_date = :return_date,
-                             return_time = :return_time, return_employee_id = :return_employee_id
+                         SET return_ready_bag_count = :return_ready_bag_count, return_ready_at = :return_ready_at,
+                             return_ready_employee_id = :return_ready_employee_id
                          WHERE id = :id'
                     );
                     $updateStmt->execute([
-                        ':return_bag_count' => $returnBagCount,
-                        ':return_date' => $returnDate,
-                        ':return_time' => $returnTime,
-                        ':return_employee_id' => $returnEmployeeId,
+                        ':return_ready_bag_count' => $returnReadyBagCount,
+                        ':return_ready_at' => $returnReadyAt,
+                        ':return_ready_employee_id' => $returnReadyEmployeeId,
                         ':id' => $cycleId,
                     ]);
 
                     $pdo->commit();
-                    set_flash('success', htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $cycle['pickup_date'] . '集荷分）の返却リネン袋数（' . $returnBagCount . '袋）を登録しました。');
+                    set_flash('success', htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $cycle['pickup_date'] . '集荷分）の返却準備完了（' . $returnReadyBagCount . '袋）を登録しました。ドライバーが集荷・配送記録画面で確認・記録すると返却が確定します。');
                     header('Location: /admin/collection_headcount.php?period=' . urlencode($period));
                     exit;
                 } catch (\Throwable $e) {
@@ -509,7 +510,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($
 }
 
 $unconfirmedCycles = find_unconfirmed_cycles($pdo);
-$unreturnedCycles = find_unreturned_cycles($pdo);
+$pendingReadyCycles = find_pending_return_ready_cycles($pdo);
 
 // ---- 確認済み一覧（対象期間、全従業員・管理者分） ----
 $dateCondition = '';
@@ -676,11 +677,11 @@ if (!empty($confirmations)) {
 </section>
 
 <section class="unreturned-list">
-    <h2>返却リネン袋数の登録</h2>
-    <p class="notice">クリーニング所から発送済みのリネン袋のうち、施設へ返却する袋数がまだ登録されていないものです。</p>
+    <h2>返却準備完了の登録（青袋）</h2>
+    <p class="notice">クリーニング所で洗濯・袋詰めが完了し、施設へ返却できる状態になったリネン袋数を登録します。ここで登録した数はドライバーへの目安として使われ、実際の返却記録はドライバーが集荷・配送記録画面で確認・登録した時点で確定します。</p>
 
-    <?php if (empty($unreturnedCycles)): ?>
-        <p class="notice">現在、返却未登録の集荷サイクルはありません。</p>
+    <?php if (empty($pendingReadyCycles)): ?>
+        <p class="notice">現在、返却準備完了の未登録の集荷サイクルはありません。</p>
     <?php else: ?>
         <table class="cycles">
             <thead>
@@ -690,14 +691,14 @@ if (!empty($confirmations)) {
                     <th>発送リネン袋数</th>
                     <th>発送日</th>
                     <th>返却リネン袋数</th>
-                    <th>返却日</th>
-                    <th>返却時間</th>
-                    <th>返却担当者</th>
+                    <th>登録日</th>
+                    <th>登録時間</th>
+                    <th>登録担当者</th>
                     <th></th>
                 </tr>
             </thead>
             <tbody>
-                <?php foreach ($unreturnedCycles as $cycle): ?>
+                <?php foreach ($pendingReadyCycles as $cycle): ?>
                     <tr>
                         <form method="post" action="/admin/collection_headcount.php?period=<?= htmlspecialchars($period, ENT_QUOTES, 'UTF-8') ?>">
                             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
@@ -718,7 +719,7 @@ if (!empty($confirmations)) {
                                     <?php endforeach; ?>
                                 </select>
                             </td>
-                            <td><button type="submit">返却を登録</button></td>
+                            <td><button type="submit">準備完了を登録</button></td>
                         </form>
                     </tr>
                 <?php endforeach; ?>

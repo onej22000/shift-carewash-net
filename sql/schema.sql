@@ -237,7 +237,10 @@ CREATE TABLE collection_cycles (
     dispatch_time         TIME NULL COMMENT 'クリーニング所発送時刻',
     dispatch_employee_id  INT UNSIGNED NULL COMMENT 'クリーニング所発送担当者',
     dispatch_facility_id  INT UNSIGNED NULL COMMENT '発送元のクリーニング所（facilities.facility_type=クリーニング所）。施設間移動時間の算出に使用',
-    return_bag_count      INT UNSIGNED NULL COMMENT '返却時のリネン袋数',
+    return_ready_bag_count    INT UNSIGNED NULL COMMENT '洗濯代行が登録した返却準備完了時のリネン袋数（青袋）。ドライバー確認前の参考値。集荷・配送記録画面の返却欄の初期値として使用',
+    return_ready_at           DATETIME NULL COMMENT '洗濯代行が返却準備完了を登録した日時',
+    return_ready_employee_id  INT UNSIGNED NULL COMMENT '返却準備完了を登録した洗濯代行スタッフ',
+    return_bag_count      INT UNSIGNED NULL COMMENT '返却時のリネン袋数（ドライバーが集荷・配送記録画面で確認・記録した確定値。return_ready_bag_countは参考値で、これが最終記録）',
     return_date           DATE NULL COMMENT '返却日（集荷日から日をまたいで後日になることが多い。返却は次回集荷と同じ訪問で行われることが多いため、pickup_dateとは独立して持つ）',
     return_time           TIME NULL COMMENT '返却時刻',
     return_employee_id    INT UNSIGNED NULL COMMENT '返却担当者',
@@ -251,6 +254,7 @@ CREATE TABLE collection_cycles (
     CONSTRAINT fk_cc_arrival_facility   FOREIGN KEY (arrival_facility_id)   REFERENCES facilities(id),
     CONSTRAINT fk_cc_dispatch_employee  FOREIGN KEY (dispatch_employee_id) REFERENCES employees(id),
     CONSTRAINT fk_cc_dispatch_facility  FOREIGN KEY (dispatch_facility_id) REFERENCES facilities(id),
+    CONSTRAINT fk_cc_return_ready_employee FOREIGN KEY (return_ready_employee_id) REFERENCES employees(id),
     CONSTRAINT fk_cc_return_employee    FOREIGN KEY (return_employee_id)   REFERENCES employees(id),
     INDEX idx_cc_facility_pickup_date (facility_id, pickup_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='施設×集荷日を1サイクルとする集荷・配送記録簿（集荷→クリーニング所到着→発送→返却）。各工程は前工程が入力済みの直近未完了サイクルにのみ入力できる';
