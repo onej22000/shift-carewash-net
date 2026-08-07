@@ -42,8 +42,10 @@ function parse_consumable_stock_input(array $post, array $validFacilityIds): arr
 {
     $itemType = (string) ($post['item_type'] ?? '');
 
+    // 在庫は倉庫在庫の概念のため、入力は常に正数（増減の大きさ）のみを受け付け、
+    // 実際の符号（＋／－）は増減理由から自動的に決定する（下記 CONSUMABLE_REASON_SIGN 参照）。
     $quantityRaw = trim((string) ($post['quantity'] ?? ''));
-    $quantity = $quantityRaw === '' || !preg_match('/^-?\d+$/', $quantityRaw) ? null : (int) $quantityRaw;
+    $quantityMagnitude = $quantityRaw === '' || !preg_match('/^\d+$/', $quantityRaw) ? null : (int) $quantityRaw;
 
     $reason = (string) ($post['reason'] ?? '');
     $reason = array_key_exists($reason, CONSUMABLE_REASON_LABELS) ? $reason : null;
@@ -68,19 +70,11 @@ function parse_consumable_stock_input(array $post, array $validFacilityIds): arr
     if (!array_key_exists($itemType, CONSUMABLE_ITEM_LABELS)) {
         $errors[] = '品目を選択してください。';
     }
-    if ($quantity === null || $quantity === 0) {
-        $errors[] = '増減数は0以外の整数を入力してください。';
+    if ($quantityMagnitude === null || $quantityMagnitude === 0) {
+        $errors[] = '増減数は1以上の整数を正の数で入力してください。';
     }
     if ($reason === null) {
         $errors[] = '増減理由を選択してください。';
-    } elseif ($quantity !== null && $quantity !== 0 && isset(CONSUMABLE_REASON_SIGN[$reason])) {
-        $expectedSign = CONSUMABLE_REASON_SIGN[$reason];
-        $actualSign = $quantity > 0 ? 'positive' : 'negative';
-        if ($actualSign !== $expectedSign) {
-            $errors[] = $expectedSign === 'positive'
-                ? '「' . CONSUMABLE_REASON_LABELS[$reason] . '」は在庫が増えるため、プラスで入力してください。'
-                : '「' . CONSUMABLE_REASON_LABELS[$reason] . '」は在庫が減るため、マイナスで入力してください。';
-        }
     }
     if ($facilityId === false) {
         $errors[] = '対象施設等が正しくありません。';
@@ -94,6 +88,12 @@ function parse_consumable_stock_input(array $post, array $validFacilityIds): arr
     // 理由が施設等に紐づかない場合（購入・廃棄・紛失）は施設等の指定を無視する
     if ($reason !== null && !in_array($reason, CONSUMABLE_REASONS_REQUIRING_FACILITY, true)) {
         $facilityId = null;
+    }
+
+    // 入力された正数の増減幅に、増減理由に応じた符号を自動で付与する
+    $quantity = null;
+    if ($quantityMagnitude !== null && $reason !== null && isset(CONSUMABLE_REASON_SIGN[$reason])) {
+        $quantity = CONSUMABLE_REASON_SIGN[$reason] === 'negative' ? -$quantityMagnitude : $quantityMagnitude;
     }
 
     return [
@@ -243,7 +243,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formAction = 'update';
     $formId = (int) $editingRecord['id'];
     $formItemType = $editingRecord['item_type'];
-    $formQuantity = (string) $editingRecord['quantity'];
+    // DB上は符号付きで保存されているが、入力欄は常に正数（大きさ）のみを表示する
+    $formQuantity = (string) abs((int) $editingRecord['quantity']);
     $formReason = $editingRecord['reason'];
     $formFacilityId = $editingRecord['facility_id'] !== null ? (string) $editingRecord['facility_id'] : '';
     $formTransactionDate = $editingRecord['transaction_date'];
@@ -349,8 +350,8 @@ $records = $listStmt->fetchAll();
 
             <div class="form-row">
                 <label for="quantity">増減数</label>
-                <input type="number" id="quantity" name="quantity" step="1" value="<?= htmlspecialchars($formQuantity, ENT_QUOTES, 'UTF-8') ?>" required>
-                <div style="font-size:0.8em;color:#777;">増減理由に応じて符号が決まります：購入・施設等からの返却＝プラス／廃棄・紛失・施設等への交付＝マイナス。矛盾する符号は登録時にエラーになります。</div>
+                <input type="number" id="quantity" name="quantity" step="1" min="1" value="<?= htmlspecialchars($formQuantity, ENT_QUOTES, 'UTF-8') ?>" required>
+                <div style="font-size:0.8em;color:#777;">常に正の数（増減の大きさ）を入力してください。在庫が増えるか減るかは増減理由から自動判定されます：購入・施設等からの返却＝在庫＋／廃棄・紛失・施設等への交付＝在庫－。</div>
             </div>
 
             <div class="form-row">
