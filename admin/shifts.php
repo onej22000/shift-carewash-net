@@ -713,7 +713,7 @@ function render_day_detail(
     </fieldset>
 </section>
 
-<section class="calendar-section">
+<section class="calendar-section" id="calendar-section">
     <div class="calendar-nav">
         <a href="?view=<?= $view ?>&date=<?= $prevDate ?>">← 前<?= $viewLabel ?></a>
         <a href="?view=<?= $view ?>&date=<?= $todayStr ?>">今日</a>
@@ -827,7 +827,7 @@ function render_day_detail(
                                 $classes[] = 'sun-holiday';
                             }
                             ?>
-                            <th class="<?= implode(' ', $classes) ?>">
+                            <th class="<?= implode(' ', $classes) ?>" data-date="<?= $dateStr ?>">
                                 <?= $d->format('n/j') ?>（<?= $weekdayLabels[$weekdayIndex - 1] ?>）
                             </th>
                         <?php endforeach; ?>
@@ -1055,6 +1055,32 @@ function updateEstimate() {
     out.textContent = h + '時間' + (m < 10 ? '0' + m : m) + '分（休憩調整前）';
 }
 updateEstimate();
+
+<?php if ($flash !== null): ?>
+// 登録・更新・削除の直後（PRGリダイレクト後）は、保存対象の日付が
+// カレンダー/グリッドのどの位置にあるか分かるよう、その日付までスクロールする。
+// ページ自体はブラウザの既定動作で先頭にスクロールされるため、何もしないと
+// 「シフト表セクションまでスクロールしないと保存結果が見えない＝先頭に戻ったように見える」
+// という体感になっていた。
+(function () {
+    var params = new URLSearchParams(location.search);
+    var focusDate = params.get(<?= json_encode($view === 'calendar' ? 'selected' : 'date') ?>);
+    var calendarSection = document.getElementById('calendar-section');
+    if (calendarSection) {
+        calendarSection.scrollIntoView({ block: 'start' });
+    }
+    if (!focusDate) {
+        return;
+    }
+    var grid = document.getElementById('grid-scroll');
+    if (grid) {
+        var col = grid.querySelector('th[data-date="' + focusDate + '"]');
+        if (col) {
+            col.scrollIntoView({ inline: 'center', block: 'nearest' });
+        }
+    }
+})();
+<?php endif; ?>
 </script>
 </body>
 </html>
