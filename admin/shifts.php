@@ -27,6 +27,19 @@ function build_shift_redirect_url(string $view, string $dateStr): string
 }
 
 /**
+ * 時・分プルダウン（分は00/30のみ）から送信された値を"HH:MM"へ結合する。
+ * 不正な値（未選択・分が00/30以外など）は空文字を返し、以降のvalidate_shift_input()の
+ * 形式チェックで弾かれる。
+ */
+function combine_time_parts(string $hour, string $minute): string
+{
+    if (!preg_match('/^([01]\d|2[0-3])$/', $hour) || !in_array($minute, ['00', '30'], true)) {
+        return '';
+    }
+    return $hour . ':' . $minute;
+}
+
+/**
  * calc_shift_wage_summary()等が返すcategory_wage（区分=>金額）を「店舗:1,000円 洗濯代行:500円 集荷:0円」
  * のような小さいテキストに整形する。category_wageが空（区分データ無し）の場合は空文字を返す。
  */
@@ -148,8 +161,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($action === 'create' || $action === 'update') {
             $employeeId = (int) ($_POST['employee_id'] ?? 0);
             $workDate = (string) ($_POST['work_date'] ?? '');
-            $startTime = (string) ($_POST['start_time'] ?? '');
-            $endTime = (string) ($_POST['end_time'] ?? '');
+            $startTime = combine_time_parts((string) ($_POST['start_time_hour'] ?? ''), (string) ($_POST['start_time_minute'] ?? ''));
+            $endTime = combine_time_parts((string) ($_POST['end_time_hour'] ?? ''), (string) ($_POST['end_time_minute'] ?? ''));
             $note = trim((string) ($_POST['note'] ?? ''));
             $note = $note === '' ? null : $note;
             $categories = sanitize_categories((array) ($_POST['categories'] ?? []));
@@ -257,8 +270,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formShiftId = $formAction === 'update' ? (int) ($_POST['shift_id'] ?? 0) : null;
     $formEmployeeId = (string) ($_POST['employee_id'] ?? '');
     $formWorkDate = (string) ($_POST['work_date'] ?? '');
-    $formStartTime = (string) ($_POST['start_time'] ?? '');
-    $formEndTime = (string) ($_POST['end_time'] ?? '');
+    $formStartTime = combine_time_parts((string) ($_POST['start_time_hour'] ?? ''), (string) ($_POST['start_time_minute'] ?? ''));
+    $formEndTime = combine_time_parts((string) ($_POST['end_time_hour'] ?? ''), (string) ($_POST['end_time_minute'] ?? ''));
     $formNote = (string) ($_POST['note'] ?? '');
     $formCategories = sanitize_categories((array) ($_POST['categories'] ?? []));
 } elseif ($editingShift !== null) {
@@ -625,14 +638,44 @@ function render_day_detail(
                 <input type="date" id="work_date" name="work_date" value="<?= htmlspecialchars($formWorkDate, ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
 
+            <?php
+            $formStartHour = $formStartTime !== '' ? substr($formStartTime, 0, 2) : '';
+            $formStartMinute = $formStartTime !== '' ? substr($formStartTime, 3, 2) : '';
+            $formEndHour = $formEndTime !== '' ? substr($formEndTime, 0, 2) : '';
+            $formEndMinute = $formEndTime !== '' ? substr($formEndTime, 3, 2) : '';
+            ?>
             <div class="form-row">
-                <label for="start_time">開始時刻</label>
-                <input type="time" id="start_time" name="start_time" value="<?= htmlspecialchars($formStartTime, ENT_QUOTES, 'UTF-8') ?>" step="1800" required oninput="updateEstimate()">
+                <label for="start_time_hour">開始時刻</label>
+                <select id="start_time_hour" name="start_time_hour" required onchange="updateEstimate()">
+                    <option value="">--</option>
+                    <?php for ($h = 0; $h < 24; $h++): $hh = sprintf('%02d', $h); ?>
+                        <option value="<?= $hh ?>" <?= $hh === $formStartHour ? 'selected' : '' ?>><?= $hh ?></option>
+                    <?php endfor; ?>
+                </select>
+                :
+                <select id="start_time_minute" name="start_time_minute" required onchange="updateEstimate()">
+                    <option value="">--</option>
+                    <?php foreach (['00', '30'] as $mm): ?>
+                        <option value="<?= $mm ?>" <?= $mm === $formStartMinute ? 'selected' : '' ?>><?= $mm ?></option>
+                    <?php endforeach; ?>
+                </select>
             </div>
 
             <div class="form-row">
-                <label for="end_time">終了時刻</label>
-                <input type="time" id="end_time" name="end_time" value="<?= htmlspecialchars($formEndTime, ENT_QUOTES, 'UTF-8') ?>" step="1800" required oninput="updateEstimate()">
+                <label for="end_time_hour">終了時刻</label>
+                <select id="end_time_hour" name="end_time_hour" required onchange="updateEstimate()">
+                    <option value="">--</option>
+                    <?php for ($h = 0; $h < 24; $h++): $hh = sprintf('%02d', $h); ?>
+                        <option value="<?= $hh ?>" <?= $hh === $formEndHour ? 'selected' : '' ?>><?= $hh ?></option>
+                    <?php endfor; ?>
+                </select>
+                :
+                <select id="end_time_minute" name="end_time_minute" required onchange="updateEstimate()">
+                    <option value="">--</option>
+                    <?php foreach (['00', '30'] as $mm): ?>
+                        <option value="<?= $mm ?>" <?= $mm === $formEndMinute ? 'selected' : '' ?>><?= $mm ?></option>
+                    <?php endforeach; ?>
+                </select>
             </div>
 
             <div class="form-row">
@@ -990,19 +1033,19 @@ function selectDate(dateStr) {
 }
 
 function updateEstimate() {
-    var start = document.getElementById('start_time').value;
-    var end = document.getElementById('end_time').value;
+    var startHour = document.getElementById('start_time_hour').value;
+    var startMinute = document.getElementById('start_time_minute').value;
+    var endHour = document.getElementById('end_time_hour').value;
+    var endMinute = document.getElementById('end_time_minute').value;
     var out = document.getElementById('estimate');
 
-    if (!start || !end) {
+    if (!startHour || !startMinute || !endHour || !endMinute) {
         out.textContent = '-';
         return;
     }
 
-    var sParts = start.split(':').map(Number);
-    var eParts = end.split(':').map(Number);
-    var sMin = sParts[0] * 60 + sParts[1];
-    var eMin = eParts[0] * 60 + eParts[1];
+    var sMin = parseInt(startHour, 10) * 60 + parseInt(startMinute, 10);
+    var eMin = parseInt(endHour, 10) * 60 + parseInt(endMinute, 10);
     var diff = eMin - sMin;
     if (diff < 0) {
         diff += 24 * 60;

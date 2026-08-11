@@ -22,6 +22,19 @@ function sanitize_categories(array $rawCategories): array
     return array_values(array_intersect(SHIFT_CATEGORIES, $rawCategories));
 }
 
+/**
+ * 時・分プルダウン（分は00/30のみ）から送信された値を"HH:MM"へ結合する。
+ * 不正な値（未選択・分が00/30以外など）は空文字を返し、以降のvalidate_shift_input()の
+ * 形式チェックで弾かれる。
+ */
+function combine_time_parts(string $hour, string $minute): string
+{
+    if (!preg_match('/^([01]\d|2[0-3])$/', $hour) || !in_array($minute, ['00', '30'], true)) {
+        return '';
+    }
+    return $hour . ':' . $minute;
+}
+
 function validate_shift_input(string $workDate, string $startTime, string $endTime, string $todayStr): ?string
 {
     $parsedDate = DateTime::createFromFormat('Y-m-d', $workDate);
@@ -161,8 +174,8 @@ if ($blocked === null && $_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         } elseif ($action === 'create' || $action === 'update') {
             $workDate = (string) ($_POST['work_date'] ?? '');
-            $startTime = (string) ($_POST['start_time'] ?? '');
-            $endTime = (string) ($_POST['end_time'] ?? '');
+            $startTime = combine_time_parts((string) ($_POST['start_time_hour'] ?? ''), (string) ($_POST['start_time_minute'] ?? ''));
+            $endTime = combine_time_parts((string) ($_POST['end_time_hour'] ?? ''), (string) ($_POST['end_time_minute'] ?? ''));
             $note = trim((string) ($_POST['note'] ?? ''));
             $note = $note === '' ? null : $note;
             $categories = sanitize_categories((array) ($_POST['categories'] ?? []));
@@ -322,8 +335,10 @@ $formCategories = $existingShift !== null ? categories_from_value($existingShift
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formWorkDate = (string) ($_POST['work_date'] ?? $formWorkDate);
-    $formStartTime = (string) ($_POST['start_time'] ?? $formStartTime);
-    $formEndTime = (string) ($_POST['end_time'] ?? $formEndTime);
+    $postedStartTime = combine_time_parts((string) ($_POST['start_time_hour'] ?? ''), (string) ($_POST['start_time_minute'] ?? ''));
+    $postedEndTime = combine_time_parts((string) ($_POST['end_time_hour'] ?? ''), (string) ($_POST['end_time_minute'] ?? ''));
+    $formStartTime = $postedStartTime !== '' ? $postedStartTime : $formStartTime;
+    $formEndTime = $postedEndTime !== '' ? $postedEndTime : $formEndTime;
     $formNote = (string) ($_POST['note'] ?? $formNote);
     $formCategories = sanitize_categories((array) ($_POST['categories'] ?? []));
 }
@@ -376,16 +391,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
                        value="<?= htmlspecialchars($formWorkDate, ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
 
+            <?php
+            $formStartHour = $formStartTime !== '' ? substr($formStartTime, 0, 2) : '';
+            $formStartMinute = $formStartTime !== '' ? substr($formStartTime, 3, 2) : '';
+            $formEndHour = $formEndTime !== '' ? substr($formEndTime, 0, 2) : '';
+            $formEndMinute = $formEndTime !== '' ? substr($formEndTime, 3, 2) : '';
+            ?>
             <div class="form-row">
-                <label for="start_time">開始時刻</label>
-                <input type="time" id="start_time" name="start_time" step="1800"
-                       value="<?= htmlspecialchars($formStartTime, ENT_QUOTES, 'UTF-8') ?>" required>
+                <label for="start_time_hour">開始時刻</label>
+                <select id="start_time_hour" name="start_time_hour" required>
+                    <option value="">--</option>
+                    <?php for ($h = 0; $h < 24; $h++): $hh = sprintf('%02d', $h); ?>
+                        <option value="<?= $hh ?>" <?= $hh === $formStartHour ? 'selected' : '' ?>><?= $hh ?></option>
+                    <?php endfor; ?>
+                </select>
+                :
+                <select id="start_time_minute" name="start_time_minute" required>
+                    <option value="">--</option>
+                    <?php foreach (['00', '30'] as $mm): ?>
+                        <option value="<?= $mm ?>" <?= $mm === $formStartMinute ? 'selected' : '' ?>><?= $mm ?></option>
+                    <?php endforeach; ?>
+                </select>
             </div>
 
             <div class="form-row">
-                <label for="end_time">終了時刻</label>
-                <input type="time" id="end_time" name="end_time" step="1800"
-                       value="<?= htmlspecialchars($formEndTime, ENT_QUOTES, 'UTF-8') ?>" required>
+                <label for="end_time_hour">終了時刻</label>
+                <select id="end_time_hour" name="end_time_hour" required>
+                    <option value="">--</option>
+                    <?php for ($h = 0; $h < 24; $h++): $hh = sprintf('%02d', $h); ?>
+                        <option value="<?= $hh ?>" <?= $hh === $formEndHour ? 'selected' : '' ?>><?= $hh ?></option>
+                    <?php endfor; ?>
+                </select>
+                :
+                <select id="end_time_minute" name="end_time_minute" required>
+                    <option value="">--</option>
+                    <?php foreach (['00', '30'] as $mm): ?>
+                        <option value="<?= $mm ?>" <?= $mm === $formEndMinute ? 'selected' : '' ?>><?= $mm ?></option>
+                    <?php endforeach; ?>
+                </select>
             </div>
 
             <div class="form-row">
