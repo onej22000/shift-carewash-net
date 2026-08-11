@@ -37,8 +37,8 @@ function validate_shift_input(string $workDate, string $startTime, string $endTi
     if (!preg_match('/^([01]\d|2[0-3]):([0-5]\d)$/', $endTime)) {
         return '終了時刻の形式が正しくありません。';
     }
-    if (!preg_match('/:(00|10|20|30|40|50)$/', $startTime) || !preg_match('/:(00|10|20|30|40|50)$/', $endTime)) {
-        return '開始時刻・終了時刻は10分単位で入力してください。';
+    if (!preg_match('/:(00|30)$/', $startTime) || !preg_match('/:(00|30)$/', $endTime)) {
+        return '開始時刻・終了時刻は00分または30分で入力してください。';
     }
 
     return null;
@@ -378,13 +378,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
 
             <div class="form-row">
                 <label for="start_time">開始時刻</label>
-                <input type="time" id="start_time" name="start_time" step="600"
+                <input type="time" id="start_time" name="start_time" step="1800"
                        value="<?= htmlspecialchars($formStartTime, ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
 
             <div class="form-row">
                 <label for="end_time">終了時刻</label>
-                <input type="time" id="end_time" name="end_time" step="600"
+                <input type="time" id="end_time" name="end_time" step="1800"
                        value="<?= htmlspecialchars($formEndTime, ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
 

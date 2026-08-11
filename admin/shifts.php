@@ -12,6 +12,21 @@ function sanitize_categories(array $rawCategories): array
 }
 
 /**
+ * 保存後のリダイレクト先を、入力/更新された勤務日を基準に組み立てる。
+ * $pageUrl（ページ読み込み時点のGETパラメータ由来）をそのまま使うと、
+ * 表示中のカレンダーと異なる月日でシフトを保存した際に元の表示へ戻ってしまうため、
+ * 保存対象の日付をそのままdate（カレンダー表示ならselectedも）に使う。
+ */
+function build_shift_redirect_url(string $view, string $dateStr): string
+{
+    $url = '/admin/shifts.php?view=' . $view . '&date=' . $dateStr;
+    if ($view === 'calendar') {
+        $url .= '&selected=' . $dateStr;
+    }
+    return $url;
+}
+
+/**
  * calc_shift_wage_summary()等が返すcategory_wage（区分=>金額）を「店舗:1,000円 洗濯代行:500円 集荷:0円」
  * のような小さいテキストに整形する。category_wageが空（区分データ無し）の場合は空文字を返す。
  */
@@ -42,8 +57,8 @@ function validate_shift_input(int $employeeId, string $workDate, string $startTi
     if (!preg_match('/^([01]\d|2[0-3]):([0-5]\d)$/', $endTime)) {
         return '終了時刻の形式が正しくありません。';
     }
-    if (!preg_match('/:(00|10|20|30|40|50)$/', $startTime) || !preg_match('/:(00|10|20|30|40|50)$/', $endTime)) {
-        return '開始時刻・終了時刻は10分単位で入力してください。';
+    if (!preg_match('/:(00|30)$/', $startTime) || !preg_match('/:(00|30)$/', $endTime)) {
+        return '開始時刻・終了時刻は00分または30分で入力してください。';
     }
 
     return null;
@@ -125,7 +140,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             set_flash('success', 'シフトを削除しました。');
-            header('Location: ' . $pageUrl);
+            $redirectUrl = $prevShift !== false ? build_shift_redirect_url($view, $prevShift['work_date']) : $pageUrl;
+            header('Location: ' . $redirectUrl);
             exit;
         }
 
@@ -174,7 +190,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 set_flash('success', 'シフトを登録しました。');
-                header('Location: ' . $pageUrl);
+                header('Location: ' . build_shift_redirect_url($view, $workDate));
                 exit;
             } else {
                 $shiftId = (int) ($_POST['shift_id'] ?? 0);
@@ -205,7 +221,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 set_flash('success', 'シフトを更新しました。');
-                header('Location: ' . $pageUrl);
+                header('Location: ' . build_shift_redirect_url($view, $workDate));
                 exit;
             }
         }
@@ -611,12 +627,12 @@ function render_day_detail(
 
             <div class="form-row">
                 <label for="start_time">開始時刻</label>
-                <input type="time" id="start_time" name="start_time" value="<?= htmlspecialchars($formStartTime, ENT_QUOTES, 'UTF-8') ?>" step="600" required oninput="updateEstimate()">
+                <input type="time" id="start_time" name="start_time" value="<?= htmlspecialchars($formStartTime, ENT_QUOTES, 'UTF-8') ?>" step="1800" required oninput="updateEstimate()">
             </div>
 
             <div class="form-row">
                 <label for="end_time">終了時刻</label>
-                <input type="time" id="end_time" name="end_time" value="<?= htmlspecialchars($formEndTime, ENT_QUOTES, 'UTF-8') ?>" step="600" required oninput="updateEstimate()">
+                <input type="time" id="end_time" name="end_time" value="<?= htmlspecialchars($formEndTime, ENT_QUOTES, 'UTF-8') ?>" step="1800" required oninput="updateEstimate()">
             </div>
 
             <div class="form-row">
