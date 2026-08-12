@@ -983,14 +983,23 @@ function pasteShift(employeeId, dateStr, cellEl) {
         }
     }
 
+    var startParts = copiedShift.start.split(':');
+    var endParts = copiedShift.end.split(':');
+    if (['00', '30'].indexOf(startParts[1]) === -1 || ['00', '30'].indexOf(endParts[1]) === -1) {
+        alert('コピー元のシフト（' + copiedShift.start + '〜' + copiedShift.end + '）は00分/30分以外の時刻のため、コピーできません。');
+        return;
+    }
+
     var formData = new URLSearchParams();
     formData.set('csrf_token', CSRF_TOKEN);
     formData.set('action', 'create');
     formData.set('ajax', '1');
     formData.set('employee_id', String(employeeId));
     formData.set('work_date', dateStr);
-    formData.set('start_time', copiedShift.start);
-    formData.set('end_time', copiedShift.end);
+    formData.set('start_time_hour', startParts[0]);
+    formData.set('start_time_minute', startParts[1]);
+    formData.set('end_time_hour', endParts[0]);
+    formData.set('end_time_minute', endParts[1]);
     formData.set('note', copiedShift.note);
     copiedShift.categories.forEach(function (category) {
         formData.append('categories[]', category);
