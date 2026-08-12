@@ -22,13 +22,14 @@ $renderChecklistRow = static function (array $row): void {
     </tr>
     <?php
 };
+$scheduleDateLabel = $scheduleDateLabel ?? '本日';
 ?>
 <section class="jiro-checklist-today">
-    <h2>本日の集荷予定<?= $checklist['today_schedule_label'] !== null ? '（' . htmlspecialchars($checklist['today_schedule_label'], ENT_QUOTES, 'UTF-8') . 'コース）' : '' ?></h2>
+    <h2><?= htmlspecialchars($scheduleDateLabel, ENT_QUOTES, 'UTF-8') ?>の集荷予定（<?= htmlspecialchars($checklist['target_date'], ENT_QUOTES, 'UTF-8') ?>）<?= $checklist['today_schedule_label'] !== null ? '（' . htmlspecialchars($checklist['today_schedule_label'], ENT_QUOTES, 'UTF-8') . 'コース）' : '' ?></h2>
     <?php if ($checklist['today_schedule_label'] === null): ?>
-        <p class="notice">本日は集荷予定日ではありません（月・木／火・金／水・土のいずれでもない日）。</p>
+        <p class="notice"><?= htmlspecialchars($scheduleDateLabel, ENT_QUOTES, 'UTF-8') ?>は集荷予定日ではありません。</p>
     <?php elseif (empty($checklist['today_rows'])): ?>
-        <p class="notice">本日の集荷予定に該当する施設はありません。</p>
+        <p class="notice">なし</p>
     <?php else: ?>
         <table class="cycles">
             <thead>
@@ -51,7 +52,6 @@ $renderChecklistRow = static function (array $row): void {
 <?php if (!empty($checklist['other_rows'])): ?>
     <section class="jiro-checklist-other">
         <h2>その他の返却待ち</h2>
-        <p class="notice">本日の集荷予定ではありませんが、洗濯代行が返却準備完了を登録済みで、まだドライバーが確認・記録していない施設です（集荷の積み残しや変則訪問等）。</p>
         <table class="cycles">
             <thead>
                 <tr>

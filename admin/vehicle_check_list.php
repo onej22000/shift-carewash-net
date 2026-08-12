@@ -304,7 +304,7 @@ $records = $listStmt->fetchAll();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>集荷前車両等チェック記録 | 管理者</title>
+    <title>車両等チェック記録 | 管理者</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
@@ -337,7 +337,7 @@ $records = $listStmt->fetchAll();
 </head>
 <body>
 <header>
-    <h1>集荷前車両等チェック記録</h1>
+    <h1>車両等チェック記録</h1>
     <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん（管理者） | <a href="/admin/vehicles.php">車両マスタ管理</a> | <a href="/admin/vehicle_maintenance_list.php">車両管理記録</a> | <a href="/admin/vehicle_alert_settings.php">アラート設定</a> | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a></nav>
 </header>
 

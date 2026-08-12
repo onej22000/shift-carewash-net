@@ -12,21 +12,6 @@ function sanitize_categories(array $rawCategories): array
 }
 
 /**
- * 保存後のリダイレクト先を、入力/更新された勤務日を基準に組み立てる。
- * $pageUrl（ページ読み込み時点のGETパラメータ由来）をそのまま使うと、
- * 表示中のカレンダーと異なる月日でシフトを保存した際に元の表示へ戻ってしまうため、
- * 保存対象の日付をそのままdate（カレンダー表示ならselectedも）に使う。
- */
-function build_shift_redirect_url(string $view, string $dateStr): string
-{
-    $url = '/admin/shifts.php?view=' . $view . '&date=' . $dateStr;
-    if ($view === 'calendar') {
-        $url .= '&selected=' . $dateStr;
-    }
-    return $url;
-}
-
-/**
  * 時・分プルダウン（分は00/30のみ）から送信された値を"HH:MM"へ結合する。
  * 不正な値（未選択・分が00/30以外など）は空文字を返し、以降のvalidate_shift_input()の
  * 形式チェックで弾かれる。
@@ -91,6 +76,11 @@ $anchorDate->setTime(0, 0, 0);
 $anchorDateStr = $anchorDate->format('Y-m-d');
 $todayStr = (new DateTime('today'))->format('Y-m-d');
 
+$categoryFilter = (string) ($_GET['category'] ?? '');
+if (!in_array($categoryFilter, SHIFT_CATEGORIES, true)) {
+    $categoryFilter = '';
+}
+
 $viewRange = resolve_shift_view_range($view, $anchorDate);
 $rangeStart = $viewRange['rangeStart'];
 $rangeEnd = $viewRange['rangeEnd'];
@@ -109,6 +99,9 @@ if ($view === 'calendar') {
 }
 
 $pageUrl = '/admin/shifts.php?view=' . $view . '&date=' . $anchorDateStr;
+if ($categoryFilter !== '') {
+    $pageUrl .= '&category=' . urlencode($categoryFilter);
+}
 if ($view === 'calendar') {
     $pageUrl .= '&selected=' . $selectedDateStr;
 }
@@ -116,7 +109,11 @@ if ($view === 'calendar') {
 // ---- 従業員一覧（シフトを割り当てられるstaffのみ。adminアカウントは除外） ----
 $employeesStmt = $pdo->query(
     "SELECT id, name, status, hourly_wage_weekday, hourly_wage_holiday
-     FROM employees WHERE role = 'staff' AND status IN ('active','invited') ORDER BY name"
+     FROM employees
+     WHERE role = 'staff'
+       AND status IN ('active','invited')
+       AND COALESCE(is_shared_account, 0) = 0
+     ORDER BY name"
 );
 $employees = $employeesStmt->fetchAll();
 $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
@@ -153,8 +150,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             set_flash('success', 'シフトを削除しました。');
-            $redirectUrl = $prevShift !== false ? build_shift_redirect_url($view, $prevShift['work_date']) : $pageUrl;
-            header('Location: ' . $redirectUrl);
+            header('Location: ' . $pageUrl);
             exit;
         }
 
@@ -203,7 +199,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 set_flash('success', 'シフトを登録しました。');
-                header('Location: ' . build_shift_redirect_url($view, $workDate));
+                header('Location: ' . $pageUrl);
                 exit;
             } else {
                 $shiftId = (int) ($_POST['shift_id'] ?? 0);
@@ -234,7 +230,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 set_flash('success', 'シフトを更新しました。');
-                header('Location: ' . build_shift_redirect_url($view, $workDate));
+                header('Location: ' . $pageUrl);
                 exit;
             }
         }
@@ -306,6 +302,9 @@ if (!empty($employees)) {
         ':end' => $rangeEnd->format('Y-m-d'),
     ]);
     foreach ($stmt->fetchAll() as $row) {
+        if ($categoryFilter !== '' && !in_array($categoryFilter, categories_from_value($row['categories']), true)) {
+            continue;
+        }
         $shiftsByEmployeeDate[(int) $row['employee_id']][$row['work_date']][] = $row;
     }
 }
@@ -578,8 +577,21 @@ function render_day_detail(
             display: flex; align-items: center; gap: 2px; text-align: left;
             font-size: 0.62em; line-height: 1.3; white-space: normal; word-break: break-all; margin-bottom: 1px;
         }
-        table.calendar-month td.cal-day .cal-day-name-dot { display: inline-block; flex-shrink: 0; width: 5px; height: 5px; border-radius: 50%; }
+        table.calendar-month td.cal-day .cal-day-name-dot { display: none; }
+        table.calendar-month td.cal-day .cal-day-name-row.cal-name-pickup { background: #e67e00; color: #fff; border-radius: 3px; padding: 1px 3px; }
+        table.calendar-month td.cal-day .cal-day-name-row.cal-name-laundry { background: #1e7e34; color: #fff; border-radius: 3px; padding: 1px 3px; }
+        table.calendar-month td.cal-day .cal-day-name-row.cal-name-store { background: #fff; color: #222; }
+        table.calendar-month td.cal-day .cal-day-name-row > span:last-child {
+            display: block;
+            min-width: 0;
+            writing-mode: horizontal-tb;
+            white-space: nowrap;
+            word-break: keep-all;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         table.calendar-month td.cal-selected .cal-day-name-row { color: #fff; }
+        table.calendar-month td.cal-selected .cal-day-name-row.cal-name-store { color: #222; }
         .day-detail { margin-top: 16px; border-top: 1px solid #ccc; padding-top: 12px; }
         .day-detail h3 { font-size: 1.05em; margin: 0 0 8px; }
         .day-detail-employee { margin-bottom: 10px; }
@@ -587,6 +599,23 @@ function render_day_detail(
         .onboarding-tag {
             display: block; background: #ff8f00; color: #fff; font-size: 0.65em; font-weight: bold;
             padding: 1px 4px; border-radius: 3px; margin: 2px 2px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        @media (max-width: 900px) {
+            table.shift-grid th.employee-col,
+            table.shift-grid td.employee-col {
+                box-sizing: border-box;
+                min-width: 3.5em;
+                width: 3.5em;
+                max-width: 3.5em;
+                padding: 4px 3px;
+                white-space: normal;
+                word-break: break-all;
+                overflow-wrap: anywhere;
+                line-height: 1.25;
+            }
+            table.shift-grid th.date-col,
+            table.shift-grid td.date-col { min-width: 105px; }
+            .employee-month-summary { display: none; }
         }
         .pdf-export-form { margin: 10px 0; padding: 8px 12px; background: #f8fafc; border: 1px solid #ddd; border-radius: 6px; display: flex; align-items: center; gap: 8px; font-size: 0.9em; }
         .pdf-export-form label { font-weight: bold; }
@@ -713,7 +742,25 @@ function render_day_detail(
     </fieldset>
 </section>
 
-<section class="calendar-section" id="calendar-section">
+<section class="calendar-section">
+    <form method="get" class="category-filter" style="margin:12px 0;">
+        <input type="hidden" name="view" value="<?= htmlspecialchars($view, ENT_QUOTES, 'UTF-8') ?>">
+        <input type="hidden" name="date" value="<?= htmlspecialchars($anchorDateStr, ENT_QUOTES, 'UTF-8') ?>">
+        <?php if ($view === 'calendar'): ?>
+            <input type="hidden" name="selected" value="<?= htmlspecialchars($selectedDateStr, ENT_QUOTES, 'UTF-8') ?>">
+        <?php endif; ?>
+        <label for="category-filter">表示区分：</label>
+        <select id="category-filter" name="category" onchange="this.form.submit()">
+            <option value="" <?= $categoryFilter === '' ? 'selected' : '' ?>>すべて</option>
+            <?php foreach (SHIFT_CATEGORIES as $filterCategory): ?>
+                <option value="<?= htmlspecialchars($filterCategory, ENT_QUOTES, 'UTF-8') ?>" <?= $categoryFilter === $filterCategory ? 'selected' : '' ?>>
+                    <?= htmlspecialchars($filterCategory, ENT_QUOTES, 'UTF-8') ?>のみ
+                </option>
+            <?php endforeach; ?>
+        </select>
+        <noscript><button type="submit">表示</button></noscript>
+    </form>
+
     <div class="calendar-nav">
         <a href="?view=<?= $view ?>&date=<?= $prevDate ?>">← 前<?= $viewLabel ?></a>
         <a href="?view=<?= $view ?>&date=<?= $todayStr ?>">今日</a>
@@ -729,16 +776,8 @@ function render_day_detail(
         <label for="pdf-month">月間シフト表PDF出力：</label>
         <input type="month" id="pdf-month" name="month" value="<?= htmlspecialchars($monthStart->format('Y-m'), ENT_QUOTES, 'UTF-8') ?>">
         <button type="submit">PDF出力</button>
+        <button type="submit" name="layout" value="split">区分別PDF出力</button>
     </form>
-
-    <div class="category-legend">
-        <?php foreach (SHIFT_CATEGORIES as $category): ?>
-            <span class="legend-item">
-                <span class="category-swatch" style="background:<?= htmlspecialchars(CATEGORY_COLORS[$category] ?? CATEGORY_COLOR_NONE, ENT_QUOTES, 'UTF-8') ?>;"></span>
-                <?= htmlspecialchars($category, ENT_QUOTES, 'UTF-8') ?>
-            </span>
-        <?php endforeach; ?>
-    </div>
 
     <div id="paste-banner" class="paste-banner">
         <span id="paste-banner-text"></span>
@@ -781,7 +820,12 @@ function render_day_detail(
                                     <span class="cal-day-number"><?= $d->format('j') ?></span>
                                     <div class="cal-day-names">
                                         <?php foreach ($employeeNamesByDate[$dateStr] ?? [] as $entry): ?>
-                                            <div class="cal-day-name-row">
+                                            <?php
+                                            $calendarNameClass = in_array('集荷', $entry['categories'] ?? [], true)
+                                                ? 'cal-name-pickup'
+                                                : (in_array('洗濯代行', $entry['categories'] ?? [], true) ? 'cal-name-laundry' : 'cal-name-store');
+                                            ?>
+                                            <div class="cal-day-name-row <?= $calendarNameClass ?>">
                                                 <?php if (!empty($entry['categories'])): ?>
                                                     <?php foreach ($entry['categories'] as $category): ?>
                                                         <span class="cal-day-name-dot" style="background:<?= htmlspecialchars(CATEGORY_COLORS[$category] ?? CATEGORY_COLOR_NONE, ENT_QUOTES, 'UTF-8') ?>;"></span>
@@ -827,7 +871,7 @@ function render_day_detail(
                                 $classes[] = 'sun-holiday';
                             }
                             ?>
-                            <th class="<?= implode(' ', $classes) ?>" data-date="<?= $dateStr ?>">
+                            <th class="<?= implode(' ', $classes) ?>">
                                 <?= $d->format('n/j') ?>（<?= $weekdayLabels[$weekdayIndex - 1] ?>）
                             </th>
                         <?php endforeach; ?>
@@ -1055,32 +1099,15 @@ function updateEstimate() {
     out.textContent = h + '時間' + (m < 10 ? '0' + m : m) + '分（休憩調整前）';
 }
 updateEstimate();
-
-<?php if ($flash !== null): ?>
-// 登録・更新・削除の直後（PRGリダイレクト後）は、保存対象の日付が
-// カレンダー/グリッドのどの位置にあるか分かるよう、その日付までスクロールする。
-// ページ自体はブラウザの既定動作で先頭にスクロールされるため、何もしないと
-// 「シフト表セクションまでスクロールしないと保存結果が見えない＝先頭に戻ったように見える」
-// という体感になっていた。
-(function () {
-    var params = new URLSearchParams(location.search);
-    var focusDate = params.get(<?= json_encode($view === 'calendar' ? 'selected' : 'date') ?>);
-    var calendarSection = document.getElementById('calendar-section');
-    if (calendarSection) {
-        calendarSection.scrollIntoView({ block: 'start' });
-    }
-    if (!focusDate) {
-        return;
-    }
-    var grid = document.getElementById('grid-scroll');
-    if (grid) {
-        var col = grid.querySelector('th[data-date="' + focusDate + '"]');
-        if (col) {
-            col.scrollIntoView({ inline: 'center', block: 'nearest' });
-        }
-    }
-})();
-<?php endif; ?>
 </script>
+<?php if ($categoryFilter !== ''): ?>
+<script>
+document.querySelectorAll('.calendar-nav a').forEach(function (link) {
+    var url = new URL(link.href, window.location.href);
+    url.searchParams.set('category', <?= json_encode($categoryFilter, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>);
+    link.href = url.pathname + url.search;
+});
+</script>
+<?php endif; ?>
 </body>
 </html>

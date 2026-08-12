@@ -68,14 +68,13 @@ function login_employee(array $employee): void
     refresh_session_cookie();
 }
 
-// 共用アカウント（is_shared_account=1）はログイン後、通常のダッシュボードではなく
-// 専用の画面（集荷チェックリスト。人数確認・返却準備完了の登録はそこからリンクする）へ遷移させる。
-// login_idを条件に使うと将来IDを変更したときに気づかず壊れるため、is_shared_accountで判定する。
+// 共用アカウント（is_shared_account=1）も含め、ログイン後は常に通常のダッシュボードへ遷移させる
+// （以前は集荷チェックリストへ直行させていたが、共用ログインから出勤・作業実績登録等の
+// 通常メニューに到達できなくなるため2026-08-08に変更。集荷チェックリストはダッシュボードの
+// nav-cardから引き続き到達できる）。
 function staff_landing_page(array $employee): string
 {
-    return ((int) ($employee['is_shared_account'] ?? 0) === 1)
-        ? '/staff/jiro_dashboard.php'
-        : '/staff/dashboard.php';
+    return '/staff/dashboard.php';
 }
 
 function current_employee(): ?array

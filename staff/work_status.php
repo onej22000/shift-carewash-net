@@ -4,58 +4,65 @@ require_once __DIR__ . '/../includes/auth.php';
 $staff = require_login('staff');
 $pdo = getPdo();
 
-$periodLabels = [
-    'all' => '全期間',
-    '7' => '直近7日',
-    '30' => '直近30日',
-];
-
-$period = (string) ($_GET['period'] ?? 'all');
-if (!isset($periodLabels[$period])) {
-    $period = 'all';
-}
-
 $params = [];
 $dateCondition = '';
-if ($period !== 'all') {
-    $end = (new DateTime())->format('Y-m-d');
-    $start = (new DateTime())->modify('-' . ((int) $period - 1) . ' days')->format('Y-m-d');
-    $dateCondition = 'AND record_date BETWEEN :start AND :end';
-    $params[':start'] = $start;
-    $params[':end'] = $end;
-}
 
-$facilitiesStmt = $pdo->query("SELECT id, name, is_active FROM facilities WHERE facility_type = '介護施設' ORDER BY is_active DESC, name");
+$facilitiesStmt = $pdo->query(
+    "SELECT f.id, f.name, f.is_active
+     FROM facilities f
+     WHERE f.facility_type = '介護施設'
+       AND EXISTS (
+           SELECT 1
+           FROM collection_cycles cc
+           WHERE cc.facility_id = f.id
+             AND cc.arrival_bag_count IS NOT NULL
+             AND cc.dispatch_bag_count IS NULL
+             AND cc.return_bag_count IS NULL
+             AND cc.deleted_at IS NULL
+       )
+     ORDER BY f.is_active DESC, f.name"
+);
 $facilities = $facilitiesStmt->fetchAll();
 
-// 集荷人数（work_stage_records.collection_cycle_id が設定された「人数確認」記録）と、
-// 実際の洗濯代行の作業実績（collection_cycle_id が無い通常の作業実績）を分けて集計する。
-// 両方ともstage='wash'で記録されるため（洗濯・乾燥・畳みは2026-08-06に「洗濯」1工程へ統合済み）、
-// 集荷人数を洗濯累計に混同しないようここで明確に分離する。
+// 作業状況は「まだ施設へ返却していない集荷サイクル」の進行状況だけを表示する。
+// collection_headcount.php が到着確認用に自動生成する作業実績（collection_cycle_idあり）は
+// 洗濯完了の実績ではないため除外し、作業実績登録画面から入力された記録だけを集計する。
 $stageStmt = $pdo->prepare(
-    "SELECT facility_id,
-            SUM(CASE WHEN collection_cycle_id IS NOT NULL THEN person_count ELSE 0 END) AS collected,
-            SUM(CASE WHEN collection_cycle_id IS NULL THEN person_count ELSE 0 END) AS washed
-     FROM work_stage_records
-     WHERE stage = 'wash' AND deleted_at IS NULL $dateCondition
-     GROUP BY facility_id"
+    "SELECT w.facility_id, SUM(w.person_count) AS washed
+     FROM work_stage_records w
+     INNER JOIN (
+         SELECT facility_id, MIN(COALESCE(arrival_date, pickup_date)) AS open_since
+         FROM collection_cycles
+         WHERE arrival_bag_count IS NOT NULL
+           AND dispatch_bag_count IS NULL
+           AND return_bag_count IS NULL
+           AND deleted_at IS NULL
+         GROUP BY facility_id
+     ) active ON active.facility_id = w.facility_id
+     WHERE w.stage = 'wash'
+       AND w.collection_cycle_id IS NULL
+       AND w.deleted_at IS NULL
+       AND w.record_date >= active.open_since
+     GROUP BY w.facility_id"
 );
 $stageStmt->execute($params);
 
 $stageTotalsByFacility = [];
 foreach ($stageStmt->fetchAll() as $row) {
     $stageTotalsByFacility[(int) $row['facility_id']] = [
-        'collected' => (int) $row['collected'],
         'washed' => (int) $row['washed'],
     ];
 }
 
-// リネン袋数：従業員の「集荷・配送記録を入力する」画面で記録された集荷リネン袋数（collection_cycles.pickup_bag_count）を反映する。
+// リネン袋数・洗濯ネット数は、返却前の集荷サイクルだけを集計する。
 $bagDateCondition = str_replace('record_date', 'pickup_date', $dateCondition);
 $bagStmt = $pdo->prepare(
-    "SELECT facility_id, SUM(pickup_bag_count) AS total
+    "SELECT facility_id, SUM(COALESCE(arrival_bag_count, pickup_bag_count, 0)) AS total
      FROM collection_cycles
-     WHERE deleted_at IS NULL $bagDateCondition
+     WHERE arrival_bag_count IS NOT NULL
+       AND dispatch_bag_count IS NULL
+       AND return_bag_count IS NULL
+       AND deleted_at IS NULL $bagDateCondition
      GROUP BY facility_id"
 );
 $bagStmt->execute($params);
@@ -64,13 +71,29 @@ $bagCountByFacility = [];
 foreach ($bagStmt->fetchAll() as $row) {
     $bagCountByFacility[(int) $row['facility_id']] = (int) $row['total'];
 }
+
+$netStmt = $pdo->prepare(
+    "SELECT facility_id, SUM(COALESCE(return_ready_laundry_net_count, 0)) AS total
+     FROM collection_cycles
+     WHERE arrival_bag_count IS NOT NULL
+       AND dispatch_bag_count IS NULL
+       AND return_bag_count IS NULL
+       AND deleted_at IS NULL $bagDateCondition
+     GROUP BY facility_id"
+);
+$netStmt->execute($params);
+$netCountByFacility = [];
+foreach ($netStmt->fetchAll() as $row) {
+    $netCountByFacility[(int) $row['facility_id']] = (int) $row['total'];
+}
 ?>
 <!DOCTYPE html>
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>作業状況・残数確認 | シフト管理</title>
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
+    <title>作業状況 | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
@@ -92,25 +115,19 @@ foreach ($bagStmt->fetchAll() as $row) {
 </head>
 <body>
 <header>
-    <h1>作業状況・残数確認</h1>
+    <h1>作業状況</h1>
     <nav>ログイン中: <?= htmlspecialchars($staff['name'], ENT_QUOTES, 'UTF-8') ?>さん | <a href="/staff/dashboard.php">ダッシュボードに戻る</a> | <a href="/staff/logout.php">ログアウト</a></nav>
 </header>
 
-<div class="period-nav">
-    <?php foreach ($periodLabels as $key => $label): ?>
-        <a href="?period=<?= htmlspecialchars($key, ENT_QUOTES, 'UTF-8') ?>" class="<?= $period === $key ? 'active' : '' ?>"><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></a>
-    <?php endforeach; ?>
-</div>
-
 <?php if (empty($facilities)): ?>
-    <p class="notice">施設が登録されていません。</p>
+    <p class="notice">未発送の作業はありません。</p>
 <?php else: ?>
     <table class="status">
         <thead>
             <tr>
                 <th>施設</th>
                 <th>リネン袋数</th>
-                <th>集荷人数</th>
+                <th>洗濯ネット数</th>
                 <th>洗濯累計</th>
                 <th>未完了数</th>
             </tr>
@@ -120,10 +137,11 @@ foreach ($bagStmt->fetchAll() as $row) {
                 <?php
                 $facilityId = (int) $facility['id'];
                 $totals = $stageTotalsByFacility[$facilityId] ?? [];
-                $collected = $totals['collected'] ?? 0;
-                $washed = $totals['washed'] ?? 0;
+                $collected = $netCountByFacility[$facilityId] ?? 0;
+                // 作業状況は進捗表示なので、誤って同じ作業を複数登録しても要作業数を超えて表示しない。
+                $washed = min($collected, $totals['washed'] ?? 0);
 
-                $notCompleted = $collected - $washed;
+                $notCompleted = max(0, $collected - $washed);
 
                 $bagCount = $bagCountByFacility[$facilityId] ?? 0;
                 ?>
@@ -132,14 +150,14 @@ foreach ($bagStmt->fetchAll() as $row) {
                         <?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?><?= (int) $facility['is_active'] === 1 ? '' : '（無効）' ?>
                     </td>
                     <td><?= $bagCount ?>袋</td>
-                    <td><?= $collected ?>人</td>
-                    <td><?= $washed ?>人</td>
-                    <td><?= $notCompleted ?>人</td>
+                    <td><?= $collected ?>枚</td>
+                    <td><?= $washed ?>枚</td>
+                    <td><?= $notCompleted ?>枚</td>
                 </tr>
             <?php endforeach; ?>
         </tbody>
     </table>
-    <p class="notice">リネン袋数は「集荷・配送記録を入力する」画面で記録された集荷リネン袋数の合計（参考値、他の数値には影響しません）。集荷人数は「集荷人数の確認」画面での確認記録に基づきます。未完了数は集荷人数から洗濯累計を差し引いたものです（洗濯・乾燥・畳みは2026-08-06に「洗濯」1工程へ統合済み）。</p>
+    <p class="notice">未完了数は洗濯ネット数から洗濯累計を差し引いたものです。発送入力済みの分は表示されません。</p>
 <?php endif; ?>
 </body>
 </html>

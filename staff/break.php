@@ -15,15 +15,29 @@ if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
     exit;
 }
 
-$openStmt = $pdo->prepare(
-    "SELECT id, break_start_at, break_end_at, total_break_minutes
-     FROM attendance
-     WHERE employee_id = :employee_id AND status = 'working' AND DATE(clock_in_at) = CURDATE()
-       AND deleted_at IS NULL
-     ORDER BY clock_in_at DESC
-     LIMIT 1"
-);
-$openStmt->execute([':employee_id' => $staff['id']]);
+// 共用アカウントは「本人」という単一の状態を持たないため、attendance_id（ダッシュボードの
+// 各行のボタンから渡される）で対象を明示的に指定させる。個人アカウントは従来通りemployee_idで特定する。
+$isSharedAccount = (int) ($staff['is_shared_account'] ?? 0) === 1;
+
+if ($isSharedAccount) {
+    $attendanceId = (int) ($_POST['attendance_id'] ?? 0);
+    $openStmt = $pdo->prepare(
+        "SELECT id, employee_id, break_start_at, break_end_at, total_break_minutes
+         FROM attendance
+         WHERE id = :id AND status = 'working' AND deleted_at IS NULL"
+    );
+    $openStmt->execute([':id' => $attendanceId]);
+} else {
+    $openStmt = $pdo->prepare(
+        "SELECT id, employee_id, break_start_at, break_end_at, total_break_minutes
+         FROM attendance
+         WHERE employee_id = :employee_id AND status = 'working' AND DATE(clock_in_at) = CURDATE()
+           AND deleted_at IS NULL
+         ORDER BY clock_in_at DESC
+         LIMIT 1"
+    );
+    $openStmt->execute([':employee_id' => $staff['id']]);
+}
 $openRecord = $openStmt->fetch();
 
 if ($openRecord === false) {
@@ -31,6 +45,8 @@ if ($openRecord === false) {
     header('Location: /staff/dashboard.php');
     exit;
 }
+
+$recordEmployeeId = (int) $openRecord['employee_id'];
 
 $isOnBreak = $openRecord['break_start_at'] !== null && $openRecord['break_end_at'] === null;
 $action = (string) ($_POST['action'] ?? '');
@@ -55,7 +71,7 @@ if ($action === 'start') {
     );
     $breakLogStmt->execute([
         ':attendance_id' => $openRecord['id'],
-        ':employee_id' => $staff['id'],
+        ':employee_id' => $recordEmployeeId,
         ':start' => $now,
     ]);
 
@@ -105,7 +121,7 @@ if ($action === 'end') {
         );
         $insertBreakStmt->execute([
             ':attendance_id' => $openRecord['id'],
-            ':employee_id' => $staff['id'],
+            ':employee_id' => $recordEmployeeId,
             ':start' => $openRecord['break_start_at'],
             ':now' => $nowStr,
         ]);

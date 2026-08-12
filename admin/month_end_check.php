@@ -26,6 +26,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // プレビュー時にクライアントへ渡した一覧は信用せず、実行直前にサーバー側で同じロジックにより再計算する
             // （他の操作との競合や、確認画面表示後の状態変化があっても、常に最新の実データに基づいて補正するため）。
             $candidates = find_month_end_correction_candidates($pdo, $yearMonth);
+            $breakCandidates = find_month_end_break_correction_candidates($pdo, $yearMonth);
 
             try {
                 $pdo->beginTransaction();
@@ -63,9 +64,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ]);
                 }
 
+                $breakUpdateStmt = $pdo->prepare(
+                    'UPDATE attendance
+                        SET total_break_minutes = :total_break_minutes,
+                            work_minutes = GREATEST(0, TIMESTAMPDIFF(MINUTE, clock_in_at, clock_out_at) - :break_for_work)
+                      WHERE id = :id'
+                );
+                foreach ($breakCandidates as $candidate) {
+                    $logStmt->execute([
+                        ':attendance_id' => $candidate['attendance_id'],
+                        ':edited_by' => $admin['id'],
+                        ':action' => 'month_end_correction',
+                        ':field_name' => 'total_break_minutes',
+                        ':old_value' => $candidate['old_break_minutes'],
+                        ':new_value' => $candidate['new_break_minutes'],
+                    ]);
+                    $breakUpdateStmt->execute([
+                        ':total_break_minutes' => $candidate['new_break_minutes'],
+                        ':break_for_work' => $candidate['new_break_minutes'],
+                        ':id' => $candidate['attendance_id'],
+                    ]);
+                }
+
                 $pdo->commit();
-                $executedCount = count($candidates);
-                set_flash('success', '月末チェックを実行しました（' . $executedCount . '件の出勤時刻を補正）。');
+                $executedCount = count($candidates) + count($breakCandidates);
+                set_flash('success', '月末チェックを実行しました（出勤時刻・店舗勤務の休憩 合計' . $executedCount . '件を補正）。');
                 header('Location: /admin/month_end_check.php?month=' . urlencode($yearMonth));
                 exit;
             } catch (\Throwable $e) {
@@ -78,6 +101,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $flash = pop_flash();
 $candidates = find_month_end_correction_candidates($pdo, $yearMonth);
+$breakCandidates = find_month_end_break_correction_candidates($pdo, $yearMonth);
 
 $prevMonth = (DateTime::createFromFormat('Y-m-d', $yearMonth . '-01'))->modify('-1 month')->format('Y-m');
 $nextMonth = (DateTime::createFromFormat('Y-m-d', $yearMonth . '-01'))->modify('+1 month')->format('Y-m');
@@ -115,7 +139,7 @@ $csrfToken = csrf_token();
 </head>
 <body>
 <header>
-    <h1>月末チェック（店舗区分・出勤時刻の早打刻補正）</h1>
+    <h1>月末チェック（店舗区分の出勤時刻・法定休憩補正）</h1>
     <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん（管理者） | <a href="/admin/attendance_monthly.php?month=<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>">月間打刻実績に戻る</a> | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a></nav>
 </header>
 
@@ -129,6 +153,7 @@ $csrfToken = csrf_token();
 
 <p class="notice">
     対象は打刻区分「店舗」のシフトの出勤打刻のみです（「集荷」「洗濯代行」は対象外・変更されません）。<br>
+    休憩時間は「店舗」の勤務だけを通算し、法定時間に不足する分を店舗打刻へ補正します。「集荷」「洗濯代行」は勤務時間も通算せず、本人の休憩入力をそのまま採用して変更しません。<br>
     シフトの予定出勤時刻の5分より前に打刻していた場合のみ「予定出勤時刻の5分前」に補正します。5分前〜予定時刻の間はそのまま、遅刻は対象外です。<br>
     実行すると、補正内容はすべて打刻修正履歴（attendance_edit_logs）に記録されます。
 </p>
@@ -147,7 +172,7 @@ $csrfToken = csrf_token();
     </form>
 </div>
 
-<h2>補正対象プレビュー（<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>）</h2>
+<h2>出勤時刻の補正対象（<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>）</h2>
 
 <?php if (empty($candidates)): ?>
     <p class="notice">補正が必要な打刻はありません。</p>
@@ -175,8 +200,32 @@ $csrfToken = csrf_token();
         </tbody>
     </table>
 
+<?php endif; ?>
+
+<h2>店舗勤務の休憩補正対象</h2>
+<?php if (empty($breakCandidates)): ?>
+    <p class="notice">休憩時間の補正はありません。</p>
+<?php else: ?>
+    <table class="candidates">
+        <thead>
+            <tr><th>従業員</th><th>日付</th><th>入力済み休憩</th><th>補正後の休憩</th></tr>
+        </thead>
+        <tbody>
+            <?php foreach ($breakCandidates as $candidate): ?>
+                <tr>
+                    <td><?= htmlspecialchars($candidate['employee_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars($candidate['work_date'], ENT_QUOTES, 'UTF-8') ?></td>
+                    <td class="old-time"><?= (int) $candidate['old_break_minutes'] ?>分</td>
+                    <td class="new-time"><?= (int) $candidate['new_break_minutes'] ?>分</td>
+                </tr>
+            <?php endforeach; ?>
+        </tbody>
+    </table>
+<?php endif; ?>
+
+<?php if (!empty($candidates) || !empty($breakCandidates)): ?>
     <form method="post" action="/admin/month_end_check.php" class="exec-form"
-          onsubmit="return confirm('<?= count($candidates) ?>件の出勤時刻を上表の内容で補正します。よろしいですか？');">
+          onsubmit="return confirm('出勤時刻<?= count($candidates) ?>件、店舗勤務の休憩<?= count($breakCandidates) ?>件を補正します。よろしいですか？');">
         <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
         <input type="hidden" name="action" value="execute">
         <input type="hidden" name="month" value="<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>">

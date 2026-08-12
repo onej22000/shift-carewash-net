@@ -41,7 +41,8 @@ ksort($totalsByEmployee);
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>施設間移動時間 | シフト管理</title>
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
+    <title>移動時間 | シフト管理</title>
 <style>
     body { font-family: sans-serif; margin: 16px; color: #222; }
     header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 4px; }
@@ -59,7 +60,7 @@ ksort($totalsByEmployee);
 </head>
 <body>
 <header>
-    <h1>施設間移動時間</h1>
+    <h1>移動時間</h1>
     <nav><a href="/staff/dashboard.php">ダッシュボードに戻る</a> | <a href="/staff/logout.php">ログアウト</a></nav>
 </header>
 

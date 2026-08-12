@@ -5,7 +5,7 @@ require_once __DIR__ . '/../includes/functions.php';
 $admin = require_login('admin');
 $pdo = getPdo();
 
-const FACILITY_EDITABLE_FIELDS = ['name', 'facility_type', 'room_count', 'onboarding_start_date', 'pickup_schedule', 'address', 'phone_number', 'note', 'issued_linen_bag_orange', 'issued_linen_bag_yellow', 'issued_laundry_net_count'];
+const FACILITY_EDITABLE_FIELDS = ['name', 'facility_type', 'room_count', 'onboarding_start_date', 'pickup_schedule', 'address', 'phone_number', 'note', 'issued_linen_bag_orange', 'issued_linen_bag_yellow', 'issued_linen_bag_blue', 'issued_laundry_net_count'];
 
 const FACILITY_TYPES = ['介護施設', '自社', 'クリーニング所'];
 
@@ -44,6 +44,9 @@ function parse_facility_input(array $post): array
     $issuedLinenBagYellowRaw = trim((string) ($post['issued_linen_bag_yellow'] ?? ''));
     $issuedLinenBagYellow = $issuedLinenBagYellowRaw === '' ? null : (int) $issuedLinenBagYellowRaw;
 
+    $issuedLinenBagBlueRaw = trim((string) ($post['issued_linen_bag_blue'] ?? ''));
+    $issuedLinenBagBlue = $issuedLinenBagBlueRaw === '' ? null : (int) $issuedLinenBagBlueRaw;
+
     $issuedLaundryNetCountRaw = trim((string) ($post['issued_laundry_net_count'] ?? ''));
     $issuedLaundryNetCount = $issuedLaundryNetCountRaw === '' ? null : (int) $issuedLaundryNetCountRaw;
 
@@ -58,6 +61,7 @@ function parse_facility_input(array $post): array
         'note' => $note,
         'issued_linen_bag_orange' => $issuedLinenBagOrange,
         'issued_linen_bag_yellow' => $issuedLinenBagYellow,
+        'issued_linen_bag_blue' => $issuedLinenBagBlue,
         'issued_laundry_net_count' => $issuedLaundryNetCount,
     ];
 }
@@ -85,12 +89,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errorMessage = '交付リネン袋数（オレンジ）は0以上の数値を入力してください。';
             } elseif ($values['issued_linen_bag_yellow'] !== null && $values['issued_linen_bag_yellow'] < 0) {
                 $errorMessage = '交付リネン袋数（黄）は0以上の数値を入力してください。';
+            } elseif ($values['issued_linen_bag_blue'] !== null && $values['issued_linen_bag_blue'] < 0) {
+                $errorMessage = '交付リネン袋数（青）は0以上の数値を入力してください。';
             } elseif ($values['issued_laundry_net_count'] !== null && $values['issued_laundry_net_count'] < 0) {
                 $errorMessage = '交付洗濯ネット数は0以上の数値を入力してください。';
             } elseif ($action === 'create') {
                 $stmt = $pdo->prepare(
-                    'INSERT INTO facilities (name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note, issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count, is_active)
-                     VALUES (:name, :facility_type, :room_count, :onboarding_start_date, :pickup_schedule, :address, :phone_number, :note, :issued_linen_bag_orange, :issued_linen_bag_yellow, :issued_laundry_net_count, 1)'
+                    'INSERT INTO facilities (name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note, issued_linen_bag_orange, issued_linen_bag_yellow, issued_linen_bag_blue, issued_laundry_net_count, is_active)
+                     VALUES (:name, :facility_type, :room_count, :onboarding_start_date, :pickup_schedule, :address, :phone_number, :note, :issued_linen_bag_orange, :issued_linen_bag_yellow, :issued_linen_bag_blue, :issued_laundry_net_count, 1)'
                 );
                 $stmt->execute([
                     ':name' => $values['name'],
@@ -103,6 +109,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':note' => $values['note'],
                     ':issued_linen_bag_orange' => $values['issued_linen_bag_orange'],
                     ':issued_linen_bag_yellow' => $values['issued_linen_bag_yellow'],
+                    ':issued_linen_bag_blue' => $values['issued_linen_bag_blue'],
                     ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                 ]);
                 $newFacilityId = (int) $pdo->lastInsertId();
@@ -113,7 +120,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $facilityId = (int) ($_POST['facility_id'] ?? 0);
                 $beforeStmt = $pdo->prepare(
-                    'SELECT issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count FROM facilities WHERE id = :id'
+                    'SELECT issued_linen_bag_orange, issued_linen_bag_yellow, issued_linen_bag_blue, issued_laundry_net_count FROM facilities WHERE id = :id'
                 );
                 $beforeStmt->execute([':id' => $facilityId]);
                 $beforeValues = $beforeStmt->fetch() ?: null;
@@ -123,6 +130,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                      SET name = :name, facility_type = :facility_type, room_count = :room_count, onboarding_start_date = :onboarding_start_date,
                          pickup_schedule = :pickup_schedule, address = :address, phone_number = :phone_number, note = :note,
                          issued_linen_bag_orange = :issued_linen_bag_orange, issued_linen_bag_yellow = :issued_linen_bag_yellow,
+                         issued_linen_bag_blue = :issued_linen_bag_blue,
                          issued_laundry_net_count = :issued_laundry_net_count
                      WHERE id = :id'
                 );
@@ -137,6 +145,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':note' => $values['note'],
                     ':issued_linen_bag_orange' => $values['issued_linen_bag_orange'],
                     ':issued_linen_bag_yellow' => $values['issued_linen_bag_yellow'],
+                    ':issued_linen_bag_blue' => $values['issued_linen_bag_blue'],
                     ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                     ':id' => $facilityId,
                 ]);
@@ -168,7 +177,7 @@ $csrfToken = csrf_token();
 
 $facilitiesStmt = $pdo->query(
     'SELECT id, name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
-            issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count, is_active
+            issued_linen_bag_orange, issued_linen_bag_yellow, issued_linen_bag_blue, issued_laundry_net_count, is_active
      FROM facilities ORDER BY is_active DESC, name'
 );
 $facilities = $facilitiesStmt->fetchAll();
@@ -198,6 +207,7 @@ $formPhoneNumber = '';
 $formNote = '';
 $formIssuedLinenBagOrange = '';
 $formIssuedLinenBagYellow = '';
+$formIssuedLinenBagBlue = '';
 $formIssuedLaundryNetCount = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
@@ -213,6 +223,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formNote = (string) ($_POST['note'] ?? '');
     $formIssuedLinenBagOrange = (string) ($_POST['issued_linen_bag_orange'] ?? '');
     $formIssuedLinenBagYellow = (string) ($_POST['issued_linen_bag_yellow'] ?? '');
+    $formIssuedLinenBagBlue = (string) ($_POST['issued_linen_bag_blue'] ?? '');
     $formIssuedLaundryNetCount = (string) ($_POST['issued_laundry_net_count'] ?? '');
 } elseif ($editingFacility !== null) {
     $formAction = 'update';
@@ -227,6 +238,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formNote = (string) ($editingFacility['note'] ?? '');
     $formIssuedLinenBagOrange = $editingFacility['issued_linen_bag_orange'] !== null ? (string) $editingFacility['issued_linen_bag_orange'] : '';
     $formIssuedLinenBagYellow = $editingFacility['issued_linen_bag_yellow'] !== null ? (string) $editingFacility['issued_linen_bag_yellow'] : '';
+    $formIssuedLinenBagBlue = $editingFacility['issued_linen_bag_blue'] !== null ? (string) $editingFacility['issued_linen_bag_blue'] : '';
     $formIssuedLaundryNetCount = $editingFacility['issued_laundry_net_count'] !== null ? (string) $editingFacility['issued_laundry_net_count'] : '';
 }
 ?>
@@ -351,6 +363,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
                 <input type="number" id="issued_laundry_net_count" name="issued_laundry_net_count" min="0" step="1" value="<?= htmlspecialchars($formIssuedLaundryNetCount, ENT_QUOTES, 'UTF-8') ?>">
             </div>
 
+            <div class="form-row">
+                <label for="issued_linen_bag_blue">交付リネン袋数（青）</label>
+                <input type="number" id="issued_linen_bag_blue" name="issued_linen_bag_blue" min="0" step="1" value="<?= htmlspecialchars($formIssuedLinenBagBlue, ENT_QUOTES, 'UTF-8') ?>">
+            </div>
+
             <button type="submit"><?= $formAction === 'update' ? '更新する' : '登録する' ?></button>
             <?php if ($formAction === 'update'): ?>
                 <a href="/admin/facilities.php">キャンセル</a>
@@ -377,6 +394,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
                     <th>備考</th>
                     <th>交付リネン袋数（オレンジ）</th>
                     <th>交付リネン袋数（黄）</th>
+                    <th>交付リネン袋数（青）</th>
                     <th>交付洗濯ネット数</th>
                     <th>状態</th>
                     <th>操作</th>
@@ -395,6 +413,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
                         <td class="note-cell"><?= $facility['note'] !== null ? nl2br(htmlspecialchars($facility['note'], ENT_QUOTES, 'UTF-8')) : '-' ?></td>
                         <td><?= $facility['issued_linen_bag_orange'] !== null ? (int) $facility['issued_linen_bag_orange'] . '枚' : '-' ?></td>
                         <td><?= $facility['issued_linen_bag_yellow'] !== null ? (int) $facility['issued_linen_bag_yellow'] . '枚' : '-' ?></td>
+                        <td><?= $facility['issued_linen_bag_blue'] !== null ? (int) $facility['issued_linen_bag_blue'] . '枚' : '-' ?></td>
                         <td><?= $facility['issued_laundry_net_count'] !== null ? (int) $facility['issued_laundry_net_count'] . '枚' : '-' ?></td>
                         <td>
                             <?php if ((int) $facility['is_active'] === 1): ?>

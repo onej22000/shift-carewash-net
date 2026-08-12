@@ -210,6 +210,9 @@ $employees = $employeesStmt->fetchAll();
 $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
 
 $facilityId = (int) ($_GET['facility_id'] ?? 0);
+if ($facilityId > 0 && !in_array($facilityId, $validFacilityIds, true)) {
+    $facilityId = 0;
+}
 
 $yearMonth = (string) ($_GET['month'] ?? (new DateTime())->format('Y-m'));
 if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $yearMonth)) {
@@ -265,7 +268,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     cancel_collection_cycle_issuance_stock_transactions($pdo, $cycleId, $admin['id']);
 
                     $pdo->commit();
-                    set_flash('success', '集荷・配送記録を削除しました。');
+                    set_flash('success', '集荷記録を削除しました。');
                     header('Location: ' . $backToListUrl);
                     exit;
                 } catch (\Throwable $e) {
@@ -342,7 +345,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $pdo, null, $values, $values['facility_id'], $facilityNamesById[$values['facility_id']] ?? '', $newCycleId, $admin['id']
                 );
 
-                set_flash('success', '集荷・配送記録を登録しました。');
+                set_flash('success', '集荷記録を登録しました。');
                 header('Location: ' . $backToListUrl);
                 exit;
             } else {
@@ -426,7 +429,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                         $pdo->commit();
                         set_flash('success', $changedCount > 0
-                            ? '集荷・配送記録を修正しました（' . $changedCount . '件のフィールドを変更）。'
+                            ? '集荷記録を修正しました（' . $changedCount . '件のフィールドを変更）。'
                             : '変更点はありませんでした。');
                         header('Location: ' . $backToListUrl);
                         exit;
@@ -498,11 +501,16 @@ $facilitiesStmtAll = $facilities;
 $employeeNamesById = array_column($employees, 'name', 'id');
 
 $selectedFacilityName = $facilityNamesById[$facilityId] ?? '';
-$records = [];
+$recordWhere = 'cc.pickup_date BETWEEN :start_date AND :end_date AND cc.deleted_at IS NULL';
+$recordParams = [':start_date' => $rangeStartStr, ':end_date' => $rangeEndStr];
+if ($facilityId > 0) {
+    $recordWhere .= ' AND cc.facility_id = :facility_id';
+    $recordParams[':facility_id'] = $facilityId;
+}
 
-if (in_array($facilityId, $validFacilityIds, true)) {
-    $recordsStmt = $pdo->prepare(
+$recordsStmt = $pdo->prepare(
         'SELECT cc.*,
+                f.name AS facility_name,
                 pe.name AS pickup_employee_name,
                 ae.name AS arrival_employee_name,
                 de.name AS dispatch_employee_name,
@@ -510,22 +518,18 @@ if (in_array($facilityId, $validFacilityIds, true)) {
                 af.name AS arrival_facility_name,
                 df.name AS dispatch_facility_name
          FROM collection_cycles cc
+         INNER JOIN facilities f ON f.id = cc.facility_id
          LEFT JOIN employees pe ON pe.id = cc.pickup_employee_id
          LEFT JOIN employees ae ON ae.id = cc.arrival_employee_id
          LEFT JOIN employees de ON de.id = cc.dispatch_employee_id
          LEFT JOIN employees re ON re.id = cc.return_employee_id
          LEFT JOIN facilities af ON af.id = cc.arrival_facility_id
          LEFT JOIN facilities df ON df.id = cc.dispatch_facility_id
-         WHERE cc.facility_id = :facility_id AND cc.pickup_date BETWEEN :start_date AND :end_date AND cc.deleted_at IS NULL
+         WHERE ' . $recordWhere . '
          ORDER BY cc.pickup_date ASC, cc.id ASC'
-    );
-    $recordsStmt->execute([
-        ':facility_id' => $facilityId,
-        ':start_date' => $rangeStartStr,
-        ':end_date' => $rangeEndStr,
-    ]);
-    $records = $recordsStmt->fetchAll();
-}
+);
+$recordsStmt->execute($recordParams);
+$records = $recordsStmt->fetchAll();
 
 function cr_bag($count)
 {
@@ -560,7 +564,7 @@ function cr_issued(array $record): string
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>集荷・配送記録簿 | 管理者</title>
+    <title>集荷記録簿 | 管理者</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
@@ -585,7 +589,7 @@ function cr_issued(array $record): string
 </head>
 <body>
 <header>
-    <h1>集荷・配送記録簿</h1>
+    <h1>集荷記録簿</h1>
     <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん（管理者） | <a href="/admin/collection_cycle_edit_logs.php">修正履歴</a> | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a></nav>
 </header>
 
@@ -600,7 +604,7 @@ function cr_issued(array $record): string
 <form method="get" action="/admin/collection_records.php" class="filter-row">
     <label for="facility_id">施設:</label>
     <select id="facility_id" name="facility_id" onchange="this.form.submit()">
-        <option value="">選択してください</option>
+        <option value="0" <?= $facilityId === 0 ? 'selected' : '' ?>>すべての施設</option>
         <?php foreach ($facilities as $facility): ?>
             <option value="<?= (int) $facility['id'] ?>" <?= (int) $facility['id'] === $facilityId ? 'selected' : '' ?>>
                 <?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?>
@@ -617,7 +621,7 @@ function cr_issued(array $record): string
 </div>
 
 <section class="record-form">
-    <h2><?= $formAction === 'update' ? '集荷・配送記録の修正' : '集荷・配送記録の新規登録' ?></h2>
+    <h2><?= $formAction === 'update' ? '集荷記録の修正' : '集荷記録の新規登録' ?></h2>
     <fieldset>
         <form method="post" action="/admin/collection_records.php?facility_id=<?= $facilityId ?>&month=<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>">
             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
@@ -779,14 +783,13 @@ function cr_issued(array $record): string
     </fieldset>
 </section>
 
-<?php if ($facilityId <= 0 || $selectedFacilityName === ''): ?>
-    <p class="notice">施設を選択してください。</p>
-<?php else: ?>
-    <h2><?= htmlspecialchars($selectedFacilityName, ENT_QUOTES, 'UTF-8') ?>　<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>分</h2>
+    <h2><?= $selectedFacilityName !== '' ? htmlspecialchars($selectedFacilityName, ENT_QUOTES, 'UTF-8') : '全施設' ?>　<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>分</h2>
 
+    <?php if ($facilityId > 0): ?>
     <div class="actions">
         <a href="/admin/collection_records_pdf.php?facility_id=<?= $facilityId ?>&month=<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>">PDFで出力する</a>
     </div>
+    <?php endif; ?>
 
     <?php if (empty($records)): ?>
         <p class="notice">対象月の記録はありません。</p>
@@ -794,6 +797,7 @@ function cr_issued(array $record): string
         <table class="record-table">
             <thead>
                 <tr>
+                    <th rowspan="2">施設</th>
                     <th rowspan="2">集荷日</th>
                     <th colspan="4">集荷</th>
                     <th colspan="4">クリーニング所到着</th>
@@ -812,6 +816,7 @@ function cr_issued(array $record): string
             <tbody>
                 <?php foreach ($records as $record): ?>
                     <tr>
+                        <td><?= htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($record['pickup_date'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= cr_bag($record['pickup_bag_count']) ?></td>
                         <td><?= cr_time($record['pickup_time']) ?></td>
@@ -831,7 +836,7 @@ function cr_issued(array $record): string
                         <td><?= htmlspecialchars($record['remarks'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                         <td>
                             <a href="?facility_id=<?= $facilityId ?>&month=<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>&edit=<?= (int) $record['id'] ?>">編集</a>
-                            <form method="post" action="/admin/collection_records.php?facility_id=<?= $facilityId ?>&month=<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この集荷・配送記録を削除しますか？');">
+                            <form method="post" action="/admin/collection_records.php?facility_id=<?= $facilityId ?>&month=<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この集荷記録を削除しますか？');">
                                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
                                 <input type="hidden" name="action" value="delete">
                                 <input type="hidden" name="id" value="<?= (int) $record['id'] ?>">
@@ -843,6 +848,5 @@ function cr_issued(array $record): string
             </tbody>
         </table>
     <?php endif; ?>
-<?php endif; ?>
 </body>
 </html>

@@ -269,7 +269,8 @@ $records = $listStmt->fetchAll();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>集荷前車両等チェック記録 | シフト管理</title>
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
+    <title>車両チェック記録簿 | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 4px; }
@@ -301,7 +302,7 @@ $records = $listStmt->fetchAll();
 </head>
 <body>
 <header>
-    <h1>集荷前車両等チェック記録</h1>
+    <h1>車両チェック記録簿</h1>
     <nav><a href="/staff/dashboard.php">ダッシュボードに戻る</a> | <a href="/staff/logout.php">ログアウト</a></nav>
 </header>
 

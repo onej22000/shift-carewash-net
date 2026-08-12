@@ -304,6 +304,7 @@ if ($filterVehicleId > 0) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
     <title>車両管理記録 | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }

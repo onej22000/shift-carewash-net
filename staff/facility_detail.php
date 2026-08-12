@@ -9,7 +9,7 @@ $facilityId = (int) ($_GET['id'] ?? 0);
 
 $stmt = $pdo->prepare(
     'SELECT id, name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
-            issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count, is_active
+            issued_linen_bag_orange, issued_linen_bag_yellow, issued_linen_bag_blue, issued_laundry_net_count, is_active
      FROM facilities WHERE id = :id'
 );
 $stmt->execute([':id' => $facilityId]);
@@ -20,6 +20,7 @@ $facility = $stmt->fetch();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
     <title><?= $facility !== false ? htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') : '施設情報' ?> | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 0; padding: 16px; color: #222; font-size: 1.05em; }
@@ -103,6 +104,10 @@ $facility = $stmt->fetch();
         <div class="info-row">
             <div class="label">交付リネン袋数（黄）</div>
             <div class="value"><?= $facility['issued_linen_bag_yellow'] !== null ? (int) $facility['issued_linen_bag_yellow'] . '枚' : '-' ?></div>
+        </div>
+        <div class="info-row">
+            <div class="label">交付リネン袋数（青）</div>
+            <div class="value"><?= $facility['issued_linen_bag_blue'] !== null ? (int) $facility['issued_linen_bag_blue'] . '枚' : '-' ?></div>
         </div>
         <div class="info-row">
             <div class="label">交付洗濯ネット数</div>

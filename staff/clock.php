@@ -5,37 +5,53 @@ require_once __DIR__ . '/../includes/functions.php';
 $staff = require_login('staff');
 $pdo = getPdo();
 
-$openStmt = $pdo->prepare(
-    "SELECT id
-     FROM attendance
-     WHERE employee_id = :employee_id AND status = 'working' AND DATE(clock_in_at) = CURDATE()
-       AND deleted_at IS NULL
-     ORDER BY clock_in_at DESC
-     LIMIT 1"
-);
-$openStmt->execute([':employee_id' => $staff['id']]);
-$openRecord = $openStmt->fetch();
+// 共用アカウント（複数人が1つのログインを使い回す）は「本人」という単一の状態を持たないため、
+// 出勤済みかどうかの事前チェック・区分の初期提案は行わず、代わりに出勤する従業員を都度選ばせる。
+$isSharedAccount = (int) ($staff['is_shared_account'] ?? 0) === 1;
 
-if ($openRecord !== false) {
-    // 既に出勤中の場合、退勤はclock_out.php（作業実績入力を伴う）でのみ受け付ける
-    header('Location: /staff/clock_out.php');
-    exit;
-}
+$suggestedCategory = null;
+$employees = [];
+$openEmployeeIds = [];
 
-// ---- 本日のシフトから区分の初期値を提案する（複数シフトがあれば区分をまとめてSHIFT_CATEGORIES優先順で解決） ----
-$today = (new DateTime())->format('Y-m-d');
-$todayShiftsStmt = $pdo->prepare('SELECT categories FROM shifts WHERE employee_id = :employee_id AND work_date = :work_date');
-$todayShiftsStmt->execute([':employee_id' => $staff['id'], ':work_date' => $today]);
+if ($isSharedAccount) {
+    $employeesStmt = $pdo->query(
+        "SELECT id, name FROM employees WHERE role = 'staff' AND is_shared_account = 0 AND status = 'active' ORDER BY name"
+    );
+    $employees = $employeesStmt->fetchAll();
+    $openEmployeeIds = array_map('intval', array_column(find_open_attendance_today($pdo), 'employee_id'));
+} else {
+    $openStmt = $pdo->prepare(
+        "SELECT id
+         FROM attendance
+         WHERE employee_id = :employee_id AND status = 'working' AND DATE(clock_in_at) = CURDATE()
+           AND deleted_at IS NULL
+         ORDER BY clock_in_at DESC
+         LIMIT 1"
+    );
+    $openStmt->execute([':employee_id' => $staff['id']]);
+    $openRecord = $openStmt->fetch();
 
-$todayCategories = [];
-foreach ($todayShiftsStmt->fetchAll() as $shift) {
-    foreach (categories_from_value($shift['categories']) as $category) {
-        if (!in_array($category, $todayCategories, true)) {
-            $todayCategories[] = $category;
+    if ($openRecord !== false) {
+        // 既に出勤中の場合、退勤はclock_out.php（作業実績入力を伴う）でのみ受け付ける
+        header('Location: /staff/clock_out.php');
+        exit;
+    }
+
+    // ---- 本日のシフトから区分の初期値を提案する（複数シフトがあれば区分をまとめてSHIFT_CATEGORIES優先順で解決） ----
+    $today = (new DateTime())->format('Y-m-d');
+    $todayShiftsStmt = $pdo->prepare('SELECT categories FROM shifts WHERE employee_id = :employee_id AND work_date = :work_date');
+    $todayShiftsStmt->execute([':employee_id' => $staff['id'], ':work_date' => $today]);
+
+    $todayCategories = [];
+    foreach ($todayShiftsStmt->fetchAll() as $shift) {
+        foreach (categories_from_value($shift['categories']) as $category) {
+            if (!in_array($category, $todayCategories, true)) {
+                $todayCategories[] = $category;
+            }
         }
     }
+    $suggestedCategory = resolve_shift_category($todayCategories);
 }
-$suggestedCategory = resolve_shift_category($todayCategories);
 
 $errorMessage = '';
 
@@ -44,10 +60,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errorMessage = '不正なリクエストです。再度お試しください。';
     } else {
         $category = (string) ($_POST['category'] ?? '');
+        $targetEmployeeId = (int) $staff['id'];
 
-        if (!in_array($category, SHIFT_CATEGORIES, true)) {
+        if ($isSharedAccount) {
+            $targetEmployeeId = (int) ($_POST['employee_id'] ?? 0);
+            $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
+            if (!in_array($targetEmployeeId, $validEmployeeIds, true)) {
+                $errorMessage = '従業員を選択してください。';
+            } elseif (in_array($targetEmployeeId, $openEmployeeIds, true)) {
+                $errorMessage = 'その従業員は既に出勤中です。';
+            }
+        }
+
+        if ($errorMessage === '' && !in_array($category, SHIFT_CATEGORIES, true)) {
             $errorMessage = '区分を選択してください。';
-        } else {
+        }
+
+        if ($errorMessage === '') {
             $lat = (isset($_POST['lat']) && $_POST['lat'] !== '') ? (float) $_POST['lat'] : null;
             $lng = (isset($_POST['lng']) && $_POST['lng'] !== '') ? (float) $_POST['lng'] : null;
 
@@ -55,7 +84,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // （チェック完了時にvehicle_check.php側でattendanceをINSERTする）。
             if ($category === '集荷') {
                 $_SESSION['pending_clock_in'] = [
-                    'employee_id' => (int) $staff['id'],
+                    'employee_id' => $targetEmployeeId,
                     'category' => $category,
                     'lat' => $lat,
                     'lng' => $lng,
@@ -70,7 +99,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                  VALUES (:employee_id, :category, :clock_in_at, :lat, :lng, 'working')"
             );
             $insertStmt->execute([
-                ':employee_id' => $staff['id'],
+                ':employee_id' => $targetEmployeeId,
                 ':category' => $category,
                 ':clock_in_at' => (new DateTime())->format('Y-m-d H:i:s'),
                 ':lat' => $lat,
@@ -93,6 +122,7 @@ $formCategory = $_SERVER['REQUEST_METHOD'] === 'POST' ? (string) ($_POST['catego
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
     <title>出勤 | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
@@ -123,7 +153,9 @@ $formCategory = $_SERVER['REQUEST_METHOD'] === 'POST' ? (string) ($_POST['catego
     <p class="message error"><?= htmlspecialchars($errorMessage, ENT_QUOTES, 'UTF-8') ?></p>
 <?php endif; ?>
 
-<?php if ($suggestedCategory !== null): ?>
+<?php if ($isSharedAccount): ?>
+    <p class="notice">出勤する従業員を選択してください。</p>
+<?php elseif ($suggestedCategory !== null): ?>
     <p class="notice">本日のシフトから区分「<?= htmlspecialchars($suggestedCategory, ENT_QUOTES, 'UTF-8') ?>」を初期選択しています。違う場合は変更してください。</p>
 <?php else: ?>
     <p class="notice">本日のシフトに区分が設定されていません。区分を選択してください。</p>
@@ -135,6 +167,22 @@ $formCategory = $_SERVER['REQUEST_METHOD'] === 'POST' ? (string) ($_POST['catego
     <input type="hidden" name="lng" id="clock-lng" value="">
 
     <fieldset>
+        <?php if ($isSharedAccount): ?>
+        <div class="form-row">
+            <label for="employee_id">従業員</label>
+            <select id="employee_id" name="employee_id" required>
+                <option value="">選択してください</option>
+                <?php foreach ($employees as $employee): ?>
+                    <?php if (in_array((int) $employee['id'], $openEmployeeIds, true)): ?>
+                        <?php continue; ?>
+                    <?php endif; ?>
+                    <option value="<?= (int) $employee['id'] ?>" <?= ($_SERVER['REQUEST_METHOD'] === 'POST' && (int) ($_POST['employee_id'] ?? 0) === (int) $employee['id']) ? 'selected' : '' ?>>
+                        <?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <?php endif; ?>
         <div class="form-row">
             <label for="category">区分</label>
             <select id="category" name="category" required>

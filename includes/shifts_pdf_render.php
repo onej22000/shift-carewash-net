@@ -14,25 +14,70 @@ function pdf_esc(?string $value): string
  * 1件のシフトの「時間帯＋区分タグ」ブロックのHTMLを組み立てる。
  * 区分は複数選択されている場合があるため、SHIFT_CATEGORIES順に並べてタグを複数出す。
  */
-function render_shift_block(array $shift): string
+function render_shift_block(array $shift, bool $plain = false): string
 {
-    $timeLabel = substr($shift['start_time'], 0, 5) . '〜' . substr($shift['end_time'], 0, 5);
     $categories = array_values(array_intersect(SHIFT_CATEGORIES, categories_from_value($shift['categories'])));
-
-    $tagsHtml = '';
-    foreach ($categories as $category) {
-        $color = CATEGORY_COLORS[$category] ?? CATEGORY_COLOR_NONE;
-        $tagsHtml .= '<span class="cat-tag" style="background:' . $color . ';">' . pdf_esc($category) . '</span>';
+    if (in_array('集荷', $categories, true)) {
+        $className = 'shift-name-pickup';
+    } elseif (in_array('洗濯代行', $categories, true)) {
+        $className = 'shift-name-laundry';
+    } else {
+        $className = 'shift-name-store';
     }
 
-    return '<div class="shift-block"><div class="shift-time">' . pdf_esc($timeLabel) . '</div>' . $tagsHtml . '</div>';
+    $timeLabel = substr($shift['start_time'], 0, 5) . '〜' . substr($shift['end_time'], 0, 5);
+    return '<div class="shift-name ' . ($plain ? 'shift-name-plain' : $className) . '">' . pdf_esc($timeLabel) . '</div>';
+}
+
+/**
+ * PDFの日付欄に表示する施設開始イベントを返す。
+ * 受託開始日は「オープン」、その日より後の最初の設定集荷日は「洗濯代行開始」とする。
+ *
+ * @return array<string, list<string>> 日付(Y-m-d) => 表示文言一覧
+ */
+function fetch_pdf_facility_start_labels(PDO $pdo, string $startDate, string $endDate): array
+{
+    $stmt = $pdo->query(
+        "SELECT name, onboarding_start_date, pickup_schedule
+         FROM facilities
+         WHERE is_active = 1 AND onboarding_start_date IS NOT NULL"
+    );
+    $scheduleWeekdays = [
+        '月・木' => [1, 4],
+        '火・金' => [2, 5],
+        '水・土' => [3, 6],
+    ];
+    $labelsByDate = [];
+
+    foreach ($stmt->fetchAll() as $row) {
+        $openDate = (string) $row['onboarding_start_date'];
+        if ($openDate >= $startDate && $openDate <= $endDate) {
+            $labelsByDate[$openDate][] = $row['name'] . 'オープン';
+        }
+
+        $weekdays = $scheduleWeekdays[$row['pickup_schedule']] ?? [];
+        if (!$weekdays) {
+            continue;
+        }
+        $firstPickupDate = new DateTime($openDate);
+        do {
+            $firstPickupDate->modify('+1 day');
+        } while (!in_array((int) $firstPickupDate->format('N'), $weekdays, true));
+
+        $firstPickupDateStr = $firstPickupDate->format('Y-m-d');
+        if ($firstPickupDateStr >= $startDate && $firstPickupDateStr <= $endDate) {
+            $labelsByDate[$firstPickupDateStr][] = $row['name'] . '洗濯代行開始';
+        }
+    }
+
+    return $labelsByDate;
 }
 
 /**
  * 月間シフト表PDFを生成し、そのままダウンロードレスポンスとして出力する（呼び出し元に戻らない想定）。
  * $monthParamは"YYYY-MM"形式。不正な値の場合は当月にフォールバックする。
  */
-function render_monthly_shift_pdf(PDO $pdo, string $monthParam): void
+function render_monthly_shift_pdf(PDO $pdo, string $monthParam, bool $splitByCategory = false): void
 {
     if (!preg_match('/^\d{4}-\d{2}$/', $monthParam)) {
         $monthParam = (new DateTime('today'))->format('Y-m');
@@ -71,7 +116,7 @@ function render_monthly_shift_pdf(PDO $pdo, string $monthParam): void
     }
 
     // ---- 取引先施設の受託開始日（該当日の日付セルに1行だけ表示。既存のシフト表画面と同じデータソース） ----
-    $facilityOnboardingLabels = fetch_facility_onboarding_labels($pdo, $rangeStartStr, $rangeEndStr);
+    $facilityStartLabels = fetch_pdf_facility_start_labels($pdo, $rangeStartStr, $rangeEndStr);
 
     // ---- 祝日一覧（土日以外の休日判定用） ----
     $holidayDates = fetch_holiday_dates($pdo, $rangeStartStr, $rangeEndStr);
@@ -101,6 +146,68 @@ function render_monthly_shift_pdf(PDO $pdo, string $monthParam): void
         $cursor->modify('+1 day');
     }
 
+    $renderTable = static function (?string $onlyCategory = null) use (
+        $employees,
+        $dates,
+        $holidayDates,
+        $weekdayLabels,
+        $facilityStartLabels,
+        $shiftsByEmployeeDate
+    ): string {
+        ob_start();
+        ?>
+        <table class="shift-table">
+            <thead><tr>
+                <th class="date-cell">日付</th>
+                <?php foreach ($employees as $employee): ?>
+                    <th class="emp-col"><?= pdf_esc($employee['name']) ?></th>
+                <?php endforeach; ?>
+            </tr></thead>
+            <tbody>
+            <?php foreach ($dates as $date): ?>
+                <?php
+                $dateStr = $date->format('Y-m-d');
+                $dow = (int) $date->format('w');
+                $isHoliday = is_holiday_in_set($dateStr, $holidayDates);
+                $rowClass = $dow === 6 ? 'row-sat' : ($isHoliday ? 'row-sun-or-holiday' : '');
+                $labelClass = $dow === 6 ? 'is-sat' : ($isHoliday ? 'is-sun-or-holiday' : '');
+                $facilityStartEvents = $facilityStartLabels[$dateStr] ?? [];
+                ?>
+                <tr class="<?= $rowClass ?>">
+                    <td class="date-cell">
+                        <span class="date-label <?= $labelClass ?>"><?= (int) $date->format('n') ?>/<?= (int) $date->format('j') ?>(<?= $weekdayLabels[$dow] ?>)</span>
+                        <?php foreach ($facilityStartEvents as $eventLabel): ?>
+                            <span class="facility-start-line"><?= pdf_esc($eventLabel) ?></span>
+                        <?php endforeach; ?>
+                    </td>
+                    <?php foreach ($employees as $employee): ?>
+                        <?php
+                        $dayShifts = $shiftsByEmployeeDate[(int) $employee['id']][$dateStr] ?? [];
+                        if ($onlyCategory !== null) {
+                            $dayShifts = array_values(array_filter(
+                                $dayShifts,
+                                static fn(array $shift): bool => in_array(
+                                    $onlyCategory,
+                                    categories_from_value($shift['categories']),
+                                    true
+                                )
+                            ));
+                        }
+                        ?>
+                        <td class="emp-col">
+                            <?php foreach ($dayShifts as $shift): ?>
+                                <?= render_shift_block($shift, $onlyCategory !== null) ?>
+                            <?php endforeach; ?>
+                        </td>
+                    <?php endforeach; ?>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php
+        return (string) ob_get_clean();
+    };
+
     ob_start();
     ?>
     <!DOCTYPE html>
@@ -110,79 +217,52 @@ function render_monthly_shift_pdf(PDO $pdo, string $monthParam): void
     <style>
         body { font-family: ipag; font-size: <?= $bodyFontSizePt ?>pt; }
         h1 { font-size: 13pt; text-align: center; margin: 0 0 4pt; }
-        .legend { text-align: center; font-size: 7pt; margin-bottom: 6pt; }
-        .legend .cat-tag { margin: 0 3pt; }
         table.shift-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
         table.shift-table th, table.shift-table td {
             border: 0.5pt solid #999; padding: 1.5pt 2pt; vertical-align: top; word-break: break-all;
         }
-        table.shift-table th { background: #eef2f8; text-align: center; font-weight: bold; }
+        table.shift-table th { background: #eef2f8; text-align: center; font-weight: normal; }
         td.date-cell { width: <?= $dateColWidthPercent ?>%; white-space: nowrap; }
         th.emp-col, td.emp-col { width: <?= $employeeColWidthPercent ?>%; }
-        .date-label { font-weight: bold; }
+        .date-label { font-weight: normal; }
         .date-label.is-sat { color: #0b5ed7; }
         .date-label.is-sun-or-holiday { color: #d9362e; }
         tr.row-sat td.date-cell { background: #eef6ff; }
         tr.row-sun-or-holiday td.date-cell { background: #fdecea; }
-        .onboarding-line {
-            display: block; margin-top: 1pt; font-size: 0.85em; font-weight: bold;
-            color: #fff; background: #ff8f00; padding: 0.5pt 2pt;
+        .facility-start-line {
+            display: block; margin-top: 1pt; font-size: 0.85em; font-weight: normal;
+            color: #000; background: #fff; padding: 0.5pt 2pt;
         }
-        .shift-block { margin-bottom: 2pt; padding-bottom: 2pt; border-bottom: 0.5pt dotted #ccc; }
-        .shift-block:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
-        .shift-time { white-space: nowrap; }
-        .cat-tag {
-            display: inline-block; color: #fff; font-size: 0.8em; font-weight: bold;
-            padding: 0.5pt 3pt; border-radius: 2pt; margin-top: 1pt;
-        }
+        .shift-name { display: block; padding: 2pt 1pt; margin-bottom: 1pt; font-weight: normal; text-align: center; }
+        .shift-name:last-child { margin-bottom: 0; }
+        .shift-name-pickup { background: #000; color: #fff; font-weight: bold; }
+        .shift-name-laundry { background: #e2e2e2; color: #000; font-weight: normal; }
+        .shift-name-store { background: #fff; color: #000; font-weight: normal; }
+        .shift-name-plain { background: #fff; color: #000; font-weight: normal; }
+        h2.category-title { font-size: 11pt; text-align: center; font-weight: normal; margin: 0 0 4pt; }
+        .category-page { page-break-before: always; }
+        .split-pdf table.shift-table th,
+        .split-pdf table.shift-table td,
+        .split-pdf tr.row-sat td.date-cell,
+        .split-pdf tr.row-sun-or-holiday td.date-cell { background: #fff; color: #000; font-weight: normal; }
+        .split-pdf h1,
+        .split-pdf .date-label,
+        .split-pdf .date-label.is-sat,
+        .split-pdf .date-label.is-sun-or-holiday { color: #000; font-weight: normal; }
     </style>
     </head>
-    <body>
+    <body class="<?= $splitByCategory ? 'split-pdf' : '' ?>">
     <h1><?= (int) $yearPart ?>年<?= (int) $monthPart ?>月のシフト　<?= pdf_esc(COMPANY_NAME . '　' . STORE_NAME) ?></h1>
-    <div class="legend">
-        <?php foreach (SHIFT_CATEGORIES as $category): ?>
-            <span class="cat-tag" style="background:<?= CATEGORY_COLORS[$category] ?? CATEGORY_COLOR_NONE ?>;"><?= pdf_esc($category) ?></span>
+    <?php if ($splitByCategory): ?>
+        <?php foreach (['店舗', '洗濯代行', '集荷'] as $categoryIndex => $category): ?>
+            <section class="<?= $categoryIndex > 0 ? 'category-page' : '' ?>">
+                <h2 class="category-title"><?= pdf_esc($category) ?>シフト</h2>
+                <?= $renderTable($category) ?>
+            </section>
         <?php endforeach; ?>
-    </div>
-
-    <table class="shift-table">
-        <thead>
-            <tr>
-                <th class="date-cell">日付</th>
-                <?php foreach ($employees as $employee): ?>
-                    <th class="emp-col"><?= pdf_esc($employee['name']) ?></th>
-                <?php endforeach; ?>
-            </tr>
-        </thead>
-        <tbody>
-            <?php foreach ($dates as $date): ?>
-                <?php
-                $dateStr = $date->format('Y-m-d');
-                $dow = (int) $date->format('w');
-                $isHoliday = is_holiday_in_set($dateStr, $holidayDates);
-                $rowClass = $dow === 6 ? 'row-sat' : ($isHoliday ? 'row-sun-or-holiday' : '');
-                $labelClass = $dow === 6 ? 'is-sat' : ($isHoliday ? 'is-sun-or-holiday' : '');
-                $onboardingFacilities = $facilityOnboardingLabels[$dateStr] ?? [];
-                ?>
-                <tr class="<?= $rowClass ?>">
-                    <td class="date-cell">
-                        <span class="date-label <?= $labelClass ?>"><?= (int) $date->format('n') ?>/<?= (int) $date->format('j') ?>(<?= $weekdayLabels[$dow] ?>)</span>
-                        <?php foreach ($onboardingFacilities as $facilityName): ?>
-                            <span class="onboarding-line"><?= pdf_esc($facilityName) ?>　受託開始</span>
-                        <?php endforeach; ?>
-                    </td>
-                    <?php foreach ($employees as $employee): ?>
-                        <?php $dayShifts = $shiftsByEmployeeDate[(int) $employee['id']][$dateStr] ?? []; ?>
-                        <td class="emp-col">
-                            <?php foreach ($dayShifts as $shift): ?>
-                                <?= render_shift_block($shift) ?>
-                            <?php endforeach; ?>
-                        </td>
-                    <?php endforeach; ?>
-                </tr>
-            <?php endforeach; ?>
-        </tbody>
-    </table>
+    <?php else: ?>
+        <?= $renderTable(null) ?>
+    <?php endif; ?>
     </body>
     </html>
     <?php
@@ -212,7 +292,7 @@ function render_monthly_shift_pdf(PDO $pdo, string $monthParam): void
     $mpdf->WriteHTML($html);
 
     $filename = sprintf(
-        'シフト表_%s-%s_%s_%s.pdf',
+        $splitByCategory ? '区分別シフト表_%s-%s_%s_%s.pdf' : 'シフト表_%s-%s_%s_%s.pdf',
         $rangeStartStr,
         $rangeEndStr,
         COMPANY_NAME,

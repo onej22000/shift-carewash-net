@@ -41,7 +41,7 @@ ksort($totalsByEmployee);
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>施設間移動時間 | 管理者</title>
+    <title>移動時間 | 管理者</title>
 <style>
     body { font-family: sans-serif; margin: 16px; color: #222; }
     header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 4px; }
@@ -59,7 +59,7 @@ ksort($totalsByEmployee);
 </head>
 <body>
 <header>
-    <h1>施設間移動時間</h1>
+    <h1>移動時間</h1>
     <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん（管理者） | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a></nav>
 </header>
 

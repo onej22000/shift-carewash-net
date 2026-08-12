@@ -14,7 +14,8 @@ const WORK_RECORD_STAGE_LABEL = '洗濯';
 
 // employee_idsはwork_stage_records自体のカラムではなくwork_stage_record_employees側の
 // 参加者一覧のため、汎用の差分ログ処理（$recordのカラム値と比較する処理）とは別に個別でログを記録する。
-// person_count・completed_atは参加者選択（employee_ids）から自動で算出・更新する。
+// person_countは従業員画面では参加者選択数を初期値として登録されるが、管理者画面では
+// 到着リネン袋内の洗濯ネット数として個別に修正できる。completed_atは日時から算出する。
 const WSR_EDITABLE_FIELDS = ['employee_id', 'category', 'facility_id', 'stage', 'person_count', 'record_date', 'record_time', 'completed_at'];
 
 function parse_work_stage_record_input(array $post, array $validEmployeeIds, array $validFacilityIds): array
@@ -29,7 +30,8 @@ function parse_work_stage_record_input(array $post, array $validEmployeeIds, arr
         }
     }
     $participantIds = array_values(array_unique($participantIds));
-    $personCount = count($participantIds);
+    $laundryNetCountRaw = trim((string) ($post['laundry_net_count'] ?? ''));
+    $personCount = filter_var($laundryNetCountRaw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
     $recordDateRaw = trim((string) ($post['record_date'] ?? ''));
     $recordDate = null;
     if ($recordDateRaw !== '') {
@@ -49,6 +51,9 @@ function parse_work_stage_record_input(array $post, array $validEmployeeIds, arr
     }
     if (!in_array($facilityId, $validFacilityIds, true)) {
         $errors[] = '施設を選択してください。';
+    }
+    if ($personCount === false) {
+        $errors[] = '洗濯ネット数は0以上の整数を入力してください。';
     }
     if ($recordDate === false || $recordDate === null) {
         $errors[] = '作業日の形式が正しくありません。';
@@ -321,6 +326,7 @@ $formId = null;
 $formEmployeeId = '';
 $formFacilityId = '';
 $formEmployeeIds = [];
+$formLaundryNetCount = '0';
 $formRecordDate = (new DateTime())->format('Y-m-d');
 $formRecordTime = (new DateTime())->format('H:i');
 
@@ -330,6 +336,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formEmployeeId = (string) ($_POST['employee_id'] ?? '');
     $formFacilityId = (string) ($_POST['facility_id'] ?? '');
     $formEmployeeIds = array_map('intval', (array) ($_POST['employee_ids'] ?? []));
+    $formLaundryNetCount = (string) ($_POST['laundry_net_count'] ?? '0');
     $formRecordDate = (string) ($_POST['record_date'] ?? '');
     $formRecordTime = (string) ($_POST['record_time'] ?? '');
 } elseif ($editingRecord !== null) {
@@ -340,6 +347,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $editingEmployeeIdsStmt = $pdo->prepare('SELECT employee_id FROM work_stage_record_employees WHERE work_stage_record_id = :id');
     $editingEmployeeIdsStmt->execute([':id' => (int) $editingRecord['id']]);
     $formEmployeeIds = array_map('intval', array_column($editingEmployeeIdsStmt->fetchAll(), 'employee_id'));
+    $formLaundryNetCount = (string) $editingRecord['person_count'];
     $formRecordDate = $editingRecord['record_date'];
     $formRecordTime = $editingRecord['record_time'] !== null ? substr($editingRecord['record_time'], 0, 5) : (new DateTime())->format('H:i');
 }
@@ -479,6 +487,11 @@ if (!empty($records)) {
                 </select>
             </div>
 
+            <div class="form-row">
+                <label for="laundry_net_count">洗濯ネット数</label>
+                <input type="number" id="laundry_net_count" name="laundry_net_count" min="0" step="1" value="<?= htmlspecialchars($formLaundryNetCount, ENT_QUOTES, 'UTF-8') ?>" required>
+            </div>
+
             <button type="submit"><?= $formAction === 'update' ? '更新する' : '登録する' ?></button>
             <?php if ($formAction === 'update'): ?>
                 <a href="/admin/work_stage_records.php?period=<?= htmlspecialchars($period, ENT_QUOTES, 'UTF-8') ?>">キャンセル</a>
@@ -507,7 +520,7 @@ if (!empty($records)) {
                     <th>参加した従業員</th>
                     <th>施設</th>
                     <th>工程</th>
-                    <th>人数</th>
+                    <th>洗濯ネット数</th>
                     <th>登録日時</th>
                     <th>操作</th>
                 </tr>
@@ -521,7 +534,7 @@ if (!empty($records)) {
                         <td><?= !empty($participantsByRecordId[(int) $record['id']]) ? htmlspecialchars(implode('・', $participantsByRecordId[(int) $record['id']]), ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(WORK_RECORD_STAGE_LABEL, ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= (int) $record['person_count'] ?>人</td>
+                        <td><?= (int) $record['person_count'] ?>枚</td>
                         <td><?= htmlspecialchars($record['created_at'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td>
                             <a href="/admin/work_stage_records.php?period=<?= htmlspecialchars($period, ENT_QUOTES, 'UTF-8') ?>&edit=<?= (int) $record['id'] ?>">編集</a>

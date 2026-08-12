@@ -4,12 +4,13 @@ require_once __DIR__ . '/../includes/functions.php';
 
 $staff = require_login('staff');
 $pdo = getPdo();
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
 
-// 共用アカウントが直接このURLに来た場合も、通常ダッシュボードは表示させず専用画面へ戻す。
-if ((int) ($staff['is_shared_account'] ?? 0) === 1) {
-    header('Location: /staff/jiro_dashboard.php');
-    exit;
-}
+// 共用アカウント（複数人が1つのログインを使い回す）は「本人」という単一の状態を持たないため、
+// 賃金見込み・本日のシフト・打刻漏れ警告・車両警告など個人向けセクションは非表示にし、
+// 出退勤・休憩は「本日出勤中の全員」一覧から人を選ぶ形に差し替える（2026-08-08）。
+$isSharedAccount = (int) ($staff['is_shared_account'] ?? 0) === 1;
 
 $flash = pop_flash();
 
@@ -98,21 +99,27 @@ if ($openRecord !== false) {
 
 $csrfToken = csrf_token();
 
-$editPostId = isset($_GET['edit_post']) ? (int) $_GET['edit_post'] : null;
-$editBoardType = isset($_GET['board_type']) && array_key_exists((string) $_GET['board_type'], BOARD_TYPES)
-    ? (string) $_GET['board_type']
-    : null;
+$openAttendanceToday = $isSharedAccount ? find_open_attendance_today($pdo) : [];
 
-$boardPosts = [];
-foreach (BOARD_TYPES as $boardType => $boardLabel) {
-    $boardPosts[$boardType] = fetch_board_posts($pdo, $boardType);
-}
+$unreadBoardStmt = $pdo->prepare(
+    'SELECT EXISTS(
+         SELECT 1 FROM board_posts p
+         WHERE p.deleted_at IS NULL
+           AND p.id > COALESCE(
+               (SELECT last_seen_post_id FROM board_read_status WHERE employee_id = :employee_id),
+               0
+           )
+     )'
+);
+$unreadBoardStmt->execute([':employee_id' => $staff['id']]);
+$hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
 ?>
 <!DOCTYPE html>
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/assets/brand-header.css">
     <title>従業員ダッシュボード | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
@@ -124,6 +131,15 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
         section { margin-bottom: 24px; }
         .clock-section { text-align: center; padding: 20px; border: 1px solid #ccc; border-radius: 8px; }
         .clock-status { margin-bottom: 12px; font-size: 0.95em; color: #555; }
+        .shared-attendance-status { text-align: left; margin-bottom: 12px; }
+        .shared-attendance-table { margin-bottom: 12px; }
+        .shared-attendance-table th, .shared-attendance-table td { font-size: 0.9em; }
+        .shared-attendance-actions { white-space: nowrap; }
+        .shared-attendance-actions form { display: inline-block; margin: 0 4px 0 0; }
+        .shared-attendance-actions button, .shared-attendance-actions .clock-out-link { display: inline-block; padding: 6px 12px; border-radius: 4px; border: none; color: #fff; cursor: pointer; text-decoration: none; font-size: 0.9em; }
+        .shared-attendance-actions .break-start { background: #856404; }
+        .shared-attendance-actions .break-end { background: #1e7e34; }
+        .shared-attendance-actions .clock-out-link { background: #b3261e; }
         #clock-button, #break-button { display: inline-block; font-size: 1.1em; padding: 12px 32px; border-radius: 6px; border: none; color: #fff; cursor: pointer; text-decoration: none; margin: 4px; }
         #clock-button.clock-in { background: #0b5ed7; }
         #clock-button.clock-out { background: #b3261e; }
@@ -145,18 +161,6 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
         .vehicle-alert-banner h2 { margin: 0 0 8px; font-size: 1.05em; color: #b3261e; }
         .vehicle-alert-banner ul { margin: 0; padding-left: 20px; }
         .vehicle-alert-banner li { margin-bottom: 4px; }
-        .board-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 24px; }
-        .board-card { border: 2px solid #0b5ed7; border-radius: 8px; padding: 14px 16px; background: #f4f8ff; }
-        .board-card h2 { margin: 0 0 10px; font-size: 1.05em; color: #0b5ed7; }
-        .board-post-list { list-style: none; margin: 0 0 12px; padding: 0; max-height: 320px; overflow-y: auto; }
-        .board-post { background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
-        .board-post-content { white-space: pre-wrap; word-break: break-word; margin: 0 0 6px; }
-        .board-post-meta { font-size: 0.8em; color: #666; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px; align-items: baseline; }
-        .board-post-actions a, .board-post-actions button { font-size: 0.85em; margin-left: 8px; }
-        .board-empty { font-size: 0.9em; color: #777; margin: 0 0 12px; }
-        .board-form textarea { width: 100%; box-sizing: border-box; min-height: 60px; font-family: inherit; font-size: 0.95em; padding: 6px; }
-        .board-form { margin-top: 8px; }
-        .board-form .board-form-actions { margin-top: 6px; }
         .estimate-cards { display: flex; gap: 12px; flex-wrap: wrap; }
         .estimate-card { flex: 1; min-width: 220px; border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; }
         .estimate-card h3 { margin: 0 0 8px; font-size: 1em; }
@@ -166,96 +170,70 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
         .estimate-category-breakdown li { padding: 1px 0; }
         .estimate-category-breakdown .estimate-category-total { font-weight: bold; border-top: 1px solid #ddd; margin-top: 4px; padding-top: 4px; color: #222; }
         .estimate-note { font-size: 0.8em; color: #555; margin-top: 8px; }
-        table.staff-menu-table { border-collapse: collapse; width: 100%; margin-top: 12px; }
-        table.staff-menu-table th, table.staff-menu-table td { border: 1px solid #ccc; padding: 8px; text-align: left; vertical-align: middle; }
-        table.staff-menu-table thead th { background: #f5f5f5; text-align: left; }
-        table.staff-menu-table tbody th { background: #f5f5f5; width: 160px; }
-        table.staff-menu-table td a { display: block; padding: 6px 4px; color: #0b5ed7; text-decoration: none; }
-        table.staff-menu-table td a:hover { text-decoration: underline; }
-        @media (max-width: 600px) {
-            table.staff-menu-table, table.staff-menu-table tbody, table.staff-menu-table tr, table.staff-menu-table th, table.staff-menu-table td {
-                display: block;
-                width: 100%;
+        .staff-menu-group { margin-top: 20px; }
+        .staff-menu-group h3 { margin: 0 0 12px; font-size: 1em; }
+        .nav-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+        .nav-card { display: block; position: relative; overflow: hidden; border: 1px solid #aeb6c1; border-radius: 14px; padding: 18px; text-decoration: none; color: #222; background: linear-gradient(145deg, #f4f6f8 0%, #d6dce3 100%); box-shadow: 0 7px 16px rgba(30, 55, 90, 0.13), 0 2px 4px rgba(30, 55, 90, 0.08), inset 0 1px 0 rgba(255,255,255,0.95); transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease; }
+        .nav-card::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 4px; background: linear-gradient(90deg, #0b5ed7, #52a3ff); }
+        .pickup-menu-group .nav-card, .nav-card.pickup-related { background: linear-gradient(145deg, #fff9e8 0%, #ffedb0 100%); border-color: #e2bd52; }
+        .pickup-menu-group .nav-card::before, .nav-card.pickup-related::before { background: linear-gradient(90deg, #d89b00, #ffc83d); }
+        .laundry-menu-group .nav-card, .nav-card.laundry-related { background: linear-gradient(145deg, #f2faff 0%, #d8efff 100%); border-color: #78bde8; }
+        .laundry-menu-group .nav-card::before, .nav-card.laundry-related::before { background: linear-gradient(90deg, #1687c8, #62c6f5); }
+        .nav-card:hover, .nav-card:focus-visible { border-color: #0b5ed7; box-shadow: 0 12px 24px rgba(30, 80, 140, 0.18), 0 4px 8px rgba(30, 55, 90, 0.12); transform: translateY(-3px); outline: none; }
+        .nav-card:active { transform: translateY(1px); box-shadow: 0 3px 8px rgba(30, 55, 90, 0.16); }
+        .nav-card h3 { font-size: 1.05em; margin: 0 0 8px; color: #0b5ed7; }
+        .nav-card p { margin: 0; font-size: 0.9em; color: #555; }
+        .new-badge { display: inline-block; margin-left: 8px; padding: 2px 7px; border-radius: 999px; background: #d93025; color: #fff; font-size: 0.72em; vertical-align: middle; }
+        @media (max-width: 900px) {
+            body { margin: 8px; font-size: 17px; }
+            header { align-items: flex-start; gap: 10px; }
+            header nav { width: 100%; }
+            .clock-section { padding: 12px 8px; }
+            .nav-cards { grid-template-columns: minmax(0, 1fr); gap: 14px; width: 100%; }
+            .nav-card {
                 box-sizing: border-box;
+                width: 100%;
+                min-height: 150px;
+                padding: 32px 18px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
             }
-            table.staff-menu-table thead { display: none; }
-            table.staff-menu-table tr { border: none; }
-            table.staff-menu-table tbody th { background: #f5f5f5; border: 1px solid #ccc; border-bottom: none; margin-top: 12px; }
-            table.staff-menu-table tbody td { border: 1px solid #ccc; border-top: none; }
-            table.staff-menu-table td a { padding: 10px 8px; font-size: 1.05em; }
+            .nav-card h3 { margin: 0; font-size: 3.9em; line-height: 1.15; overflow-wrap: anywhere; }
+            .nav-card p { font-size: 3em; line-height: 1.2; }
+            .staff-menu-group > h3 { font-size: 1.15em; }
+            .staff-menu-group .nav-card h3 { margin: 0; font-size: 3.9em; line-height: 1.15; overflow-wrap: anywhere; }
+            #clock-button, #break-button { box-sizing: border-box; min-height: 110px; width: 100%; font-size: 3.45em; }
+            .estimate-cards { display: block; }
+            .estimate-card { box-sizing: border-box; width: 100%; margin-bottom: 12px; }
+            .shift-estimates > h2,
+            .today-shifts > h2,
+            .today-attendance > h2 { font-size: 3em; line-height: 1.2; }
+            .estimate-card h3 { font-size: 3em; line-height: 1.2; }
+            .estimate-card .estimate-minutes { font-size: 3.3em; line-height: 1.2; }
+            .estimate-card .estimate-wage { font-size: 3.9em; line-height: 1.2; }
+            .estimate-category-breakdown { font-size: 2.55em; line-height: 1.35; padding-left: 0; }
+            .estimate-category-breakdown li { padding: 6px 0; }
+            .estimate-category-breakdown .estimate-category-total { margin-top: 8px; padding-top: 8px; }
+            .today-shifts table,
+            .today-attendance table { font-size: 3em; }
+            .shared-attendance-status { overflow-x: auto; }
+            .shared-attendance-table { font-size: 1.3em; }
+            .shared-attendance-actions button,
+            .shared-attendance-actions .clock-out-link { font-size: 1em; padding: 10px 14px; }
+            .today-empty-notice,
+            .attendance-history-link { font-size: 3em; line-height: 1.25; }
         }
     </style>
 </head>
 <body>
+<?php require __DIR__ . '/../includes/brand_header.php'; ?>
 <header>
-    <h1>こんにちは、<?= htmlspecialchars($staff['name'], ENT_QUOTES, 'UTF-8') ?>さん</h1>
+    <h1><?= $isSharedAccount ? '業務メニュー' : 'こんにちは、' . htmlspecialchars($staff['name'], ENT_QUOTES, 'UTF-8') . 'さん' ?></h1>
     <nav><a href="/staff/change_password.php">パスワード変更</a> | <a href="/staff/logout.php">ログアウト</a></nav>
 </header>
 
-<section class="board-grid">
-    <?php foreach (BOARD_TYPES as $boardType => $boardLabel): ?>
-        <div class="board-card" id="board-<?= htmlspecialchars($boardType, ENT_QUOTES, 'UTF-8') ?>">
-            <h2><?= htmlspecialchars($boardLabel, ENT_QUOTES, 'UTF-8') ?></h2>
-            <?php if (empty($boardPosts[$boardType])): ?>
-                <p class="board-empty">投稿はまだありません。</p>
-            <?php else: ?>
-                <ul class="board-post-list">
-                    <?php foreach ($boardPosts[$boardType] as $post): ?>
-                        <li class="board-post">
-                            <?php if ($editBoardType === $boardType && $editPostId === (int) $post['id']): ?>
-                                <form method="post" action="/staff/board_action.php" class="board-form">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="update">
-                                    <input type="hidden" name="board_type" value="<?= htmlspecialchars($boardType, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="id" value="<?= (int) $post['id'] ?>">
-                                    <textarea name="content" maxlength="1000" required><?= htmlspecialchars($post['content'], ENT_QUOTES, 'UTF-8') ?></textarea>
-                                    <div class="board-form-actions">
-                                        <button type="submit">更新する</button>
-                                        <a href="/staff/dashboard.php#board-<?= htmlspecialchars($boardType, ENT_QUOTES, 'UTF-8') ?>">キャンセル</a>
-                                    </div>
-                                </form>
-                            <?php else: ?>
-                                <p class="board-post-content"><?= nl2br(htmlspecialchars($post['content'], ENT_QUOTES, 'UTF-8')) ?></p>
-                                <div class="board-post-meta">
-                                    <span>
-                                        <?= htmlspecialchars($post['created_by_name'], ENT_QUOTES, 'UTF-8') ?>さん
-                                        （<?= htmlspecialchars((new DateTime($post['created_at']))->format('n/j H:i'), ENT_QUOTES, 'UTF-8') ?>）
-                                        <?php if ($post['updated_by_name'] !== null): ?>
-                                            ／編集: <?= htmlspecialchars($post['updated_by_name'], ENT_QUOTES, 'UTF-8') ?>さん
-                                            （<?= htmlspecialchars((new DateTime($post['updated_at']))->format('n/j H:i'), ENT_QUOTES, 'UTF-8') ?>）
-                                        <?php endif; ?>
-                                    </span>
-                                    <span class="board-post-actions">
-                                        <a href="/staff/dashboard.php?edit_post=<?= (int) $post['id'] ?>&board_type=<?= htmlspecialchars($boardType, ENT_QUOTES, 'UTF-8') ?>#board-<?= htmlspecialchars($boardType, ENT_QUOTES, 'UTF-8') ?>">編集</a>
-                                        <form method="post" action="/staff/board_action.php" class="inline-form"
-                                              onsubmit="return confirm('この投稿を削除します。よろしいですか？');">
-                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                            <input type="hidden" name="action" value="delete">
-                                            <input type="hidden" name="board_type" value="<?= htmlspecialchars($boardType, ENT_QUOTES, 'UTF-8') ?>">
-                                            <input type="hidden" name="id" value="<?= (int) $post['id'] ?>">
-                                            <button type="submit" class="link-danger">削除</button>
-                                        </form>
-                                    </span>
-                                </div>
-                            <?php endif; ?>
-                        </li>
-                    <?php endforeach; ?>
-                </ul>
-            <?php endif; ?>
-            <form method="post" action="/staff/board_action.php" class="board-form">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                <input type="hidden" name="action" value="create">
-                <input type="hidden" name="board_type" value="<?= htmlspecialchars($boardType, ENT_QUOTES, 'UTF-8') ?>">
-                <textarea name="content" maxlength="1000" placeholder="注意事項を入力してください" required></textarea>
-                <div class="board-form-actions">
-                    <button type="submit">投稿する</button>
-                </div>
-            </form>
-        </div>
-    <?php endforeach; ?>
-</section>
-
-<?php if (!empty($vehicleAlerts)): ?>
+<?php if (!$isSharedAccount && !empty($vehicleAlerts)): ?>
     <div class="vehicle-alert-banner">
         <h2>⚠ 車両の期限・交換時期に関する警告</h2>
         <ul>
@@ -266,7 +244,7 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
     </div>
 <?php endif; ?>
 
-<?php if (!empty($missedClockDates)): ?>
+<?php if (!$isSharedAccount && !empty($missedClockDates)): ?>
     <div class="missed-clock-banner">
         <h2>⚠ 打刻漏れの可能性があります</h2>
         <ul>
@@ -299,6 +277,62 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
 <?php endif; ?>
 
 <section class="clock-section">
+    <?php if ($isSharedAccount): ?>
+        <div class="shared-attendance-status">
+            <h2 class="staff-menu-title">本日出勤中のスタッフ</h2>
+            <?php if (empty($openAttendanceToday)): ?>
+                <p class="notice">本日出勤中のスタッフはいません。</p>
+            <?php else: ?>
+                <table class="simple shared-attendance-table">
+                    <thead>
+                        <tr>
+                            <th>氏名</th>
+                            <th>区分</th>
+                            <th>出勤</th>
+                            <th>状態</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($openAttendanceToday as $rec): ?>
+                            <?php $onBreak = $rec['break_start_at'] !== null && $rec['break_end_at'] === null; ?>
+                            <tr>
+                                <td><?= htmlspecialchars($rec['employee_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars($rec['category'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars(substr($rec['clock_in_at'], 11, 5), ENT_QUOTES, 'UTF-8') ?></td>
+                                <td>
+                                    <?php if ($onBreak): ?>
+                                        休憩中（<?= htmlspecialchars(substr($rec['break_start_at'], 11, 5), ENT_QUOTES, 'UTF-8') ?>〜）
+                                    <?php else: ?>
+                                        勤務中
+                                    <?php endif; ?>
+                                </td>
+                                <td class="shared-attendance-actions">
+                                    <?php if ($onBreak): ?>
+                                        <form method="post" action="/staff/break.php" class="inline-form">
+                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                            <input type="hidden" name="action" value="end">
+                                            <input type="hidden" name="attendance_id" value="<?= (int) $rec['id'] ?>">
+                                            <button type="submit" class="break-end">休憩戻り</button>
+                                        </form>
+                                    <?php else: ?>
+                                        <form method="post" action="/staff/break.php" class="inline-form">
+                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                            <input type="hidden" name="action" value="start">
+                                            <input type="hidden" name="attendance_id" value="<?= (int) $rec['id'] ?>">
+                                            <button type="submit" class="break-start">休憩入り</button>
+                                        </form>
+                                        <a href="/staff/clock_out.php?attendance_id=<?= (int) $rec['id'] ?>" class="clock-out-link">退勤する</a>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+            <a href="/staff/clock.php" id="clock-button" class="clock-in">出勤する</a>
+        </div>
+    <?php else: ?>
     <div class="clock-status">
         <?php if ($clockState === 'working'): ?>
             <?= htmlspecialchars(substr($openRecord['clock_in_at'], 11, 5), ENT_QUOTES, 'UTF-8') ?> から勤務中です
@@ -307,7 +341,6 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
         <?php elseif ($clockState === 'done'): ?>
             本日は完了した勤務があります（別の区分でさらに出勤することもできます）
         <?php else: ?>
-            本日はまだ出勤していません
         <?php endif; ?>
     </div>
 
@@ -328,36 +361,48 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
         </form>
         <p class="notice" style="margin-top:8px;">休憩中は退勤できません。休憩から戻ってから退勤してください。</p>
     <?php endif; ?>
+    <?php endif; ?>
 
-    <table class="staff-menu-table">
-        <thead>
-            <tr>
-                <th>対象スタッフ</th>
-                <th>メニュー</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <th rowspan="3">集荷スタッフ用</th>
-                <td><a href="/staff/vehicle_check_list.php">集荷前車両等チェック記録を見る・登録する</a></td>
-            </tr>
-            <tr>
-                <td><a href="/staff/collection_entry.php">集荷・配送記録を入力する</a></td>
-            </tr>
-            <tr>
-                <td><a href="/staff/vehicle_maintenance_list.php">車両管理記録を見る・登録する</a></td>
-            </tr>
-            <tr>
-                <th rowspan="2">洗濯代行スタッフ用</th>
-                <td><a href="/staff/collection_headcount.php">到着リネン袋の確認・返却リネン袋数の登録</a></td>
-            </tr>
-            <tr>
-                <td><a href="/staff/work_records.php">作業実績を入力・編集する</a></td>
-            </tr>
-        </tbody>
-    </table>
+    <h2 class="staff-menu-title">業務メニュー</h2>
+    <div class="nav-cards">
+        <a class="nav-card" href="/staff/boards.php">
+            <h3>掲示板<?php if ($hasUnreadBoardPosts): ?><span class="new-badge">NEW</span><?php endif; ?></h3>
+        </a>
+    </div>
+    <div class="staff-menu-group pickup-menu-group">
+        <h3>集荷スタッフ用</h3>
+        <div class="nav-cards">
+            <a class="nav-card" href="/staff/collection_entry.php">
+                <h3>集荷記録簿</h3>
+            </a>
+            <a class="nav-card" href="/staff/jiro_dashboard.php">
+                <h3>本日の集荷予定</h3>
+                <?php if ($jiroChecklist['today_schedule_label'] === null): ?>
+                    <p>本日は集荷予定日ではありません。</p>
+                <?php elseif ($jiroTodayFacilityCount === 0): ?>
+                <?php else: ?>
+                    <p><?= $jiroTodayFacilityCount ?>施設・合計<?= $jiroTodayBagTotal ?>袋の予定があります。</p>
+                <?php endif; ?>
+            </a>
+        </div>
+    </div>
+    <div class="staff-menu-group laundry-menu-group">
+        <h3>洗濯代行スタッフ用</h3>
+        <div class="nav-cards">
+            <a class="nav-card" href="/staff/collection_headcount.php">
+                <h3>洗濯ネット・返却リネン袋数登録</h3>
+            </a>
+            <a class="nav-card" href="/staff/work_records.php">
+                <h3>作業実績登録</h3>
+            </a>
+            <a class="nav-card" href="/staff/work_status.php">
+                <h3>作業状況</h3>
+            </a>
+        </div>
+    </div>
 </section>
 
+<?php if (!$isSharedAccount): ?>
 <section class="shift-estimates">
     <h2>今月・来月のシフト予定</h2>
     <div class="estimate-cards">
@@ -385,13 +430,12 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
             </div>
         <?php endforeach; ?>
     </div>
-    <p class="estimate-note">※シフト予定に基づく見込みです。実際の打刻・時給変更により金額は変動する場合があります。</p>
 </section>
 
 <section class="today-shifts">
     <h2>本日のシフト</h2>
     <?php if (empty($todayShifts)): ?>
-        <p class="notice">本日のシフト登録はありません。</p>
+        <p class="notice today-empty-notice">なし</p>
     <?php else: ?>
         <table class="simple">
             <thead>
@@ -419,7 +463,7 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
 <section class="today-attendance">
     <h2>本日の打刻履歴</h2>
     <?php if (empty($todayAttendance)): ?>
-        <p class="notice">本日の打刻はまだありません。</p>
+        <p class="notice today-empty-notice">なし</p>
     <?php else: ?>
         <table class="simple">
             <thead>
@@ -454,36 +498,30 @@ foreach (BOARD_TYPES as $boardType => $boardLabel) {
             </tbody>
         </table>
     <?php endif; ?>
-    <p style="margin-top:8px;"><a href="/staff/history.php">過去の打刻履歴を日付指定で見る →</a></p>
+    <p class="attendance-history-link" style="margin-top:8px;"><a href="/staff/history.php">過去の打刻履歴</a></p>
 </section>
-
-<section class="jiro-checklist-summary">
-    <h2>本日の集荷予定</h2>
-    <?php if ($jiroChecklist['today_schedule_label'] === null): ?>
-        <p class="notice">本日は集荷予定日ではありません。</p>
-    <?php elseif ($jiroTodayFacilityCount === 0): ?>
-        <p class="notice">本日の集荷予定に該当する施設はありません。</p>
-    <?php else: ?>
-        <p class="notice"><?= $jiroTodayFacilityCount ?>施設・合計<?= $jiroTodayBagTotal ?>袋の予定があります。</p>
-    <?php endif; ?>
-    <p><a href="/staff/jiro_dashboard.php">集荷チェックリストで詳細を見る →</a></p>
-</section>
+<?php endif; ?>
 
 <section class="team-links">
-    <h2>チーム情報</h2>
-    <p><a href="/staff/team_shifts.php">全員のシフト表を見る</a></p>
-    <p><a href="/staff/team_stats.php">施設別・作業実績を比較する</a></p>
-    <p><a href="/staff/work_status.php">作業状況・残数を確認する</a></p>
-    <p><a href="/staff/facilities.php">施設一覧を見る</a></p>
-    <p><a href="/staff/collection_records.php">集荷・配送記録簿を見る</a></p>
-    <p><a href="/staff/travel_time.php">施設間移動時間を確認する</a></p>
-    <p><a href="/staff/consumable_stock.php">消耗品在庫管理を見る</a></p>
+    <h2>その他機能</h2>
+    <div class="nav-cards">
+        <a class="nav-card" href="/staff/team_shifts.php"><h3>シフト表</h3></a>
+        <a class="nav-card laundry-related" href="/staff/team_stats.php"><h3>作業実績比較</h3></a>
+        <a class="nav-card" href="/staff/facilities.php"><h3>施設一覧</h3></a>
+        <a class="nav-card pickup-related" href="/staff/collection_records.php"><h3>集荷記録簿</h3></a>
+        <a class="nav-card pickup-related" href="/staff/travel_time.php"><h3>移動時間</h3></a>
+        <a class="nav-card" href="/staff/consumable_stock.php"><h3>消耗品在庫管理</h3></a>
+        <a class="nav-card pickup-related" href="/staff/vehicle_check_list.php"><h3>車両チェック記録簿</h3></a>
+        <a class="nav-card pickup-related" href="/staff/vehicle_maintenance_list.php"><h3>車両管理記録</h3></a>
+    </div>
 </section>
 
+<?php if (!$isSharedAccount): ?>
 <section class="calendar-link">
     <h2>カレンダー連携</h2>
     <p><a href="/staff/calendar.php">シフトをGoogleカレンダー・iPhoneカレンダーに自動反映させる →</a></p>
 </section>
+<?php endif; ?>
 
 </body>
 </html>

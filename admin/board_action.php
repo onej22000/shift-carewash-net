@@ -7,7 +7,7 @@ $pdo = getPdo();
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !verify_csrf_token($_POST['csrf_token'] ?? null)) {
     set_flash('error', '不正なリクエストです。再度お試しください。');
-    header('Location: /admin/dashboard.php');
+    header('Location: /admin/boards.php');
     exit;
 }
 
@@ -16,7 +16,7 @@ $boardType = (string) ($_POST['board_type'] ?? '');
 
 if (!array_key_exists($boardType, BOARD_TYPES)) {
     set_flash('error', '掲示板の指定が正しくありません。');
-    header('Location: /admin/dashboard.php');
+    header('Location: /admin/boards.php');
     exit;
 }
 
@@ -62,5 +62,5 @@ if ($action === 'create' || $action === 'update') {
     set_flash('success', '投稿を削除しました。');
 }
 
-header('Location: /admin/dashboard.php');
+header('Location: /admin/boards.php');
 exit;

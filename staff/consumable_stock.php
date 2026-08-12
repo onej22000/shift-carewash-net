@@ -50,6 +50,7 @@ $records = $listStmt->fetchAll();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
     <title>消耗品在庫管理 | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }

@@ -109,15 +109,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                          VALUES
                             (:employee_id, :vehicle_id, :check_date, :checked_at, :alcohol_value, :overall_status, :notes, :created_by)'
                     );
+                    // 車両チェックの実施者は、出勤打刻の対象者（共用アカウントの場合は選択された
+                    // 実在の従業員）に紐づける。ログイン中のセッション（共用アカウント自身）ではない。
                     $checkStmt->execute([
-                        ':employee_id' => $staff['id'],
+                        ':employee_id' => (int) $pending['employee_id'],
                         ':vehicle_id' => $vehicleId,
                         ':check_date' => $now->format('Y-m-d'),
                         ':checked_at' => $now->format('Y-m-d H:i:s'),
                         ':alcohol_value' => $alcoholValue,
                         ':overall_status' => $overallStatus,
                         ':notes' => $notes,
-                        ':created_by' => $staff['id'],
+                        ':created_by' => (int) $pending['employee_id'],
                     ]);
                     $vehicleCheckId = (int) $pdo->lastInsertId();
 
@@ -138,7 +140,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $pdo,
                         $vehicleCheckId,
                         'create',
-                        (int) $staff['id'],
+                        (int) $pending['employee_id'],
                         'staff',
                         null,
                         build_vehicle_check_snapshot($pdo, $vehicleCheckId)
@@ -183,6 +185,7 @@ $formVehicleId = (string) ($_POST['vehicle_id'] ?? '');
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
     <title>集荷前車両等チェック | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }

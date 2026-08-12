@@ -21,6 +21,11 @@ $anchorDate->setTime(0, 0, 0);
 $anchorDateStr = $anchorDate->format('Y-m-d');
 $todayStr = (new DateTime('today'))->format('Y-m-d');
 
+$categoryFilter = (string) ($_GET['category'] ?? '');
+if (!in_array($categoryFilter, SHIFT_CATEGORIES, true)) {
+    $categoryFilter = '';
+}
+
 $viewRange = resolve_shift_view_range($view, $anchorDate);
 $rangeStart = $viewRange['rangeStart'];
 $rangeEnd = $viewRange['rangeEnd'];
@@ -39,13 +44,21 @@ if ($view === 'calendar') {
 }
 
 $pageUrl = '/staff/team_shifts.php?view=' . $view . '&date=' . $anchorDateStr;
+if ($categoryFilter !== '') {
+    $pageUrl .= '&category=' . urlencode($categoryFilter);
+}
 if ($view === 'calendar') {
     $pageUrl .= '&selected=' . $selectedDateStr;
 }
+$categoryQuery = $categoryFilter !== '' ? '&category=' . urlencode($categoryFilter) : '';
 
 // ---- 従業員一覧（氏名・状態のみ。時給等は一切取得しない） ----
 $employeesStmt = $pdo->query(
-    "SELECT id, name, status FROM employees WHERE role = 'staff' AND status IN ('active','invited') ORDER BY name"
+    "SELECT id, name, status FROM employees
+     WHERE role = 'staff'
+       AND status IN ('active','invited')
+       AND COALESCE(is_shared_account, 0) = 0
+     ORDER BY name"
 );
 $employees = $employeesStmt->fetchAll();
 
@@ -70,6 +83,9 @@ if (!empty($employees)) {
         ':end' => $rangeEnd->format('Y-m-d'),
     ]);
     foreach ($stmt->fetchAll() as $row) {
+        if ($categoryFilter !== '' && !in_array($categoryFilter, categories_from_value($row['categories']), true)) {
+            continue;
+        }
         $shiftsByEmployeeDate[(int) $row['employee_id']][$row['work_date']][] = $row;
     }
 }
@@ -193,7 +209,8 @@ function render_readonly_day_detail(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>全員のシフト表 | シフト管理</title>
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
+    <title>シフト表 | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 4px; }
@@ -249,8 +266,21 @@ function render_readonly_day_detail(
             display: flex; align-items: center; gap: 2px; text-align: left;
             font-size: 0.62em; line-height: 1.3; white-space: normal; word-break: break-all; margin-bottom: 1px;
         }
-        table.calendar-month td.cal-day .cal-day-name-dot { display: inline-block; flex-shrink: 0; width: 5px; height: 5px; border-radius: 50%; }
+        table.calendar-month td.cal-day .cal-day-name-dot { display: none; }
+        table.calendar-month td.cal-day .cal-day-name-row.cal-name-pickup { background: #e67e00; color: #fff; border-radius: 3px; padding: 1px 3px; }
+        table.calendar-month td.cal-day .cal-day-name-row.cal-name-laundry { background: #1e7e34; color: #fff; border-radius: 3px; padding: 1px 3px; }
+        table.calendar-month td.cal-day .cal-day-name-row.cal-name-store { background: #fff; color: #222; }
+        table.calendar-month td.cal-day .cal-day-name-row > span:last-child {
+            display: block;
+            min-width: 0;
+            writing-mode: horizontal-tb;
+            white-space: nowrap;
+            word-break: keep-all;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         table.calendar-month td.cal-selected .cal-day-name-row { color: #fff; }
+        table.calendar-month td.cal-selected .cal-day-name-row.cal-name-store { color: #222; }
         .day-detail { margin-top: 16px; border-top: 1px solid #ccc; padding-top: 12px; }
         .day-detail h3 { font-size: 1.05em; margin: 0 0 8px; }
         .day-detail-employee { margin-bottom: 10px; }
@@ -259,11 +289,27 @@ function render_readonly_day_detail(
             display: block; background: #ff8f00; color: #fff; font-size: 0.65em; font-weight: bold;
             padding: 1px 4px; border-radius: 3px; margin: 2px 2px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
+        @media (max-width: 900px) {
+            table.shift-grid th.employee-col,
+            table.shift-grid td.employee-col {
+                box-sizing: border-box;
+                min-width: 3.5em;
+                width: 3.5em;
+                max-width: 3.5em;
+                padding: 4px 3px;
+                white-space: normal;
+                word-break: break-all;
+                overflow-wrap: anywhere;
+                line-height: 1.25;
+            }
+            table.shift-grid th.date-col,
+            table.shift-grid td.date-col { min-width: 105px; }
+        }
     </style>
 </head>
 <body>
 <header>
-    <h1>全員のシフト表</h1>
+    <h1>シフト表</h1>
     <nav><a href="/staff/dashboard.php">ダッシュボードに戻る</a></nav>
 </header>
 
@@ -272,6 +318,24 @@ function render_readonly_day_detail(
 <?php endif; ?>
 
 <p class="notice">自分の今日以降のシフトのみ編集・削除・追加ができます。他の従業員のシフトや過去日付は閲覧のみです。</p>
+
+<form method="get" class="category-filter" style="margin:12px 0;">
+    <input type="hidden" name="view" value="<?= htmlspecialchars($view, ENT_QUOTES, 'UTF-8') ?>">
+    <input type="hidden" name="date" value="<?= htmlspecialchars($anchorDateStr, ENT_QUOTES, 'UTF-8') ?>">
+    <?php if ($view === 'calendar'): ?>
+        <input type="hidden" name="selected" value="<?= htmlspecialchars($selectedDateStr, ENT_QUOTES, 'UTF-8') ?>">
+    <?php endif; ?>
+    <label for="category-filter">表示区分：</label>
+    <select id="category-filter" name="category" onchange="this.form.submit()">
+        <option value="" <?= $categoryFilter === '' ? 'selected' : '' ?>>すべて</option>
+        <?php foreach (SHIFT_CATEGORIES as $filterCategory): ?>
+            <option value="<?= htmlspecialchars($filterCategory, ENT_QUOTES, 'UTF-8') ?>" <?= $categoryFilter === $filterCategory ? 'selected' : '' ?>>
+                <?= htmlspecialchars($filterCategory, ENT_QUOTES, 'UTF-8') ?>のみ
+            </option>
+        <?php endforeach; ?>
+    </select>
+    <noscript><button type="submit">表示</button></noscript>
+</form>
 
 <div class="calendar-nav">
     <a href="?view=<?= $view ?>&date=<?= $prevDate ?>">← 前<?= $viewLabel ?></a>
@@ -288,16 +352,8 @@ function render_readonly_day_detail(
     <label for="pdf-month">月間シフト表PDF出力：</label>
     <input type="month" id="pdf-month" name="month" value="<?= htmlspecialchars($monthStart->format('Y-m'), ENT_QUOTES, 'UTF-8') ?>">
     <button type="submit">PDF出力</button>
+    <button type="submit" name="layout" value="split">区分別PDF出力</button>
 </form>
-
-<div class="category-legend">
-    <?php foreach (SHIFT_CATEGORIES as $category): ?>
-        <span class="legend-item">
-            <span class="category-swatch" style="background:<?= htmlspecialchars(CATEGORY_COLORS[$category] ?? CATEGORY_COLOR_NONE, ENT_QUOTES, 'UTF-8') ?>;"></span>
-            <?= htmlspecialchars($category, ENT_QUOTES, 'UTF-8') ?>
-        </span>
-    <?php endforeach; ?>
-</div>
 
 <?php if (empty($employees)): ?>
     <p class="notice">従業員が登録されていません。</p>
@@ -335,7 +391,12 @@ function render_readonly_day_detail(
                                 <span class="cal-day-number"><?= $d->format('j') ?></span>
                                 <div class="cal-day-names">
                                     <?php foreach ($employeeNamesByDate[$dateStr] ?? [] as $entry): ?>
-                                        <div class="cal-day-name-row">
+                                        <?php
+                                        $calendarNameClass = in_array('集荷', $entry['categories'] ?? [], true)
+                                            ? 'cal-name-pickup'
+                                            : (in_array('洗濯代行', $entry['categories'] ?? [], true) ? 'cal-name-laundry' : 'cal-name-store');
+                                        ?>
+                                        <div class="cal-day-name-row <?= $calendarNameClass ?>">
                                             <?php if (!empty($entry['categories'])): ?>
                                                 <?php foreach ($entry['categories'] as $category): ?>
                                                     <span class="cal-day-name-dot" style="background:<?= htmlspecialchars(CATEGORY_COLORS[$category] ?? CATEGORY_COLOR_NONE, ENT_QUOTES, 'UTF-8') ?>;"></span>
@@ -443,5 +504,14 @@ function selectDate(dateStr) {
     }
 }
 </script>
+<?php if ($categoryFilter !== ''): ?>
+<script>
+document.querySelectorAll('.calendar-nav a').forEach(function (link) {
+    var url = new URL(link.href, window.location.href);
+    url.searchParams.set('category', <?= json_encode($categoryFilter, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>);
+    link.href = url.pathname + url.search;
+});
+</script>
+<?php endif; ?>
 </body>
 </html>

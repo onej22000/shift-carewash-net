@@ -4,6 +4,7 @@ require_once __DIR__ . '/../includes/functions.php';
 
 $staff = require_login('staff');
 $pdo = getPdo();
+$isSharedAccount = (int) ($staff['is_shared_account'] ?? 0) === 1;
 
 // 集荷は集荷・配送記録簿（collection_cycles、staff/collection_entry.php）に一本化したため、
 // 作業実績（work_stage_records）の工程からは外した。洗濯・乾燥・畳みは2026-08-06に「洗濯」
@@ -20,6 +21,8 @@ const WSR_EDITABLE_FIELDS = ['category', 'facility_id', 'stage', 'person_count',
 function parse_work_stage_record_input(array $post, array $validFacilityIds, array $validEmployeeIds): array
 {
     $facilityId = (int) ($post['facility_id'] ?? 0);
+    $personCountRaw = trim((string) ($post['person_count'] ?? ''));
+    $personCount = ctype_digit($personCountRaw) ? (int) $personCountRaw : null;
     $employeeIds = [];
     foreach ((array) ($post['employee_ids'] ?? []) as $rawEmployeeId) {
         $employeeId = (int) $rawEmployeeId;
@@ -28,7 +31,6 @@ function parse_work_stage_record_input(array $post, array $validFacilityIds, arr
         }
     }
     $employeeIds = array_values(array_unique($employeeIds));
-    $personCount = count($employeeIds);
     $recordDateRaw = trim((string) ($post['record_date'] ?? ''));
     $recordDate = null;
     if ($recordDateRaw !== '') {
@@ -45,6 +47,12 @@ function parse_work_stage_record_input(array $post, array $validFacilityIds, arr
     $errors = [];
     if (!in_array($facilityId, $validFacilityIds, true)) {
         $errors[] = '施設を選択してください。';
+    }
+    if ($personCount === null) {
+        $errors[] = '洗濯ネット数は0以上の整数を入力してください。';
+    }
+    if (empty($employeeIds)) {
+        $errors[] = '作業した従業員を1人以上選択してください。';
     }
     if ($recordDate === false || $recordDate === null) {
         $errors[] = '作業日の形式が正しくありません。';
@@ -89,7 +97,7 @@ $facilitiesStmt = $pdo->query("SELECT id, name FROM facilities WHERE is_active =
 $facilities = $facilitiesStmt->fetchAll();
 $validFacilityIds = array_map('intval', array_column($facilities, 'id'));
 
-$employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' ORDER BY name");
+$employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' AND is_shared_account = 0 ORDER BY name");
 $employees = $employeesStmt->fetchAll();
 $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
 
@@ -148,7 +156,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         } elseif ($action === 'create' || $action === 'update') {
-            [$values, $parseErrors] = parse_work_stage_record_input($_POST, $validFacilityIds, $validEmployeeIds);
+            $workRecordInput = $_POST;
+            if (!$isSharedAccount) {
+                $workRecordInput['employee_ids'] = [(int) $staff['id']];
+            }
+            [$values, $parseErrors] = parse_work_stage_record_input($workRecordInput, $validFacilityIds, $validEmployeeIds);
 
             if (!empty($parseErrors)) {
                 $errorMessage = implode(' ', $parseErrors);
@@ -325,6 +337,7 @@ $formFacilityId = '';
 $formPersonCount = '';
 $formRecordDate = $today;
 $formRecordTime = $nowTime;
+$formEmployeeIds = $isSharedAccount ? [] : [(int) $staff['id']];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && in_array((string) ($_POST['action'] ?? ''), ['create', 'update'], true)) {
     $formAction = (string) $_POST['action'];
@@ -333,6 +346,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && in_array((s
     $formPersonCount = (string) ($_POST['person_count'] ?? '');
     $formRecordDate = (string) ($_POST['record_date'] ?? '');
     $formRecordTime = (string) ($_POST['record_time'] ?? '');
+    $formEmployeeIds = array_values(array_unique(array_filter(array_map('intval', (array) ($_POST['employee_ids'] ?? [])), static fn (int $id): bool => in_array($id, $validEmployeeIds, true))));
 } elseif ($editingRecord !== null) {
     $formAction = 'update';
     $formId = (int) $editingRecord['id'];
@@ -340,6 +354,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && in_array((s
     $formPersonCount = (string) $editingRecord['person_count'];
     $formRecordDate = $editingRecord['record_date'];
     $formRecordTime = $editingRecord['record_time'] !== null ? substr($editingRecord['record_time'], 0, 5) : $nowTime;
+    $formEmployeesStmt = $pdo->prepare('SELECT employee_id FROM work_stage_record_employees WHERE work_stage_record_id = :id ORDER BY employee_id');
+    $formEmployeesStmt->execute([':id' => $formId]);
+    $formEmployeeIds = array_map('intval', array_column($formEmployeesStmt->fetchAll(), 'employee_id'));
 }
 
 // ---- 自分の作業実績一覧（本人分のみ） ----
@@ -354,7 +371,11 @@ if ($period !== 'all') {
 }
 
 $listStmt = $pdo->prepare(
-    "SELECT w.id, w.record_date, w.record_time, w.stage, w.person_count, w.created_at, f.name AS facility_name
+    "SELECT w.id, w.record_date, w.record_time, w.stage, w.person_count, w.created_at, f.name AS facility_name,
+            (SELECT GROUP_CONCAT(e.name ORDER BY e.name SEPARATOR '・')
+               FROM work_stage_record_employees wse
+               INNER JOIN employees e ON e.id = wse.employee_id
+              WHERE wse.work_stage_record_id = w.id) AS participant_names
      FROM work_stage_records w
      INNER JOIN facilities f ON f.id = w.facility_id
      WHERE w.employee_id = :employee_id AND w.deleted_at IS NULL $dateCondition
@@ -369,7 +390,8 @@ $records = $listStmt->fetchAll();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>作業実績の入力・編集 | シフト管理</title>
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
+    <title>作業実績登録 | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 4px; }
@@ -393,7 +415,7 @@ $records = $listStmt->fetchAll();
 </head>
 <body>
 <header>
-    <h1>作業実績の入力・編集</h1>
+    <h1>作業実績登録</h1>
     <nav><a href="/staff/dashboard.php">ダッシュボードに戻る</a> | <a href="/staff/logout.php">ログアウト</a></nav>
 </header>
 
@@ -438,9 +460,22 @@ $records = $listStmt->fetchAll();
             </div>
 
             <div class="form-row">
-                <label for="person_count">人数</label>
+                <label for="person_count">洗濯ネット数</label>
                 <input type="number" id="person_count" name="person_count" min="0" step="1" value="<?= htmlspecialchars($formPersonCount, ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
+
+            <?php if ($isSharedAccount): ?>
+                <div class="form-row">
+                    <label for="employee_ids">作業した従業員</label>
+                    <select id="employee_ids" name="employee_ids[]" multiple size="<?= max(3, min(8, count($employees))) ?>" required>
+                        <?php foreach ($employees as $employee): ?>
+                            <?php if ((int) ($employee['is_shared_account'] ?? 0) === 1) continue; ?>
+                            <option value="<?= (int) $employee['id'] ?>" <?= in_array((int) $employee['id'], $formEmployeeIds, true) ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <small>複数人を選択できます。</small>
+                </div>
+            <?php endif; ?>
 
             <button type="submit"><?= $formAction === 'update' ? '更新する' : '登録する' ?></button>
             <?php if ($formAction === 'update'): ?>
@@ -458,7 +493,6 @@ $records = $listStmt->fetchAll();
 
 <section class="record-list">
     <h2>自分の作業実績一覧</h2>
-    <p class="notice">追加・修正・削除の操作はすべて履歴に記録され、管理者が確認できます。</p>
     <?php if (empty($records)): ?>
         <p class="notice">対象期間の作業実績はありません。</p>
     <?php else: ?>
@@ -469,7 +503,8 @@ $records = $listStmt->fetchAll();
                     <th>時刻</th>
                     <th>施設</th>
                     <th>工程</th>
-                    <th>人数</th>
+                    <th>洗濯ネット数</th>
+                    <?php if ($isSharedAccount): ?><th>作業した従業員</th><?php endif; ?>
                     <th>登録日時</th>
                     <th>操作</th>
                 </tr>
@@ -481,7 +516,8 @@ $records = $listStmt->fetchAll();
                         <td><?= $record['record_time'] !== null ? htmlspecialchars(substr($record['record_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(WORK_RECORD_STAGE_LABEL, ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= (int) $record['person_count'] ?>人</td>
+                        <td><?= (int) $record['person_count'] ?>枚</td>
+                        <?php if ($isSharedAccount): ?><td><?= htmlspecialchars($record['participant_names'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td><?php endif; ?>
                         <td><?= htmlspecialchars($record['created_at'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td>
                             <a href="/staff/work_records.php?period=<?= htmlspecialchars($period, ENT_QUOTES, 'UTF-8') ?>&edit=<?= (int) $record['id'] ?>">編集</a>

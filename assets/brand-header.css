@@ -1,0 +1,22 @@
+.brand-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 24px;
+    row-gap: 6px;
+    padding: 8px 0;
+    background: #fff;
+    border-bottom: 1px solid #eee;
+    margin-bottom: 12px;
+}
+.brand-header img { display: block; height: 40px; width: auto; }
+.brand-logo-jiro { display: flex; align-items: center; gap: 8px; }
+.brand-header img.brand-logo-text { height: 24px; }
+
+@media (max-width: 480px) {
+    .brand-header { gap: 14px; padding: 6px 0; margin-bottom: 8px; }
+    .brand-header img { height: 28px; }
+    .brand-logo-jiro { gap: 6px; }
+    .brand-header img.brand-logo-text { height: 16.8px; }
+}

@@ -11,6 +11,7 @@ const BOARD_TYPES = [
 const ITEM_TYPE_TO_FACILITY_ISSUED_COLUMN = [
     'linen_bag_orange' => 'issued_linen_bag_orange',
     'linen_bag_yellow' => 'issued_linen_bag_yellow',
+    'linen_bag_blue' => 'issued_linen_bag_blue',
     'laundry_net' => 'issued_laundry_net_count',
 ];
 
@@ -225,6 +226,84 @@ function calc_legal_break_minutes(int $totalRawMinutes): int
     }
 
     return 0;
+}
+
+/**
+ * 月次チェックで法定休憩へ補正する店舗打刻を返す。
+ * 同一従業員・同一日の「店舗」打刻だけを通算し、不足がある場合だけ店舗打刻へ割り当てる。
+ * 「集荷」「洗濯代行」は勤務時間・休憩時間とも判定対象に含めず、本人の入力値をそのまま採用する。
+ *
+ * @return list<array{attendance_id:int,employee_id:int,employee_name:string,work_date:string,old_break_minutes:int,new_break_minutes:int,raw_minutes:int}>
+ */
+function find_month_end_break_correction_candidates(PDO $pdo, string $yearMonth): array
+{
+    [$startDate, $endDate] = get_month_range($yearMonth);
+    $stmt = $pdo->prepare(
+        "SELECT a.id, a.employee_id, e.name AS employee_name, a.category,
+                a.clock_in_at, a.clock_out_at, a.total_break_minutes
+           FROM attendance a
+           JOIN employees e ON e.id = a.employee_id
+          WHERE a.deleted_at IS NULL
+            AND a.clock_out_at IS NOT NULL
+            AND a.category = '店舗'
+            AND DATE(a.clock_in_at) BETWEEN :start_date AND :end_date
+          ORDER BY a.employee_id, a.clock_in_at"
+    );
+    $stmt->execute([':start_date' => $startDate, ':end_date' => $endDate]);
+
+    $days = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $date = substr((string) $row['clock_in_at'], 0, 10);
+        $key = (int) $row['employee_id'] . ':' . $date;
+        $clockIn = new DateTime((string) $row['clock_in_at']);
+        $clockOut = new DateTime((string) $row['clock_out_at']);
+        $rawMinutes = max(0, (int) round(($clockOut->getTimestamp() - $clockIn->getTimestamp()) / 60));
+        $row['raw_minutes'] = $rawMinutes;
+        $days[$key]['employee_id'] = (int) $row['employee_id'];
+        $days[$key]['employee_name'] = (string) $row['employee_name'];
+        $days[$key]['work_date'] = $date;
+        $days[$key]['rows'][] = $row;
+    }
+
+    $candidates = [];
+    foreach ($days as $day) {
+        $totalRaw = 0;
+        $totalBreak = 0;
+        foreach ($day['rows'] as $row) {
+            $totalRaw += (int) $row['raw_minutes'];
+            $totalBreak += (int) ($row['total_break_minutes'] ?? 0);
+        }
+
+        $deficit = calc_legal_break_minutes($totalRaw) - $totalBreak;
+        if ($deficit <= 0) {
+            continue;
+        }
+
+        // 終業に近い店舗打刻から不足分を割り当てる。
+        foreach (array_reverse($day['rows']) as $row) {
+            if ($deficit <= 0) {
+                break;
+            }
+            $oldBreak = (int) ($row['total_break_minutes'] ?? 0);
+            $capacity = max(0, (int) $row['raw_minutes'] - $oldBreak);
+            $addition = min($deficit, $capacity);
+            if ($addition <= 0) {
+                continue;
+            }
+            $candidates[] = [
+                'attendance_id' => (int) $row['id'],
+                'employee_id' => (int) $day['employee_id'],
+                'employee_name' => (string) $day['employee_name'],
+                'work_date' => (string) $day['work_date'],
+                'old_break_minutes' => $oldBreak,
+                'new_break_minutes' => $oldBreak + $addition,
+                'raw_minutes' => (int) $row['raw_minutes'],
+            ];
+            $deficit -= $addition;
+        }
+    }
+
+    return $candidates;
 }
 
 function get_month_range(string $yearMonth): array
@@ -1419,7 +1498,7 @@ function record_consumable_stock_issuance_delta(PDO $pdo, array $fieldToItemType
 }
 
 /**
- * facilities.issued_linen_bag_orange/yellow・issued_laundry_net_count（施設への基準交付数）の
+ * facilities.issued_linen_bag_orange/yellow/blue・issued_laundry_net_count（施設への基準交付数）の
  * 新規登録・変更差分を消耗品在庫に自動反映する。
  */
 function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, array $after, int $facilityId, string $facilityName, int $createdBy): void
@@ -1427,6 +1506,7 @@ function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, arr
     record_consumable_stock_issuance_delta($pdo, [
         'issued_linen_bag_orange' => 'linen_bag_orange',
         'issued_linen_bag_yellow' => 'linen_bag_yellow',
+        'issued_linen_bag_blue' => 'linen_bag_blue',
         'issued_laundry_net_count' => 'laundry_net',
     ], $before, $after, 'issuance_to_facility', $facilityId, $facilityName . 'への交付（自動記録）', $createdBy);
 }
@@ -1444,8 +1524,7 @@ function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, arr
  * 何もしないため、必要なら消耗品在庫管理画面から手動で調整する。
  *
  * 同じ増加分だけ、施設マスタ（facilities）側の交付累計カラムにも加算する
- * （自社在庫は減、施設側在庫は増）。青（linen_bag_blue）はfacilitiesに対応カラムが
- * 無いため対象外。
+ * （自社在庫は減、施設側在庫は増）。
  */
 function record_collection_cycle_issuance_stock_adjustment(
     PDO $pdo,
@@ -1795,9 +1874,17 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
     $todayFacilityIdSet = [];
     if ($todayScheduleLabel !== null) {
         $todayStmt = $pdo->prepare(
-            "SELECT id FROM facilities WHERE facility_type = '介護施設' AND is_active = 1 AND pickup_schedule = :schedule"
+            "SELECT id
+             FROM facilities
+             WHERE facility_type = '介護施設'
+               AND is_active = 1
+               AND pickup_schedule = :schedule
+               AND (onboarding_start_date IS NULL OR onboarding_start_date < :target_date)"
         );
-        $todayStmt->execute([':schedule' => $todayScheduleLabel]);
+        $todayStmt->execute([
+            ':schedule' => $todayScheduleLabel,
+            ':target_date' => $today->format('Y-m-d'),
+        ]);
         $todayFacilityIdSet = array_flip(array_map('intval', array_column($todayStmt->fetchAll(), 'id')));
     }
 
@@ -1885,9 +1972,30 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
     }
 
     return [
+        'target_date' => $today->format('Y-m-d'),
         'today_schedule_label' => $todayScheduleLabel,
         'today_rows' => $todayRows,
         'other_rows' => $otherRows,
         'totals' => $totals,
     ];
+}
+/**
+ * 共用アカウント画面に表示する、本日勤務中のスタッフを取得する。
+ *
+ * @return array<int,array<string,mixed>>
+ */
+function find_open_attendance_today(PDO $pdo): array
+{
+    $stmt = $pdo->query(
+        "SELECT a.id, a.employee_id, e.name AS employee_name, a.category,
+                a.clock_in_at, a.break_start_at, a.break_end_at
+           FROM attendance a
+           JOIN employees e ON e.id = a.employee_id
+          WHERE a.status = 'working'
+            AND DATE(a.clock_in_at) = CURDATE()
+            AND a.deleted_at IS NULL
+          ORDER BY a.clock_in_at, a.id"
+    );
+
+    return $stmt->fetchAll();
 }

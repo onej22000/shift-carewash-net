@@ -15,33 +15,105 @@ $stageLabels = [
 // 退勤時に入力必須となるのも洗濯代行区分のみ（集荷ドライバーはこの工程を必ずしも行わないため）。
 const CATEGORIES_REQUIRING_ALL_STAGES = ['洗濯代行'];
 
-$openStmt = $pdo->prepare(
-    "SELECT id, category, clock_in_at, break_start_at, break_end_at, total_break_minutes
-     FROM attendance
-     WHERE employee_id = :employee_id AND status = 'working' AND DATE(clock_in_at) = CURDATE()
-       AND deleted_at IS NULL
-     ORDER BY clock_in_at DESC
-     LIMIT 1"
-);
-$openStmt->execute([':employee_id' => $staff['id']]);
-$openRecord = $openStmt->fetch();
+// 共用アカウントは「本人」という単一の状態を持たないため、employee_idではなくattendance_idで
+// 対象を明示的に指定させる（ダッシュボードの一覧からリンクされるほか、未指定・不正なIDの場合は
+// ここで選択画面を表示する）。休憩中のレコードは選択肢から除外する（退勤できないため）。
+$isSharedAccount = (int) ($staff['is_shared_account'] ?? 0) === 1;
+$openRecord = false;
 
-if ($openRecord === false) {
-    // 出勤中のレコードがない場合はここで処理することがない
-    header('Location: /staff/dashboard.php');
-    exit;
+if ($isSharedAccount) {
+    $attendanceId = (int) ($_GET['attendance_id'] ?? $_POST['attendance_id'] ?? 0);
+    if ($attendanceId > 0) {
+        $recordStmt = $pdo->prepare(
+            "SELECT a.id, a.employee_id, a.category, a.clock_in_at, a.break_start_at, a.break_end_at, a.total_break_minutes,
+                    e.name AS employee_name
+             FROM attendance a
+             INNER JOIN employees e ON e.id = a.employee_id
+             WHERE a.id = :id AND a.status = 'working' AND a.deleted_at IS NULL"
+        );
+        $recordStmt->execute([':id' => $attendanceId]);
+        $record = $recordStmt->fetch();
+        if ($record !== false && !($record['break_start_at'] !== null && $record['break_end_at'] === null)) {
+            $openRecord = $record;
+        }
+    }
+
+    if ($openRecord === false) {
+        $pickableRecords = array_values(array_filter(
+            find_open_attendance_today($pdo),
+            static fn (array $r): bool => $r['break_start_at'] === null || $r['break_end_at'] !== null
+        ));
+        ?>
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>退勤する人を選択 | シフト管理</title>
+    <style>
+        body { font-family: sans-serif; margin: 16px; color: #222; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 4px; }
+        h1 { font-size: 1.3em; margin: 0; }
+        .notice { padding: 8px 12px; background: #fff3cd; color: #856404; border-radius: 4px; }
+        .picker-list { list-style: none; padding: 0; margin: 16px 0; }
+        .picker-list li { margin-bottom: 8px; }
+        .picker-list a { display: block; padding: 14px 16px; border: 1px solid #ccc; border-radius: 6px; text-decoration: none; color: #222; font-size: 1.1em; }
+        .picker-list a:hover, .picker-list a:focus-visible { border-color: #0b5ed7; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>退勤する人を選択</h1>
+    <nav><a href="/staff/dashboard.php">ダッシュボードに戻る</a></nav>
+</header>
+<?php if (empty($pickableRecords)): ?>
+    <p class="notice">退勤できる出勤記録がありません（休憩中の人は休憩から戻ってから退勤してください）。</p>
+<?php else: ?>
+    <p>退勤する人を選んでください。</p>
+    <ul class="picker-list">
+        <?php foreach ($pickableRecords as $rec): ?>
+            <li><a href="/staff/clock_out.php?attendance_id=<?= (int) $rec['id'] ?>"><?= htmlspecialchars($rec['employee_name'], ENT_QUOTES, 'UTF-8') ?>（<?= htmlspecialchars(substr($rec['clock_in_at'], 11, 5), ENT_QUOTES, 'UTF-8') ?>〜出勤）</a></li>
+        <?php endforeach; ?>
+    </ul>
+<?php endif; ?>
+</body>
+</html>
+        <?php
+        exit;
+    }
+} else {
+    $openStmt = $pdo->prepare(
+        "SELECT id, category, clock_in_at, break_start_at, break_end_at, total_break_minutes
+         FROM attendance
+         WHERE employee_id = :employee_id AND status = 'working' AND DATE(clock_in_at) = CURDATE()
+           AND deleted_at IS NULL
+         ORDER BY clock_in_at DESC
+         LIMIT 1"
+    );
+    $openStmt->execute([':employee_id' => $staff['id']]);
+    $openRecord = $openStmt->fetch();
+
+    if ($openRecord === false) {
+        // 出勤中のレコードがない場合はここで処理することがない
+        header('Location: /staff/dashboard.php');
+        exit;
+    }
+
+    $isOnBreak = $openRecord['break_start_at'] !== null && $openRecord['break_end_at'] === null;
+    if ($isOnBreak) {
+        // 休憩中は退勤できない（UI側でも非表示にしているが、直接POSTされた場合の保険）
+        set_flash('error', '休憩中は退勤できません。休憩から戻ってから退勤してください。');
+        header('Location: /staff/dashboard.php');
+        exit;
+    }
 }
+
+// work_stage_records.employee_id（「誰が記録したか」）と自動休憩補正ログのedited_byは、
+// 共用アカウントでは共用アカウント自身ではなく実際に退勤する従業員を記録する。
+$recorderId = $isSharedAccount ? (int) $openRecord['employee_id'] : (int) $staff['id'];
 
 $defaultCategory = (string) ($openRecord['category'] ?? '');
 $stagesRequired = in_array($defaultCategory, CATEGORIES_REQUIRING_ALL_STAGES, true);
-
-$isOnBreak = $openRecord['break_start_at'] !== null && $openRecord['break_end_at'] === null;
-if ($isOnBreak) {
-    // 休憩中は退勤できない（UI側でも非表示にしているが、直接POSTされた場合の保険）
-    set_flash('error', '休憩中は退勤できません。休憩から戻ってから退勤してください。');
-    header('Location: /staff/dashboard.php');
-    exit;
-}
 
 $facilitiesStmt = $pdo->query("SELECT id, name FROM facilities WHERE is_active = 1 AND facility_type = '介護施設' ORDER BY name");
 $facilities = $facilitiesStmt->fetchAll();
@@ -123,9 +195,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // 休憩開始・終了を一度も手動打刻していない日（total_break_minutesがNULL）のみ、
         // 法定基準に基づき自動で休憩時間をセットする。手動打刻済み（0分含む）はその実測値を優先し上書きしない。
-        $hadManualBreak = $openRecord['total_break_minutes'] !== null;
-        $autoBreakApplied = !$hadManualBreak && $requiredBreakMinutes > 0;
-        $totalBreakMinutes = $autoBreakApplied ? $requiredBreakMinutes : (int) ($openRecord['total_break_minutes'] ?? 0);
+        // 退勤時は区分を問わず、本人が実際に入力した休憩時間をそのまま保存する。
+        // 法定休憩への不足補正は月次チェックで店舗勤務がある日に限って行う。
+        $autoBreakApplied = false;
+        $totalBreakMinutes = (int) ($openRecord['total_break_minutes'] ?? 0);
         $workMinutes = max(0, $rawMinutes - $totalBreakMinutes);
 
         if ($errorMessage === '') {
@@ -138,7 +211,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             );
             foreach ($rows as $row) {
                 $insertStmt->execute([
-                    ':employee_id' => $staff['id'],
+                    ':employee_id' => $recorderId,
                     ':category' => $row['category'],
                     ':facility_id' => $row['facility_id'],
                     ':stage' => $row['stage'],
@@ -173,7 +246,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 );
                 $logStmt->execute([
                     ':attendance_id' => $openRecord['id'],
-                    ':edited_by' => $staff['id'],
+                    ':edited_by' => $recorderId,
                     ':action' => 'auto_break',
                     ':field_name' => 'total_break_minutes',
                     ':old_value' => $openRecord['total_break_minutes'],
@@ -186,7 +259,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = '退勤を記録しました（作業実績 ' . count($rows) . '件）。';
             if ($autoBreakApplied) {
                 $message .= ' 休憩の打刻がなかったため、労働基準法に基づき休憩' . $totalBreakMinutes . '分を自動で設定しました。';
-            } elseif ($totalBreakMinutes < $requiredBreakMinutes) {
+            } elseif ($openRecord['category'] === '店舗' && $totalBreakMinutes < $requiredBreakMinutes) {
                 $message .= ' ⚠ 本日の休憩は' . $totalBreakMinutes . '分でした。労働基準法上、'
                     . format_minutes_as_hours($rawMinutes) . 'の勤務には' . $requiredBreakMinutes . '分以上の休憩が必要です。';
             }
@@ -226,7 +299,7 @@ $csrfToken = csrf_token();
 </head>
 <body>
 <header>
-    <h1>退勤・本日の作業実績入力</h1>
+    <h1>退勤・本日の作業実績入力<?= $isSharedAccount ? '（' . htmlspecialchars($openRecord['employee_name'], ENT_QUOTES, 'UTF-8') . '）' : '' ?></h1>
     <nav><a href="/staff/dashboard.php">ダッシュボードに戻る</a></nav>
 </header>
 
@@ -248,6 +321,9 @@ $csrfToken = csrf_token();
     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
     <input type="hidden" name="lat" id="clock-lat" value="">
     <input type="hidden" name="lng" id="clock-lng" value="">
+    <?php if ($isSharedAccount): ?>
+        <input type="hidden" name="attendance_id" value="<?= (int) $openRecord['id'] ?>">
+    <?php endif; ?>
 
     <?php foreach ($stageLabels as $stageKey => $stageLabel): ?>
         <section>
@@ -273,7 +349,7 @@ $csrfToken = csrf_token();
                         <td>
                             <select class="employee-select" multiple size="<?= max(2, min(6, count($employees))) ?>">
                                 <?php foreach ($employees as $employee): ?>
-                                    <option value="<?= (int) $employee['id'] ?>" <?= (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                                    <option value="<?= (int) $employee['id'] ?>" <?= (int) $employee['id'] === $recorderId ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
                                 <?php endforeach; ?>
                             </select>
                         </td>

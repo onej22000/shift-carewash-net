@@ -86,7 +86,7 @@ $logs = $logsStmt->fetchAll();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>集荷・配送記録修正履歴 | 管理者</title>
+    <title>集荷記録修正履歴 | 管理者</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
@@ -105,7 +105,7 @@ $logs = $logsStmt->fetchAll();
 </head>
 <body>
 <header>
-    <h1>集荷・配送記録修正履歴</h1>
+    <h1>集荷記録修正履歴</h1>
     <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん（管理者） | <a href="/admin/collection_records.php">集荷・配送記録簿</a> | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a></nav>
 </header>
 
