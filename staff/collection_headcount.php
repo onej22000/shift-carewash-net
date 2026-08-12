@@ -1165,5 +1165,37 @@ if (!empty($recentConfirmations)) {
     <?php endif; ?>
 </section>
 
+<section class="recent-list">
+    <h2>直近に確認した人数</h2>
+    <p class="notice">この記録簿はチーム共有のため、確認した本人以外でも修正・削除できます。変更内容は履歴に記録されます。</p>
+    <?php if (empty($recentConfirmations)): ?>
+        <p class="notice">まだ確認記録はありません。</p>
+    <?php else: ?>
+        <table class="cycles">
+            <thead><tr><th>施設</th><th>集荷日</th><th>洗濯ネット数</th><th>確認日時</th><th>参加者</th><th>操作</th></tr></thead>
+            <tbody>
+                <?php foreach ($recentConfirmations as $record): ?>
+                    <tr>
+                        <td><?= htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars($record['pickup_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= (int) ($record['return_ready_laundry_net_count'] ?? 0) ?>枚</td>
+                        <td><?= htmlspecialchars($record['record_date'], ENT_QUOTES, 'UTF-8') ?> <?= $record['record_time'] !== null ? htmlspecialchars(substr($record['record_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '' ?></td>
+                        <td><?= !empty($recentParticipantsByRecordId[(int) $record['id']]) ? htmlspecialchars(implode('・', $recentParticipantsByRecordId[(int) $record['id']]), ENT_QUOTES, 'UTF-8') : '-' ?></td>
+                        <td>
+                            <a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?edit=<?= (int) $record['id'] ?>">編集</a>
+                            <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この確認記録を削除しますか？対象のサイクルは未確認一覧に戻ります。');">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                <input type="hidden" name="action" value="delete_headcount">
+                                <input type="hidden" name="id" value="<?= (int) $record['id'] ?>">
+                                <button type="submit">削除</button>
+                            </form>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+    <?php endif; ?>
+</section>
+
 </body>
 </html>
