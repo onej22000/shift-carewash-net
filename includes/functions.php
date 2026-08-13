@@ -34,6 +34,10 @@ const NIGHT_WAGE_PREMIUM_MULTIPLIER = 0.25;
 const CALENDAR_BASE_URL = 'https://shift.carewash.net';
 const CALENDAR_TOKEN_BYTES = 32; // hex化で64文字
 
+// 到着入力済み（arrival_bag_count入力済み）のまま発送されずに滞留している集荷サイクルを
+// 警告扱いにする経過日数のしきい値。pickup_dateからの経過日数がこの値以上で警告対象。
+const COLLECTION_STALL_ALERT_THRESHOLD_DAYS = 2;
+
 /**
  * 従業員がまだカレンダー購読トークンを持っていなければ発行する（初回アクセス時等に使用）。
  * 既に持っていればそれをそのまま返す。
@@ -1747,6 +1751,46 @@ function calc_vehicle_alerts(PDO $pdo, string $today): array
                 }
             }
         }
+    }
+
+    return $alerts;
+}
+
+/**
+ * 到着入力済み（arrival_bag_count入力済み）のまま発送されずに滞留している集荷サイクルを検知する。
+ * work_status.phpのリネン袋数・洗濯ネット数集計が「本日集荷分のみ」に限定されたことで、
+ * 数日以上未発送のまま残っているサイクルが同画面から見えなくなったための代替アラート。
+ */
+function calc_collection_stall_alerts(PDO $pdo, string $today, int $thresholdDays = COLLECTION_STALL_ALERT_THRESHOLD_DAYS): array
+{
+    $cutoffDate = (new DateTime($today))->modify('-' . $thresholdDays . ' days')->format('Y-m-d');
+
+    $stmt = $pdo->prepare(
+        'SELECT cc.id, cc.facility_id, cc.pickup_date, f.name AS facility_name
+         FROM collection_cycles cc
+         INNER JOIN facilities f ON f.id = cc.facility_id
+         WHERE cc.arrival_bag_count IS NOT NULL
+           AND cc.dispatch_bag_count IS NULL
+           AND cc.return_bag_count IS NULL
+           AND cc.deleted_at IS NULL
+           AND cc.pickup_date <= :cutoff_date
+         ORDER BY cc.pickup_date ASC, f.name'
+    );
+    $stmt->execute([':cutoff_date' => $cutoffDate]);
+    $rows = $stmt->fetchAll();
+
+    $todayDate = new DateTime($today);
+    $alerts = [];
+    foreach ($rows as $row) {
+        $pickupDate = new DateTime($row['pickup_date']);
+        $elapsedDays = (int) $pickupDate->diff($todayDate)->format('%a');
+        $alerts[] = [
+            'collection_cycle_id' => (int) $row['id'],
+            'facility_id' => (int) $row['facility_id'],
+            'facility_name' => $row['facility_name'],
+            'pickup_date' => $row['pickup_date'],
+            'elapsed_days' => $elapsedDays,
+        ];
     }
 
     return $alerts;

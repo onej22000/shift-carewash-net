@@ -6,6 +6,7 @@ $admin = require_login('admin');
 $pdo = getPdo();
 
 $vehicleAlerts = calc_vehicle_alerts($pdo, (new DateTime())->format('Y-m-d'));
+$collectionStallAlerts = calc_collection_stall_alerts($pdo, (new DateTime())->format('Y-m-d'));
 
 $flash = pop_flash();
 $csrfToken = csrf_token();
@@ -62,6 +63,17 @@ $csrfToken = csrf_token();
         <ul>
             <?php foreach ($vehicleAlerts as $alert): ?>
                 <li><?= htmlspecialchars($alert['vehicle_label'], ENT_QUOTES, 'UTF-8') ?>：<?= htmlspecialchars($alert['label'], ENT_QUOTES, 'UTF-8') ?>（<?= htmlspecialchars($alert['detail'], ENT_QUOTES, 'UTF-8') ?>）</li>
+            <?php endforeach; ?>
+        </ul>
+    </div>
+<?php endif; ?>
+
+<?php if (!empty($collectionStallAlerts)): ?>
+    <div class="vehicle-alert-banner">
+        <h2>⚠ 未発送のまま滞留している集荷サイクルの警告</h2>
+        <ul>
+            <?php foreach ($collectionStallAlerts as $alert): ?>
+                <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?>（<?= (int) $alert['elapsed_days'] ?>日経過）</li>
             <?php endforeach; ?>
         </ul>
     </div>
