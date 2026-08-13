@@ -2022,10 +2022,15 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
             : ($facility['issued_linen_bag_yellow'] !== null ? '黄' : null);
         $returnReadyTotal = $pendingReturnByFacility[$facilityId] ?? 0;
 
+        // 「本日の集荷予定」で知りたいのは「洗濯代行スタッフが返却準備を完了したか」
+        // （＝ドライバーが今日持ち帰る物があるか）であり、これはreturn_ready_bag_countで判定する。
+        // return_bag_count（ドライバーによる最終返却確定、別物）を見ていたのは誤り
+        // （2026-08-14修正：この誤りにより、返却準備は完了しているのに「作業前」のまま
+        // 表示され続けるバグが発生していた）。
         $latestCycle = $latestCycleByFacility[$facilityId] ?? null;
         if ($latestCycle === null) {
             $latestCycleStatus = 'none';
-        } elseif ($latestCycle['return_bag_count'] !== null) {
+        } elseif ($latestCycle['return_ready_bag_count'] !== null) {
             $latestCycleStatus = 'confirmed';
         } else {
             $latestCycleStatus = 'in_progress';
@@ -2040,7 +2045,7 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
             'return_ready_total' => $returnReadyTotal,
             'row_total' => (int) $lastPickupBagCount + $returnReadyTotal,
             'latest_cycle_status' => $latestCycleStatus,
-            'latest_cycle_return_bag_count' => $latestCycle['return_bag_count'] ?? null,
+            'latest_cycle_return_ready_bag_count' => $latestCycle['return_ready_bag_count'] ?? null,
             'latest_cycle_pickup_bag_count' => $latestCycle['pickup_bag_count'] ?? null,
             'latest_cycle_laundry_net_count' => $latestCycle['return_ready_laundry_net_count'] ?? null,
         ];

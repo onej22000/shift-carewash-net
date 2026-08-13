@@ -405,13 +405,7 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
         <h3>洗濯代行スタッフ用</h3>
         <div class="nav-cards">
             <a class="nav-card" href="/staff/collection_headcount.php">
-                <h3>洗濯ネット・返却リネン袋数登録</h3>
-            </a>
-            <a class="nav-card" href="/staff/work_records.php">
-                <h3>作業実績登録</h3>
-            </a>
-            <a class="nav-card" href="/staff/work_status.php">
-                <h3>作業状況</h3>
+                <h3>作業登録</h3>
             </a>
         </div>
     </div>

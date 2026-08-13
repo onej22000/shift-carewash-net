@@ -155,7 +155,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $errorMessage = '削除に失敗しました。もう一度お試しください。';
                 }
             }
-        } elseif ($action === 'create' || $action === 'update') {
+        } elseif ($action === 'update') {
+            // 新規登録（旧action=create）は、洗濯ネット数・作業登録がサイクル単位（collection_cycle_id）に
+            // 直結するstaff/collection_headcount.phpの「作業登録」に統合したため撤去した。このページは
+            // 既存の（collection_cycle_id無しの）過去記録の閲覧・修正・削除専用として残す。
             $workRecordInput = $_POST;
             if (!$isSharedAccount) {
                 $workRecordInput['employee_ids'] = [(int) $staff['id']];
@@ -164,59 +167,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if (!empty($parseErrors)) {
                 $errorMessage = implode(' ', $parseErrors);
-            } elseif ($action === 'create') {
-                try {
-                    $pdo->beginTransaction();
-
-                    $insertStmt = $pdo->prepare(
-                        'INSERT INTO work_stage_records (employee_id, category, facility_id, stage, person_count, record_date, record_time, completed_at)
-                         VALUES (:employee_id, :category, :facility_id, :stage, :person_count, :record_date, :record_time, :completed_at)'
-                    );
-                    $insertStmt->execute([
-                        ':employee_id' => $staff['id'],
-                        ':category' => $values['category'],
-                        ':facility_id' => $values['facility_id'],
-                        ':stage' => $values['stage'],
-                        ':person_count' => $values['person_count'],
-                        ':record_date' => $values['record_date'],
-                        ':record_time' => $values['record_time'],
-                        ':completed_at' => $values['completed_at'],
-                    ]);
-                    $newRecordId = (int) $pdo->lastInsertId();
-
-                    if (!empty($values['employee_ids'])) {
-                        record_work_stage_employees($pdo, $newRecordId, $values['employee_ids'], new DateTime($values['completed_at']));
-                    }
-
-                    $logStmt = $pdo->prepare(
-                        'INSERT INTO work_stage_record_edit_logs (work_stage_record_id, edited_by, action, field_name, old_value, new_value)
-                         VALUES (:record_id, :edited_by, :action, :field_name, NULL, :new_value)'
-                    );
-                    foreach (WSR_EDITABLE_FIELDS as $field) {
-                        $logStmt->execute([
-                            ':record_id' => $newRecordId,
-                            ':edited_by' => $staff['id'],
-                            ':action' => 'create',
-                            ':field_name' => $field,
-                            ':new_value' => $values[$field],
-                        ]);
-                    }
-                    $logStmt->execute([
-                        ':record_id' => $newRecordId,
-                        ':edited_by' => $staff['id'],
-                        ':action' => 'create',
-                        ':field_name' => 'employee_ids',
-                        ':new_value' => implode(',', $values['employee_ids']),
-                    ]);
-
-                    $pdo->commit();
-                    set_flash('success', '作業実績を登録しました。');
-                    header('Location: /staff/work_records.php?period=' . urlencode($period));
-                    exit;
-                } catch (\Throwable $e) {
-                    $pdo->rollBack();
-                    $errorMessage = '登録に失敗しました。もう一度お試しください。';
-                }
             } else {
                 $recordId = (int) ($_POST['id'] ?? 0);
                 $recordStmt = $pdo->prepare('SELECT * FROM work_stage_records WHERE id = :id AND employee_id = :employee_id AND deleted_at IS NULL');

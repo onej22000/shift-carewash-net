@@ -10,17 +10,19 @@ $logoutPath = $isAdminView ? '/admin/logout.php' : '/staff/logout.php';
 $pdo = getPdo();
 $isSharedAccount = !$isAdminView && (int) ($staff['is_shared_account'] ?? 0) === 1;
 
-// この画面で新規作成・修正するwork_stage_recordsのフィールド一覧（監査ログ用）。employee_idsは
-// work_stage_records自体のカラムではなくwork_stage_record_employees側の参加者一覧のため、
-// 汎用の差分ログ処理（$recordのカラム値と比較する処理）とは別に個別でログを記録する。
-const HEADCOUNT_LOG_FIELDS = ['category', 'facility_id', 'collection_cycle_id', 'stage', 'person_count', 'record_date', 'record_time', 'completed_at'];
-// 修正時にユーザーが変更できるのはこの項目のみ（施設・工程・紐づくサイクルは確認記録の性質上変えない）。
+// 「作業登録」（洗濯・乾燥・畳みの作業実績、collection_cycle_id直結）で新規作成・修正する
+// work_stage_recordsのフィールド一覧（監査ログ用）。employee_idsはwork_stage_records自体の
+// カラムではなくwork_stage_record_employees側の参加者一覧のため、汎用の差分ログ処理
+// （$recordのカラム値と比較する処理）とは別に個別でログを記録する。
+const WORK_LOG_FIELDS = ['category', 'facility_id', 'collection_cycle_id', 'stage', 'person_count', 'record_date', 'record_time', 'completed_at'];
+// 修正時にユーザーが変更できるのはこの項目のみ（施設・工程・紐づくサイクルは作業登録の性質上変えない）。
 // person_count・completed_atは参加者選択（employee_ids、別ロジックで扱う）から自動で算出・更新する。
-const HEADCOUNT_EDITABLE_FIELDS = ['person_count', 'record_date', 'record_time', 'completed_at'];
+const WORK_EDITABLE_FIELDS = ['person_count', 'record_date', 'record_time', 'completed_at'];
 
-// 洗濯ネット数（到着したリネン袋内の枚数確認）と返却リネン袋（青）数（返却梱包の準備）は、
-// 別々のタイミングで別々の担当者が登録できるよう、それぞれ独立したフィールド群として扱う
-// （2026-08-13、confirm_headcountとregister_returnを分割）。
+// 洗濯ネット数（到着したリネン袋内の枚数確認）・作業登録（洗濯した人数の記録）・返却リネン袋（青）数
+// （返却梱包の準備）は、別々のタイミングで別々の担当者が登録できるよう、それぞれ独立した
+// フィールド群として扱う（2026-08-13、confirm_headcountとregister_returnを分割／
+// 2026-08-14、洗濯ネット数と作業登録＝旧confirm_headcountの人数選択部分をさらに分割）。
 const NET_COUNT_LOG_FIELD = 'return_ready_laundry_net_count';
 const RETURN_READY_LOG_FIELDS = ['return_ready_bag_count', 'return_ready_at', 'return_ready_employee_id'];
 
@@ -29,6 +31,10 @@ const RETURN_READY_LOG_FIELDS = ['return_ready_bag_count', 'return_ready_at', 'r
  * （work_stage_records、集荷サイクルに紐づく確認記録）・返却準備完了の担当者名まで含めて
  * 1クエリで取得する。1サイクル＝1行のメインテーブルで、集荷→到着→洗濯ネット数→返却袋数（青）
  * の流れをすべてこの1行から組み立てる。
+ *
+ * pickup_bag_count IS NULLのサイクル（空袋・空ネットの納品のみで実集荷が発生していないもの）は
+ * 到着（arrival）自体が発生せず返却袋数も確定しないため無期限にこの一覧へ残ってしまう。
+ * データとしては削除しない（在庫トランザクション等が紐づく）が、この一覧の表示対象からは除外する。
  */
 function find_open_cycles(PDO $pdo): array
 {
@@ -42,7 +48,7 @@ function find_open_cycles(PDO $pdo): array
             LEFT JOIN work_stage_records wsr
                    ON wsr.collection_cycle_id = cc.id AND wsr.deleted_at IS NULL
             LEFT JOIN employees rre ON rre.id = cc.return_ready_employee_id
-            WHERE cc.return_bag_count IS NULL AND cc.deleted_at IS NULL
+            WHERE cc.return_bag_count IS NULL AND cc.pickup_bag_count IS NOT NULL AND cc.deleted_at IS NULL
             ORDER BY cc.pickup_date ASC, cc.id ASC
             LIMIT 200';
     return $pdo->query($sql)->fetchAll();
@@ -67,38 +73,6 @@ function find_returned_cycles(PDO $pdo): array
             ORDER BY cc.return_date DESC, cc.return_time DESC, cc.id DESC
             LIMIT 100';
     return $pdo->query($sql)->fetchAll();
-}
-
-/**
- * 施設ごとの「作業完了数」。staff/work_status.phpの洗濯累計と同じロジック
- * （work_stage_records、collection_cycle_id IS NULL＝作業実績登録画面からの個人記録、の
- * person_countを処理量の代用値として使う）をそのまま流用する。
- */
-function find_washed_totals_by_facility(PDO $pdo): array
-{
-    $stmt = $pdo->query(
-        "SELECT w.facility_id, SUM(w.person_count) AS washed
-         FROM work_stage_records w
-         INNER JOIN (
-             SELECT facility_id, MIN(COALESCE(arrival_date, pickup_date)) AS open_since
-             FROM collection_cycles
-             WHERE arrival_bag_count IS NOT NULL
-               AND dispatch_bag_count IS NULL
-               AND return_bag_count IS NULL
-               AND deleted_at IS NULL
-             GROUP BY facility_id
-         ) active ON active.facility_id = w.facility_id
-         WHERE w.stage = 'wash'
-           AND w.collection_cycle_id IS NULL
-           AND w.deleted_at IS NULL
-           AND w.record_date >= active.open_since
-         GROUP BY w.facility_id"
-    );
-    $result = [];
-    foreach ($stmt->fetchAll() as $row) {
-        $result[(int) $row['facility_id']] = (int) $row['washed'];
-    }
-    return $result;
 }
 
 function parse_return_bag_count($raw): ?int
@@ -153,7 +127,7 @@ function resolve_return_employee_id($raw, int $default, array $validEmployeeIds)
     return in_array($id, $validEmployeeIds, true) ? $id : false;
 }
 
-function parse_headcount_edit_input(array $post, array $validEmployeeIds): array
+function parse_work_edit_input(array $post, array $validEmployeeIds): array
 {
     $employeeIds = [];
     foreach ((array) ($post['employee_ids'] ?? []) as $rawEmployeeId) {
@@ -337,24 +311,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $errorMessage = '登録に失敗しました。もう一度お試しください。';
                 }
             }
-        } elseif ($action === 'confirm_headcount') {
-            // 「4. 洗濯ネット数」の登録。返却袋数（青）とは独立して、いつでも単独で登録できる。
+        } elseif ($action === 'register_net_count') {
+            // 「2. 洗濯ネット数」の登録。作業登録（complete_work）・返却袋数（青）とは完全に独立しており、
+            // 従業員選択は行わない（誰が数えたかではなく、到着した数量そのものの確認のため）。
             $cycleId = (int) ($_POST['cycle_id'] ?? 0);
             $laundryNetCount = parse_laundry_net_count($_POST['laundry_net_count'] ?? '');
-            $employeeIds = [];
-            foreach ((array) ($_POST['employee_ids'] ?? []) as $rawEmployeeId) {
-                $employeeId = (int) $rawEmployeeId;
-                if (in_array($employeeId, $validEmployeeIds, true)) {
-                    $employeeIds[] = $employeeId;
-                }
-            }
-            $employeeIds = array_values(array_unique($employeeIds));
-            if (!$isSharedAccount && !$isAdminView && in_array((int) $staff['id'], $validEmployeeIds, true)) {
-                $employeeIds = [(int) $staff['id']];
-            }
-            $personCount = count($employeeIds);
 
-            // 再表示までの間に他のスタッフが確認済みにした可能性があるため、直前に候補を再取得して検証する。
+            // 再表示までの間に他のスタッフが登録済みにした可能性があるため、直前に候補を再取得して検証する。
             $openCycles = find_open_cycles($pdo);
             $openById = [];
             foreach ($openCycles as $cycle) {
@@ -368,7 +331,109 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errorMessage = '対象のサイクルが無効です（未到着、または既に返却済みの可能性があります）。もう一度やり直してください。';
             } elseif ($targetCycle['return_ready_laundry_net_count'] !== null) {
                 $errorMessage = '対象のサイクルは既に洗濯ネット数を登録済みです。もう一度やり直してください。';
-            } elseif ($isSharedAccount && empty($employeeIds)) {
+            } else {
+                try {
+                    $pdo->beginTransaction();
+
+                    $pdo->prepare('UPDATE collection_cycles SET return_ready_laundry_net_count = :net_count WHERE id = :id')
+                        ->execute([':net_count' => $laundryNetCount, ':id' => $cycleId]);
+
+                    $pdo->prepare(
+                        'INSERT INTO collection_cycle_edit_logs (collection_cycle_id, edited_by, action, field_name, old_value, new_value)
+                         VALUES (:cycle_id, :edited_by, "update", :field_name, NULL, :new_value)'
+                    )->execute([
+                        ':cycle_id' => $cycleId, ':edited_by' => $staff['id'],
+                        ':field_name' => NET_COUNT_LOG_FIELD, ':new_value' => $laundryNetCount,
+                    ]);
+
+                    $pdo->commit();
+                    set_flash('success', htmlspecialchars($targetCycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $targetCycle['pickup_date'] . '集荷分）の洗濯ネット数（' . $laundryNetCount . '枚）を登録しました。');
+                    header('Location: ' . $collectionHeadcountPath);
+                    exit;
+                } catch (\Throwable $e) {
+                    $pdo->rollBack();
+                    $errorMessage = '登録に失敗しました。もう一度お試しください。';
+                }
+            }
+        } elseif ($action === 'edit_net_count' || $action === 'delete_net_count') {
+            // 「洗濯ネット数」の修正・取消。作業登録（work_stage_records）・返却袋数（青）は
+            // 別ドメインのため、このアクションでは一切触れない。
+            $cycleId = (int) ($_POST['cycle_id'] ?? 0);
+            $cycleStmt = $pdo->prepare(
+                'SELECT cc.id, cc.facility_id, cc.pickup_date, cc.return_ready_laundry_net_count, f.name AS facility_name
+                 FROM collection_cycles cc
+                 INNER JOIN facilities f ON f.id = cc.facility_id
+                 WHERE cc.id = :id AND cc.deleted_at IS NULL AND cc.return_ready_laundry_net_count IS NOT NULL'
+            );
+            $cycleStmt->execute([':id' => $cycleId]);
+            $cycle = $cycleStmt->fetch();
+
+            if ($cycle === false) {
+                $errorMessage = '対象の洗濯ネット数記録が見つかりません。';
+            } else {
+                $newValue = null;
+                if ($action === 'edit_net_count') {
+                    $newValue = parse_laundry_net_count($_POST['laundry_net_count'] ?? '');
+                    if ($newValue === null) {
+                        $errorMessage = '洗濯ネット数は0以上の整数を入力してください。';
+                    }
+                }
+
+                if ($errorMessage === '') {
+                    try {
+                        $pdo->beginTransaction();
+                        $pdo->prepare(
+                            'INSERT INTO collection_cycle_edit_logs (collection_cycle_id, edited_by, action, field_name, old_value, new_value)
+                             VALUES (:cycle_id, :edited_by, :action, :field_name, :old_value, :new_value)'
+                        )->execute([
+                            ':cycle_id' => $cycleId, ':edited_by' => $staff['id'],
+                            ':action' => $action === 'delete_net_count' ? 'delete' : 'update',
+                            ':field_name' => NET_COUNT_LOG_FIELD,
+                            ':old_value' => $cycle['return_ready_laundry_net_count'], ':new_value' => $newValue,
+                        ]);
+                        $pdo->prepare('UPDATE collection_cycles SET return_ready_laundry_net_count = :net_count WHERE id = :id')
+                            ->execute([':net_count' => $newValue, ':id' => $cycleId]);
+                        $pdo->commit();
+                        set_flash('success', $action === 'delete_net_count' ? '洗濯ネット数の記録を削除しました。' : '洗濯ネット数を更新しました。');
+                        header('Location: ' . $collectionHeadcountPath);
+                        exit;
+                    } catch (\Throwable $e) {
+                        $pdo->rollBack();
+                        $errorMessage = '更新に失敗しました。もう一度お試しください。';
+                    }
+                }
+            }
+        } elseif ($action === 'complete_work') {
+            // 「3. 作業登録」（新設）。このサイクル（collection_cycle_id）に直接紐付けて
+            // work_stage_recordsに記録する。洗濯ネット数・返却袋数（青）とは独立しており、
+            // どちらが先でも後でも登録できる。
+            $cycleId = (int) ($_POST['cycle_id'] ?? 0);
+            $employeeIds = [];
+            foreach ((array) ($_POST['employee_ids'] ?? []) as $rawEmployeeId) {
+                $employeeId = (int) $rawEmployeeId;
+                if (in_array($employeeId, $validEmployeeIds, true)) {
+                    $employeeIds[] = $employeeId;
+                }
+            }
+            $employeeIds = array_values(array_unique($employeeIds));
+            if (!$isSharedAccount && !$isAdminView && in_array((int) $staff['id'], $validEmployeeIds, true)) {
+                $employeeIds = [(int) $staff['id']];
+            }
+            $personCount = count($employeeIds);
+
+            // 再表示までの間に他のスタッフが登録済みにした可能性があるため、直前に候補を再取得して検証する。
+            $openCycles = find_open_cycles($pdo);
+            $openById = [];
+            foreach ($openCycles as $cycle) {
+                $openById[(int) $cycle['id']] = $cycle;
+            }
+            $targetCycle = $openById[$cycleId] ?? null;
+
+            if ($targetCycle === null || $targetCycle['arrival_bag_count'] === null) {
+                $errorMessage = '対象のサイクルが無効です（未到着、または既に返却済みの可能性があります）。もう一度やり直してください。';
+            } elseif ($targetCycle['wsr_id'] !== null) {
+                $errorMessage = '対象のサイクルは既に作業登録済みです。もう一度やり直してください。';
+            } elseif (empty($employeeIds)) {
                 $errorMessage = '作業した従業員を1人以上選択してください。';
             } else {
                 $now = new DateTime();
@@ -393,23 +458,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ]);
                     $newRecordId = (int) $pdo->lastInsertId();
 
-                    $cycleUpdateStmt = $pdo->prepare(
-                        'UPDATE collection_cycles SET return_ready_laundry_net_count = :net_count WHERE id = :id'
-                    );
-                    $cycleUpdateStmt->execute([':net_count' => $laundryNetCount, ':id' => $cycleId]);
-
-                    $cycleLogStmt = $pdo->prepare(
-                        'INSERT INTO collection_cycle_edit_logs (collection_cycle_id, edited_by, action, field_name, old_value, new_value)
-                         VALUES (:cycle_id, :edited_by, :action, :field_name, NULL, :new_value)'
-                    );
-                    $cycleLogStmt->execute([
-                        ':cycle_id' => $cycleId, ':edited_by' => $staff['id'], ':action' => 'update',
-                        ':field_name' => NET_COUNT_LOG_FIELD, ':new_value' => $laundryNetCount,
-                    ]);
-
-                    if (!empty($employeeIds)) {
-                        record_work_stage_employees($pdo, $newRecordId, $employeeIds, $now);
-                    }
+                    record_work_stage_employees($pdo, $newRecordId, $employeeIds, $now);
 
                     $logStmt = $pdo->prepare(
                         'INSERT INTO work_stage_record_edit_logs (work_stage_record_id, edited_by, action, field_name, old_value, new_value)
@@ -425,7 +474,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'record_time' => $now->format('H:i:s'),
                         'completed_at' => $now->format('Y-m-d H:i:s'),
                     ];
-                    foreach (HEADCOUNT_LOG_FIELDS as $field) {
+                    foreach (WORK_LOG_FIELDS as $field) {
                         $logStmt->execute([
                             ':record_id' => $newRecordId,
                             ':edited_by' => $staff['id'],
@@ -443,7 +492,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ]);
 
                     $pdo->commit();
-                    set_flash('success', htmlspecialchars($targetCycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $targetCycle['pickup_date'] . '集荷分）の洗濯ネット数・人数を登録しました。返却袋数（青）は準備ができ次第、別途登録してください。');
+                    set_flash('success', htmlspecialchars($targetCycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $targetCycle['pickup_date'] . '集荷分）の作業登録（' . $personCount . '名）を行いました。');
                     header('Location: ' . $collectionHeadcountPath);
                     exit;
                 } catch (\Throwable $e) {
@@ -452,8 +501,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         } elseif ($action === 'register_return') {
-            // 「6. 返却袋数（青）」の登録。洗濯ネット数（confirm_headcount）とは独立しており、
-            // 発送（dispatch）の有無や洗濯ネット数登録の前後関係を問わず、到着済みならいつでも登録できる。
+            // 「4. 返却リネン袋（青）数」の登録。洗濯ネット数・作業登録とは独立しており、
+            // 発送（dispatch）の有無や他ステージの前後関係を問わず、到着済みならいつでも登録できる。
             $cycleId = (int) ($_POST['cycle_id'] ?? 0);
 
             $openCycles = find_open_cycles($pdo);
@@ -608,17 +657,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 }
             }
-        } elseif ($action === 'delete_headcount') {
-            // 「洗濯ネット数」確認記録の取消。返却袋数（青）系フィールドは別ドメインのため触れない
-            // （分割前は削除時に道連れでNULLに戻していたが、それだと別担当者が既に登録した
-            // 返却袋数を巻き込んで消してしまうため、対象をreturn_ready_laundry_net_countのみに限定する）。
+        } elseif ($action === 'delete_work') {
+            // 「作業登録」の取消。洗濯ネット数（return_ready_laundry_net_count）は
+            // 別ドメインのため、このアクションでは一切触れない。
             $recordId = (int) ($_POST['id'] ?? 0);
             $recordStmt = $pdo->prepare('SELECT * FROM work_stage_records WHERE id = :id AND collection_cycle_id IS NOT NULL AND deleted_at IS NULL');
             $recordStmt->execute([':id' => $recordId]);
             $record = $recordStmt->fetch();
 
             if ($record === false) {
-                $errorMessage = '対象の確認記録が見つかりません。';
+                $errorMessage = '対象の作業登録が見つかりません。';
             } else {
                 try {
                     $pdo->beginTransaction();
@@ -627,7 +675,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'INSERT INTO work_stage_record_edit_logs (work_stage_record_id, edited_by, action, field_name, old_value, new_value)
                          VALUES (:record_id, :edited_by, :action, :field_name, :old_value, NULL)'
                     );
-                    foreach (HEADCOUNT_LOG_FIELDS as $field) {
+                    foreach (WORK_LOG_FIELDS as $field) {
                         if ($record[$field] === null) {
                             continue;
                         }
@@ -643,26 +691,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $deleteStmt = $pdo->prepare('UPDATE work_stage_records SET deleted_at = :deleted_at WHERE id = :id');
                     $deleteStmt->execute([':deleted_at' => (new DateTime())->format('Y-m-d H:i:s'), ':id' => $recordId]);
 
-                    $cycleStmt = $pdo->prepare('SELECT return_ready_laundry_net_count FROM collection_cycles WHERE id = :id');
-                    $cycleStmt->execute([':id' => $record['collection_cycle_id']]);
-                    $oldNetCount = $cycleStmt->fetchColumn();
-
-                    $cycleLogStmt = $pdo->prepare(
-                        'INSERT INTO collection_cycle_edit_logs (collection_cycle_id, edited_by, action, field_name, old_value, new_value)
-                         VALUES (:cycle_id, :edited_by, :action, :field_name, :old_value, NULL)'
-                    );
-                    $cycleLogStmt->execute([
-                        ':cycle_id' => $record['collection_cycle_id'], ':edited_by' => $staff['id'],
-                        ':action' => 'delete', ':field_name' => NET_COUNT_LOG_FIELD, ':old_value' => $oldNetCount,
-                    ]);
-
-                    $clearCycleStmt = $pdo->prepare(
-                        'UPDATE collection_cycles SET return_ready_laundry_net_count = NULL WHERE id = :id'
-                    );
-                    $clearCycleStmt->execute([':id' => $record['collection_cycle_id']]);
-
                     $pdo->commit();
-                    set_flash('success', '洗濯ネット数の確認記録を削除しました。対象のサイクルは未確認一覧に戻ります。');
+                    set_flash('success', '作業登録を削除しました。');
                     header('Location: ' . $collectionHeadcountPath);
                     exit;
                 } catch (\Throwable $e) {
@@ -670,14 +700,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $errorMessage = '削除に失敗しました。もう一度お試しください。';
                 }
             }
-        } elseif ($action === 'edit_headcount') {
-            // 「洗濯ネット数」確認記録の修正。返却袋数（青）系フィールドは別ドメインのため触れない。
+        } elseif ($action === 'edit_work') {
+            // 「作業登録」の修正。洗濯ネット数は別ドメインのため触れない。
             $recordId = (int) ($_POST['id'] ?? 0);
-            [$values, $parseErrors] = parse_headcount_edit_input($_POST, $validEmployeeIds);
-            $laundryNetCount = parse_laundry_net_count($_POST['laundry_net_count'] ?? '');
-            if ($laundryNetCount === null) {
-                $parseErrors[] = '洗濯ネット数は0以上の整数を入力してください。';
-            }
+            [$values, $parseErrors] = parse_work_edit_input($_POST, $validEmployeeIds);
 
             if (!empty($parseErrors)) {
                 $errorMessage = implode(' ', $parseErrors);
@@ -687,7 +713,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $record = $recordStmt->fetch();
 
                 if ($record === false) {
-                    $errorMessage = '対象の確認記録が見つかりません。';
+                    $errorMessage = '対象の作業登録が見つかりません。';
                 } else {
                     $oldEmployeeIdsStmt = $pdo->prepare('SELECT employee_id FROM work_stage_record_employees WHERE work_stage_record_id = :id ORDER BY employee_id');
                     $oldEmployeeIdsStmt->execute([':id' => $recordId]);
@@ -710,7 +736,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                              VALUES (:record_id, :edited_by, :action, :field_name, :old_value, :new_value)'
                         );
                         $changedCount = 0;
-                        foreach (HEADCOUNT_EDITABLE_FIELDS as $field) {
+                        foreach (WORK_EDITABLE_FIELDS as $field) {
                             if ((string) $values[$field] === (string) $record[$field]) {
                                 continue;
                             }
@@ -747,28 +773,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ':id' => $recordId,
                         ]);
 
-                        $cycleValuesStmt = $pdo->prepare(
-                            'SELECT return_ready_laundry_net_count FROM collection_cycles WHERE id = :id'
-                        );
-                        $cycleValuesStmt->execute([':id' => $record['collection_cycle_id']]);
-                        $oldNetCount = $cycleValuesStmt->fetchColumn();
-                        if ((string) $oldNetCount !== (string) $laundryNetCount) {
-                            $cycleLogStmt = $pdo->prepare(
-                                'INSERT INTO collection_cycle_edit_logs (collection_cycle_id, edited_by, action, field_name, old_value, new_value)
-                                 VALUES (:cycle_id, :edited_by, :action, :field_name, :old_value, :new_value)'
-                            );
-                            $cycleLogStmt->execute([
-                                ':cycle_id' => $record['collection_cycle_id'], ':edited_by' => $staff['id'],
-                                ':action' => 'update', ':field_name' => NET_COUNT_LOG_FIELD,
-                                ':old_value' => $oldNetCount, ':new_value' => $laundryNetCount,
-                            ]);
-                            $changedCount++;
-                        }
-                        $cycleUpdateStmt = $pdo->prepare(
-                            'UPDATE collection_cycles SET return_ready_laundry_net_count = :net_count WHERE id = :id'
-                        );
-                        $cycleUpdateStmt->execute([':net_count' => $laundryNetCount, ':id' => $record['collection_cycle_id']]);
-
                         if ($employeesNeedRecompute) {
                             $deleteEmployeesStmt = $pdo->prepare('DELETE FROM work_stage_record_employees WHERE work_stage_record_id = :id');
                             $deleteEmployeesStmt->execute([':id' => $recordId]);
@@ -779,7 +783,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                         $pdo->commit();
                         set_flash('success', $changedCount > 0
-                            ? '確認記録を修正しました（' . $changedCount . '件のフィールドを変更）。'
+                            ? '作業登録を修正しました（' . $changedCount . '件のフィールドを変更）。'
                             : '変更点はありませんでした。');
                         header('Location: ' . $collectionHeadcountPath);
                         exit;
@@ -823,13 +827,12 @@ if ($editingRecord !== null) {
 }
 
 $editFormValues = null;
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($_POST['action'] ?? '') === 'edit_headcount') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($_POST['action'] ?? '') === 'edit_work') {
     $editFormValues = [
         'id' => (int) ($_POST['id'] ?? 0),
         'employee_ids' => array_map('intval', (array) ($_POST['employee_ids'] ?? [])),
         'record_date' => (string) ($_POST['record_date'] ?? ''),
         'record_time' => (string) ($_POST['record_time'] ?? ''),
-        'laundry_net_count' => (string) ($_POST['laundry_net_count'] ?? ''),
         'facility_name' => $editingRecord['facility_name'] ?? '',
         'pickup_date' => $editingRecord['pickup_date'] ?? '',
     ];
@@ -839,10 +842,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($
         'employee_ids' => $editingRecordEmployeeIds,
         'record_date' => $editingRecord['record_date'],
         'record_time' => $editingRecord['record_time'] !== null ? substr($editingRecord['record_time'], 0, 5) : '',
-        'laundry_net_count' => (string) ($editingRecord['return_ready_laundry_net_count'] ?? 0),
         'facility_name' => $editingRecord['facility_name'],
         'pickup_date' => $editingRecord['pickup_date'],
     ];
+}
+
+// ---- 洗濯ネット数の修正対象の読み込み ----
+$editingNetCountId = isset($_GET['edit_net']) ? (int) $_GET['edit_net'] : 0;
+$editingNetCount = null;
+if ($editingNetCountId > 0) {
+    $stmt = $pdo->prepare(
+        'SELECT cc.id, cc.pickup_date, cc.return_ready_laundry_net_count, f.name AS facility_name
+         FROM collection_cycles cc
+         INNER JOIN facilities f ON f.id = cc.facility_id
+         WHERE cc.id = :id AND cc.deleted_at IS NULL AND cc.return_ready_laundry_net_count IS NOT NULL'
+    );
+    $stmt->execute([':id' => $editingNetCountId]);
+    $row = $stmt->fetch();
+    if ($row !== false) {
+        $editingNetCount = $row;
+    }
 }
 
 $editingReturnReadyId = isset($_GET['return_edit']) ? (int) $_GET['return_edit'] : 0;
@@ -862,14 +881,13 @@ if ($editingReturnReadyId > 0) {
     }
 }
 
-// ---- メインテーブル（返却未完了の集荷サイクル。1サイクル＝1行） ----
+// ---- カード一覧（返却未完了の集荷サイクル。1サイクル＝1カード） ----
 $showHistory = isset($_GET['history']);
-$tableCycles = $showHistory ? find_returned_cycles($pdo) : find_open_cycles($pdo);
-$washedTotalsByFacility = find_washed_totals_by_facility($pdo);
+$cardCycles = $showHistory ? find_returned_cycles($pdo) : find_open_cycles($pdo);
 
-// ---- 参加者名をまとめて取得（操作欄の編集リンク先で使う確認記録の把握用） ----
+// ---- 参加者名をまとめて取得（作業登録の詳細表示・編集リンク先で使う） ----
 $participantsByWsrId = [];
-$wsrIds = array_filter(array_map(static fn (array $c): ?int => $c['wsr_id'] !== null ? (int) $c['wsr_id'] : null, $tableCycles));
+$wsrIds = array_filter(array_map(static fn (array $c): ?int => $c['wsr_id'] !== null ? (int) $c['wsr_id'] : null, $cardCycles));
 if (!empty($wsrIds)) {
     $placeholders = implode(',', array_fill(0, count($wsrIds), '?'));
     $participantsStmt = $pdo->prepare(
@@ -891,7 +909,7 @@ if (!empty($wsrIds)) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
-    <title><?= $isAdminView ? '洗濯ネット・返却リネン袋数 | 管理者' : '洗濯ネット・返却リネン袋数登録 | シフト管理' ?></title>
+    <title><?= $isAdminView ? '作業登録 | 管理者' : '作業登録 | シフト管理' ?></title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 4px; }
@@ -906,17 +924,29 @@ if (!empty($wsrIds)) {
         .form-row label { display: inline-block; width: 90px; }
         .inline-form { display: inline; }
 
-        table.cycles { border-collapse: collapse; width: 100%; }
-        table.cycles th, table.cycles td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; font-size: 0.9em; }
-        table.cycles th { background: #f5f5f5; }
-        table.cycles input[type="number"] { width: 80px; }
-        table.cycles td.done { color: #1e7e34; }
-        table.cycles form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+        /* カード一覧（1サイクル＝1カード、4段階を縦積み） */
+        .cycle-cards { display: flex; flex-direction: column; gap: 12px; }
+        .cycle-card { border: 1px solid #ccc; border-radius: 8px; padding: 12px 14px; background: #fff; }
+        .cycle-card-title { font-weight: bold; font-size: 1.05em; margin: 0 0 4px; }
+        .cycle-card-info { color: #666; font-size: 0.85em; margin: 0 0 8px; }
+        .cycle-card-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid #eee; flex-wrap: wrap; }
+        .cycle-card-row:first-of-type { border-top: none; }
+        .cycle-card-row .label { color: #666; font-size: 0.85em; min-width: 7em; }
+        .cycle-card-row .value { text-align: right; flex: 1; }
+        .cycle-card-row .value.done { color: #1e7e34; }
+        .cycle-card-row .value form { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+        .cycle-card-row .value input[type="number"] { width: 80px; }
+        .cycle-card-detail { margin-top: 8px; }
+        .cycle-card-detail summary { cursor: pointer; color: #0b5ed7; }
+        .cycle-card-detail-body { padding: 8px 4px 0; font-size: 0.9em; }
+        .cycle-card-detail-body dl { margin: 0; }
+        .cycle-card-detail-body dt { color: #666; margin-top: 6px; }
+        .cycle-card-detail-body dd { margin: 0 0 2px; }
     </style>
 </head>
 <body>
 <header>
-    <h1><?= $isAdminView ? '洗濯ネット・返却リネン袋数' : '洗濯ネット・返却リネン袋数登録' ?></h1>
+    <h1>作業登録</h1>
     <nav><a href="<?= htmlspecialchars($dashboardPath, ENT_QUOTES, 'UTF-8') ?>">ダッシュボードに戻る</a> | <a href="<?= htmlspecialchars($logoutPath, ENT_QUOTES, 'UTF-8') ?>">ログアウト</a></nav>
 </header>
 
@@ -965,15 +995,15 @@ if (!empty($wsrIds)) {
 
 <?php if ($editFormValues !== null): ?>
 <section class="edit-form">
-    <h2>洗濯ネット数確認記録の修正（<?= htmlspecialchars($editFormValues['facility_name'], ENT_QUOTES, 'UTF-8') ?>　<?= htmlspecialchars($editFormValues['pickup_date'], ENT_QUOTES, 'UTF-8') ?>集荷分）</h2>
+    <h2>作業登録の修正（<?= htmlspecialchars($editFormValues['facility_name'], ENT_QUOTES, 'UTF-8') ?>　<?= htmlspecialchars($editFormValues['pickup_date'], ENT_QUOTES, 'UTF-8') ?>集荷分）</h2>
     <fieldset>
         <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-            <input type="hidden" name="action" value="edit_headcount">
+            <input type="hidden" name="action" value="edit_work">
             <input type="hidden" name="id" value="<?= (int) $editFormValues['id'] ?>">
 
             <div class="form-row">
-                <label for="e_employee_ids">参加した従業員</label>
+                <label for="e_employee_ids">作業した従業員</label>
                 <select id="e_employee_ids" name="employee_ids[]" multiple size="<?= max(2, min(6, count($employees))) ?>">
                     <?php foreach ($employees as $employee): ?>
                         <option value="<?= (int) $employee['id'] ?>" <?= in_array((int) $employee['id'], $editFormValues['employee_ids'], true) ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
@@ -981,18 +1011,30 @@ if (!empty($wsrIds)) {
                 </select>
             </div>
             <div class="form-row">
-                <label for="e_record_date">確認日</label>
+                <label for="e_record_date">作業日</label>
                 <input type="date" id="e_record_date" name="record_date" value="<?= htmlspecialchars($editFormValues['record_date'], ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
             <div class="form-row">
-                <label for="e_record_time">確認時刻</label>
+                <label for="e_record_time">作業時刻</label>
                 <input type="time" id="e_record_time" name="record_time" value="<?= htmlspecialchars($editFormValues['record_time'], ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
-            <div class="form-row">
-                <label for="e_laundry_net_count">洗濯ネット数</label>
-                <input type="number" id="e_laundry_net_count" name="laundry_net_count" min="0" step="1" value="<?= htmlspecialchars($editFormValues['laundry_net_count'], ENT_QUOTES, 'UTF-8') ?>" required>
-            </div>
 
+            <button type="submit">更新する</button>
+            <a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">キャンセル</a>
+        </form>
+    </fieldset>
+</section>
+<?php endif; ?>
+
+<?php if ($editingNetCount !== null): ?>
+<section class="edit-form">
+    <h2>洗濯ネット数の修正（<?= htmlspecialchars($editingNetCount['facility_name'], ENT_QUOTES, 'UTF-8') ?>　<?= htmlspecialchars($editingNetCount['pickup_date'], ENT_QUOTES, 'UTF-8') ?>集荷分）</h2>
+    <fieldset>
+        <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+            <input type="hidden" name="action" value="edit_net_count">
+            <input type="hidden" name="cycle_id" value="<?= (int) $editingNetCount['id'] ?>">
+            <div class="form-row"><label for="nc_count">洗濯ネット数</label><input type="number" id="nc_count" name="laundry_net_count" min="0" step="1" value="<?= (int) $editingNetCount['return_ready_laundry_net_count'] ?>" required></div>
             <button type="submit">更新する</button>
             <a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">キャンセル</a>
         </form>
@@ -1024,52 +1066,60 @@ if (!empty($wsrIds)) {
     <p><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?><?= $showHistory ? '' : '?history=1' ?>"><?= $showHistory ? '未完了一覧に戻る' : '過去の履歴を表示' ?></a></p>
     <p class="notice">この記録簿はチーム共有のため、確認した本人以外でも修正・削除できます。変更内容は履歴に記録されます。</p>
 
-    <?php if (empty($tableCycles)): ?>
+    <?php if (empty($cardCycles)): ?>
         <p class="notice"><?= $showHistory ? '返却完了の記録はまだありません。' : '対応が必要な集荷サイクルはありません。' ?></p>
     <?php else: ?>
-        <table class="cycles">
-            <thead>
-                <tr>
-                    <th>施設名</th>
-                    <th>集荷日</th>
-                    <th>集荷（到着）リネン袋（オレンジ）数</th>
-                    <th>洗濯ネット数</th>
-                    <th>作業完了数</th>
-                    <th>未処理数</th>
-                    <th>返却リネン袋（青）数</th>
-                    <th>返却予定日</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($tableCycles as $cycle): ?>
-                    <?php
-                    $cycleId = (int) $cycle['id'];
-                    $facilityId = (int) $cycle['facility_id'];
-                    $washed = $washedTotalsByFacility[$facilityId] ?? 0;
-                    $netCount = $cycle['return_ready_laundry_net_count'] !== null ? (int) $cycle['return_ready_laundry_net_count'] : 0;
-                    $notCompleted = max(0, $netCount - $washed);
-                    $expectedReturnDate = calc_expected_return_date($cycle['pickup_date'], $cycle['facility_pickup_schedule']);
-                    $participants = $participantsByWsrId[(int) ($cycle['wsr_id'] ?? 0)] ?? [];
-                    ?>
-                    <tr>
-                        <td><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td class="<?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>"><?= $cycle['arrival_bag_count'] !== null ? (int) $cycle['arrival_bag_count'] . '袋' : '-' ?></td>
-                        <td class="<?= $cycle['return_ready_laundry_net_count'] !== null ? 'done' : '' ?>">
+        <div class="cycle-cards">
+            <?php foreach ($cardCycles as $cycle): ?>
+                <?php
+                $cycleId = (int) $cycle['id'];
+                $expectedReturnDate = calc_expected_return_date($cycle['pickup_date'], $cycle['facility_pickup_schedule']);
+                $participants = $participantsByWsrId[(int) ($cycle['wsr_id'] ?? 0)] ?? [];
+                ?>
+                <article class="cycle-card">
+                    <p class="cycle-card-title"><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?>　集荷日 <?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></p>
+                    <p class="cycle-card-info">返却予定日: <?= $expectedReturnDate !== null ? htmlspecialchars($expectedReturnDate, ENT_QUOTES, 'UTF-8') : '-' ?></p>
+
+                    <div class="cycle-card-row">
+                        <span class="label">1. 到着リネン袋数</span>
+                        <span class="value <?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
+                            <?= $cycle['arrival_bag_count'] !== null ? (int) $cycle['arrival_bag_count'] . '袋' : '未到着' ?>
+                        </span>
+                    </div>
+
+                    <div class="cycle-card-row">
+                        <span class="label">2. 洗濯ネット数</span>
+                        <span class="value <?= $cycle['return_ready_laundry_net_count'] !== null ? 'done' : '' ?>">
                             <?php if ($cycle['return_ready_laundry_net_count'] !== null): ?>
                                 <?= (int) $cycle['return_ready_laundry_net_count'] ?>枚 ✓
-                                <?php if ($cycle['wsr_id'] !== null): ?>
-                                    <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?edit=<?= (int) $cycle['wsr_id'] ?>">編集</a></small>
-                                <?php endif; ?>
+                                <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?edit_net=<?= $cycleId ?>">編集</a></small>
                             <?php elseif ($cycle['arrival_bag_count'] === null): ?>
                                 （到着後に入力可）
                             <?php else: ?>
                                 <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
                                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="confirm_headcount">
+                                    <input type="hidden" name="action" value="register_net_count">
                                     <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
                                     <input type="number" name="laundry_net_count" min="0" step="1" required placeholder="枚数">
+                                    <button type="submit">登録</button>
+                                </form>
+                            <?php endif; ?>
+                        </span>
+                    </div>
+
+                    <div class="cycle-card-row">
+                        <span class="label">3. 作業登録</span>
+                        <span class="value <?= $cycle['wsr_id'] !== null ? 'done' : '' ?>">
+                            <?php if ($cycle['wsr_id'] !== null): ?>
+                                済（<?= (int) $cycle['wsr_person_count'] ?>名: <?= !empty($participants) ? htmlspecialchars(implode('・', $participants), ENT_QUOTES, 'UTF-8') : '-' ?>） ✓
+                                <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?edit=<?= (int) $cycle['wsr_id'] ?>">編集</a></small>
+                            <?php elseif ($cycle['arrival_bag_count'] === null): ?>
+                                （到着後に入力可）
+                            <?php else: ?>
+                                <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                    <input type="hidden" name="action" value="complete_work">
+                                    <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
                                     <?php if ($isSharedAccount || $isAdminView): ?>
                                         <select name="employee_ids[]" multiple size="<?= max(2, min(4, count($employees))) ?>" required>
                                             <?php foreach ($employees as $employee): ?>
@@ -1079,13 +1129,15 @@ if (!empty($wsrIds)) {
                                     <?php else: ?>
                                         <input type="hidden" name="employee_ids[]" value="<?= (int) $staff['id'] ?>">
                                     <?php endif; ?>
-                                    <button type="submit">確認して登録</button>
+                                    <button type="submit">完了</button>
                                 </form>
                             <?php endif; ?>
-                        </td>
-                        <td><?= $washed ?>枚</td>
-                        <td><?= $notCompleted ?>枚</td>
-                        <td class="<?= $cycle['return_ready_bag_count'] !== null ? 'done' : '' ?>">
+                        </span>
+                    </div>
+
+                    <div class="cycle-card-row">
+                        <span class="label">4. 返却リネン袋（青）数</span>
+                        <span class="value <?= $cycle['return_ready_bag_count'] !== null ? 'done' : '' ?>">
                             <?php if ($cycle['return_ready_bag_count'] !== null): ?>
                                 <?= (int) $cycle['return_ready_bag_count'] ?>袋 ✓
                                 <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?return_edit=<?= $cycleId ?>">編集</a></small>
@@ -1100,15 +1152,33 @@ if (!empty($wsrIds)) {
                                     <button type="submit">返却登録</button>
                                 </form>
                             <?php endif; ?>
-                        </td>
-                        <td><?= $expectedReturnDate !== null ? htmlspecialchars($expectedReturnDate, ENT_QUOTES, 'UTF-8') : '-' ?></td>
-                        <td>
-                            <?php if ($cycle['wsr_id'] !== null): ?>
-                                <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この確認記録を削除しますか？対象のサイクルは未確認一覧に戻ります。');">
+                        </span>
+                    </div>
+
+                    <details class="cycle-card-detail">
+                        <summary>▼詳細・削除</summary>
+                        <div class="cycle-card-detail-body">
+                            <?php if ($cycle['dispatch_bag_count'] !== null): ?>
+                                <dl>
+                                    <dt>発送</dt>
+                                    <dd><?= (int) $cycle['dispatch_bag_count'] ?>袋・<?= htmlspecialchars((string) $cycle['dispatch_date'], ENT_QUOTES, 'UTF-8') ?></dd>
+                                </dl>
+                            <?php endif; ?>
+
+                            <?php if ($cycle['return_ready_laundry_net_count'] !== null): ?>
+                                <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この洗濯ネット数の記録を削除しますか？');">
                                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="delete_headcount">
+                                    <input type="hidden" name="action" value="delete_net_count">
+                                    <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
+                                    <button type="submit">洗濯ネット数を削除</button>
+                                </form>
+                            <?php endif; ?>
+                            <?php if ($cycle['wsr_id'] !== null): ?>
+                                <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この作業登録を削除しますか？');">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                    <input type="hidden" name="action" value="delete_work">
                                     <input type="hidden" name="id" value="<?= (int) $cycle['wsr_id'] ?>">
-                                    <button type="submit" title="洗濯ネット数の確認記録を削除（参加者: <?= !empty($participants) ? htmlspecialchars(implode('・', $participants), ENT_QUOTES, 'UTF-8') : '-' ?>）">ネット数取消</button>
+                                    <button type="submit">作業登録を削除</button>
                                 </form>
                             <?php endif; ?>
                             <?php if ($cycle['return_ready_bag_count'] !== null): ?>
@@ -1116,14 +1186,14 @@ if (!empty($wsrIds)) {
                                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
                                     <input type="hidden" name="action" value="delete_return_ready">
                                     <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                    <button type="submit">返却袋数取消</button>
+                                    <button type="submit">返却袋数（青）を削除</button>
                                 </form>
                             <?php endif; ?>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
+                        </div>
+                    </details>
+                </article>
+            <?php endforeach; ?>
+        </div>
     <?php endif; ?>
 </section>
 
