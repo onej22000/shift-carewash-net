@@ -5,7 +5,7 @@ require_once __DIR__ . '/../includes/functions.php';
 $admin = require_login('admin');
 $pdo = getPdo();
 
-const FACILITY_EDITABLE_FIELDS = ['name', 'facility_type', 'room_count', 'onboarding_start_date', 'pickup_schedule', 'address', 'phone_number', 'note', 'issued_linen_bag_orange', 'issued_linen_bag_yellow', 'issued_linen_bag_blue', 'issued_laundry_net_count'];
+const FACILITY_EDITABLE_FIELDS = ['name', 'facility_type', 'company_name', 'room_count', 'onboarding_start_date', 'pickup_schedule', 'address', 'phone_number', 'note', 'issued_linen_bag_orange', 'issued_linen_bag_yellow', 'issued_linen_bag_blue', 'issued_laundry_net_count'];
 
 const FACILITY_TYPES = ['介護施設', 'クリーニング所'];
 
@@ -18,6 +18,9 @@ function parse_facility_input(array $post): array
 
     $facilityType = trim((string) ($post['facility_type'] ?? ''));
     $facilityType = in_array($facilityType, FACILITY_TYPES, true) ? $facilityType : null;
+
+    $companyName = trim((string) ($post['company_name'] ?? ''));
+    $companyName = $companyName === '' ? null : $companyName;
 
     $roomCountRaw = trim((string) ($post['room_count'] ?? ''));
     $roomCount = $roomCountRaw === '' ? null : (int) $roomCountRaw;
@@ -56,6 +59,7 @@ function parse_facility_input(array $post): array
     return [
         'name' => $name,
         'facility_type' => $facilityType,
+        'company_name' => $companyName,
         'room_count' => $roomCount,
         'onboarding_start_date' => $onboardingStartDate,
         'pickup_schedule' => $pickupSchedule,
@@ -98,12 +102,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errorMessage = '交付洗濯ネット数は0以上の数値を入力してください。';
             } elseif ($action === 'create') {
                 $stmt = $pdo->prepare(
-                    'INSERT INTO facilities (name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note, issued_linen_bag_orange, issued_linen_bag_yellow, issued_linen_bag_blue, issued_laundry_net_count, is_active)
-                     VALUES (:name, :facility_type, :room_count, :onboarding_start_date, :pickup_schedule, :address, :phone_number, :note, :issued_linen_bag_orange, :issued_linen_bag_yellow, :issued_linen_bag_blue, :issued_laundry_net_count, 1)'
+                    'INSERT INTO facilities (name, facility_type, company_name, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note, issued_linen_bag_orange, issued_linen_bag_yellow, issued_linen_bag_blue, issued_laundry_net_count, is_active)
+                     VALUES (:name, :facility_type, :company_name, :room_count, :onboarding_start_date, :pickup_schedule, :address, :phone_number, :note, :issued_linen_bag_orange, :issued_linen_bag_yellow, :issued_linen_bag_blue, :issued_laundry_net_count, 1)'
                 );
                 $stmt->execute([
                     ':name' => $values['name'],
                     ':facility_type' => $values['facility_type'],
+                    ':company_name' => $values['company_name'],
                     ':room_count' => $values['room_count'],
                     ':onboarding_start_date' => $values['onboarding_start_date'],
                     ':pickup_schedule' => $values['pickup_schedule'],
@@ -130,7 +135,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 $stmt = $pdo->prepare(
                     'UPDATE facilities
-                     SET name = :name, facility_type = :facility_type, room_count = :room_count, onboarding_start_date = :onboarding_start_date,
+                     SET name = :name, facility_type = :facility_type, company_name = :company_name, room_count = :room_count, onboarding_start_date = :onboarding_start_date,
                          pickup_schedule = :pickup_schedule, address = :address, phone_number = :phone_number, note = :note,
                          issued_linen_bag_orange = :issued_linen_bag_orange, issued_linen_bag_yellow = :issued_linen_bag_yellow,
                          issued_linen_bag_blue = :issued_linen_bag_blue,
@@ -140,6 +145,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt->execute([
                     ':name' => $values['name'],
                     ':facility_type' => $values['facility_type'],
+                    ':company_name' => $values['company_name'],
                     ':room_count' => $values['room_count'],
                     ':onboarding_start_date' => $values['onboarding_start_date'],
                     ':pickup_schedule' => $values['pickup_schedule'],
@@ -179,11 +185,21 @@ $flash = pop_flash();
 $csrfToken = csrf_token();
 
 $facilitiesStmt = $pdo->query(
-    'SELECT id, name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
+    'SELECT id, name, facility_type, company_name, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
             issued_linen_bag_orange, issued_linen_bag_yellow, issued_linen_bag_blue, issued_laundry_net_count, is_active
      FROM facilities'
 );
 $allFacilities = $facilitiesStmt->fetchAll();
+
+// 会社名フィルタの選択肢（登録済みの会社名のみ、五十音順）。番号は絞り込み前の全体連番を維持するため、
+// フィルタは表示するかどうかだけに使い、番号付け（$numberedFacilities等の算出）には影響させない。
+$companyNameOptions = array_values(array_unique(array_filter(array_column($allFacilities, 'company_name'))));
+sort($companyNameOptions, SORT_STRING | SORT_FLAG_CASE);
+
+$companyFilter = trim((string) ($_GET['company_filter'] ?? ''));
+if (!in_array($companyFilter, $companyNameOptions, true)) {
+    $companyFilter = '';
+}
 
 // 番号付き（受託開始日あり・クリーニング所以外）／番号なし（受託開始日未登録）／クリーニング所（固定・最下部）に分ける
 $numberedFacilities = [];
@@ -232,6 +248,11 @@ foreach ($cleaningFacilities as $facility) {
 }
 unset($facility);
 
+// 会社名フィルタは表示対象を絞り込むだけで、番号（$facilitiesの並び・display_number）には影響しない。
+$displayFacilities = $companyFilter === ''
+    ? $facilities
+    : array_values(array_filter($facilities, static fn (array $f): bool => $f['company_name'] === $companyFilter));
+
 // ---- 編集対象の読み込み ----
 $editingFacility = null;
 if (isset($_GET['edit'])) {
@@ -249,6 +270,7 @@ $formAction = 'create';
 $formFacilityId = null;
 $formName = '';
 $formFacilityType = '介護施設';
+$formCompanyName = '';
 $formRoomCount = '';
 $formOnboardingStartDate = '';
 $formPickupSchedule = '';
@@ -265,6 +287,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formFacilityId = $formAction === 'update' ? (int) ($_POST['facility_id'] ?? 0) : null;
     $formName = (string) ($_POST['name'] ?? '');
     $formFacilityType = (string) ($_POST['facility_type'] ?? '');
+    $formCompanyName = (string) ($_POST['company_name'] ?? '');
     $formRoomCount = (string) ($_POST['room_count'] ?? '');
     $formOnboardingStartDate = (string) ($_POST['onboarding_start_date'] ?? '');
     $formPickupSchedule = (string) ($_POST['pickup_schedule'] ?? '');
@@ -280,6 +303,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formFacilityId = (int) $editingFacility['id'];
     $formName = $editingFacility['name'];
     $formFacilityType = $editingFacility['facility_type'];
+    $formCompanyName = (string) ($editingFacility['company_name'] ?? '');
     $formRoomCount = $editingFacility['room_count'] !== null ? (string) $editingFacility['room_count'] : '';
     $formOnboardingStartDate = (string) ($editingFacility['onboarding_start_date'] ?? '');
     $formPickupSchedule = (string) ($editingFacility['pickup_schedule'] ?? '');
@@ -362,6 +386,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
             </div>
 
             <div class="form-row">
+                <label for="company_name">会社名</label>
+                <input type="text" id="company_name" name="company_name" maxlength="100" list="company_name_options" value="<?= htmlspecialchars($formCompanyName, ENT_QUOTES, 'UTF-8') ?>">
+                <datalist id="company_name_options">
+                    <?php foreach ($companyNameOptions as $companyNameOption): ?>
+                        <option value="<?= htmlspecialchars($companyNameOption, ENT_QUOTES, 'UTF-8') ?>">
+                    <?php endforeach; ?>
+                </datalist>
+            </div>
+
+            <div class="form-row">
                 <label for="room_count">居室数</label>
                 <input type="number" id="room_count" name="room_count" min="0" step="1" value="<?= htmlspecialchars($formRoomCount, ENT_QUOTES, 'UTF-8') ?>">
             </div>
@@ -428,14 +462,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
 
 <section class="facility-list">
     <h2>施設一覧</h2>
+    <form method="get" action="/admin/facilities.php" class="form-row">
+        <label for="company_filter">会社名で絞り込み</label>
+        <select id="company_filter" name="company_filter" onchange="this.form.submit()">
+            <option value="">すべて</option>
+            <?php foreach ($companyNameOptions as $companyNameOption): ?>
+                <option value="<?= htmlspecialchars($companyNameOption, ENT_QUOTES, 'UTF-8') ?>" <?= $companyFilter === $companyNameOption ? 'selected' : '' ?>>
+                    <?= htmlspecialchars($companyNameOption, ENT_QUOTES, 'UTF-8') ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+        <noscript><button type="submit">絞り込む</button></noscript>
+    </form>
     <?php if (empty($facilities)): ?>
         <p class="notice">施設が登録されていません。上のフォームから追加してください。</p>
+    <?php elseif (empty($displayFacilities)): ?>
+        <p class="notice">絞り込み条件に一致する施設がありません。</p>
     <?php else: ?>
         <table class="facilities">
             <thead>
                 <tr>
                     <th>番号</th>
                     <th>施設名</th>
+                    <th>会社名</th>
                     <th>施設種別</th>
                     <th>居室数</th>
                     <th>受託開始日</th>
@@ -452,10 +501,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
                 </tr>
             </thead>
             <tbody>
-                <?php foreach ($facilities as $facility): ?>
+                <?php foreach ($displayFacilities as $facility): ?>
                     <tr>
                         <td><?= htmlspecialchars($facility['display_number'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><a href="/admin/facility_detail.php?id=<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></a></td>
+                        <td><?= $facility['company_name'] !== null ? htmlspecialchars($facility['company_name'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= htmlspecialchars($facility['facility_type'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= $facility['room_count'] !== null ? (int) $facility['room_count'] . '室' : '-' ?></td>
                         <td><?= $facility['onboarding_start_date'] !== null ? htmlspecialchars($facility['onboarding_start_date'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
