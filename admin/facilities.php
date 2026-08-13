@@ -7,7 +7,10 @@ $pdo = getPdo();
 
 const FACILITY_EDITABLE_FIELDS = ['name', 'facility_type', 'room_count', 'onboarding_start_date', 'pickup_schedule', 'address', 'phone_number', 'note', 'issued_linen_bag_orange', 'issued_linen_bag_yellow', 'issued_linen_bag_blue', 'issued_laundry_net_count'];
 
-const FACILITY_TYPES = ['介護施設', '自社', 'クリーニング所'];
+const FACILITY_TYPES = ['介護施設', 'クリーニング所'];
+
+// クリーニング所は連番から除外し、一覧の最下部に固定表示する。表示順・番号ラベルはこの並びに従う。
+const CLEANING_FACILITY_LABELS = ['フトン巻きのジロー' => 'A', 'フジヤクリーニング' => 'B'];
 
 function parse_facility_input(array $post): array
 {
@@ -178,9 +181,56 @@ $csrfToken = csrf_token();
 $facilitiesStmt = $pdo->query(
     'SELECT id, name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
             issued_linen_bag_orange, issued_linen_bag_yellow, issued_linen_bag_blue, issued_laundry_net_count, is_active
-     FROM facilities ORDER BY is_active DESC, name'
+     FROM facilities'
 );
-$facilities = $facilitiesStmt->fetchAll();
+$allFacilities = $facilitiesStmt->fetchAll();
+
+// 番号付き（受託開始日あり・クリーニング所以外）／番号なし（受託開始日未登録）／クリーニング所（固定・最下部）に分ける
+$numberedFacilities = [];
+$unnumberedFacilities = [];
+$cleaningFacilities = [];
+
+foreach ($allFacilities as $facility) {
+    if ($facility['facility_type'] === 'クリーニング所') {
+        $cleaningFacilities[] = $facility;
+    } elseif ($facility['onboarding_start_date'] !== null) {
+        $numberedFacilities[] = $facility;
+    } else {
+        $unnumberedFacilities[] = $facility;
+    }
+}
+
+usort($numberedFacilities, function (array $a, array $b): int {
+    return $a['onboarding_start_date'] <=> $b['onboarding_start_date'] ?: $a['id'] <=> $b['id'];
+});
+
+usort($unnumberedFacilities, function (array $a, array $b): int {
+    return $a['id'] <=> $b['id'];
+});
+
+usort($cleaningFacilities, function (array $a, array $b): int {
+    $labelA = CLEANING_FACILITY_LABELS[$a['name']] ?? 'Z';
+    $labelB = CLEANING_FACILITY_LABELS[$b['name']] ?? 'Z';
+    return $labelA <=> $labelB ?: $a['id'] <=> $b['id'];
+});
+
+$facilities = [];
+
+$displayNumber = 1;
+foreach ($numberedFacilities as $facility) {
+    $facility['display_number'] = (string) $displayNumber;
+    $facilities[] = $facility;
+    $displayNumber++;
+}
+foreach ($unnumberedFacilities as $facility) {
+    $facility['display_number'] = '-';
+    $facilities[] = $facility;
+}
+foreach ($cleaningFacilities as $facility) {
+    $facility['display_number'] = CLEANING_FACILITY_LABELS[$facility['name']] ?? '-';
+    $facilities[] = $facility;
+}
+unset($facility);
 
 // ---- 編集対象の読み込み ----
 $editingFacility = null;
@@ -384,6 +434,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
         <table class="facilities">
             <thead>
                 <tr>
+                    <th>番号</th>
                     <th>施設名</th>
                     <th>施設種別</th>
                     <th>居室数</th>
@@ -403,6 +454,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
             <tbody>
                 <?php foreach ($facilities as $facility): ?>
                     <tr>
+                        <td><?= htmlspecialchars($facility['display_number'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><a href="/admin/facility_detail.php?id=<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></a></td>
                         <td><?= htmlspecialchars($facility['facility_type'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= $facility['room_count'] !== null ? (int) $facility['room_count'] . '室' : '-' ?></td>
