@@ -470,7 +470,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $wantsArrival = !empty($arrivalCandidates) && $arrivalBagCount !== null;
                     $wantsDispatch = !empty($dispatchCandidates) && $dispatchBagCount !== null;
 
-                    if ($wantsArrival && !in_array($arrivalCycleId, $validArrivalIds, true)) {
+                    // ラジオボタンは自動選択せず、担当者が明示的に選ばないとarrival_cycle_id自体が
+                    // POSTされない。候補が複数あるのに未選択のまま送信された場合は専用メッセージで弾く
+                    // （in_array($arrivalCycleId, ...)による「無効です」判定は、選択後に他ドライバーの
+                    // 更新で候補から外れた場合向けのメッセージのため、未選択とは意味が異なる）。
+                    if ($wantsArrival && count($arrivalCandidates) > 1 && !isset($_POST['arrival_cycle_id'])) {
+                        $errorMessage = '到着対象を選択してください。';
+                    } elseif ($wantsArrival && !in_array($arrivalCycleId, $validArrivalIds, true)) {
                         $errorMessage = '到着対象のサイクルが無効です（既に他の記録で更新された可能性があります）。もう一度やり直してください。';
                     } elseif ($wantsDispatch && !in_array($dispatchCycleId, $validDispatchIds, true)) {
                         $errorMessage = '発送対象のサイクルが無効です（既に他の記録で更新された可能性があります）。もう一度やり直してください。';
@@ -893,14 +899,15 @@ function format_stage_cell($bagCount, $time): string
                         <p class="notice">現在、到着待ちのサイクル（未到着の集荷）はありません。</p>
                     <?php else: ?>
                         <?php if (count($step2['arrival_candidates']) === 1): ?>
-                            <input type="hidden" name="arrival_cycle_id" value="<?= (int) $step2['arrival_candidates'][0]['id'] ?>">
-                            <p class="notice">到着対象: <?= format_cycle_candidate_label($step2['arrival_candidates'][0], $facilityNamesById) ?></p>
+                            <?php $onlyArrivalCandidate = $step2['arrival_candidates'][0]; ?>
+                            <input type="hidden" name="arrival_cycle_id" value="<?= (int) $onlyArrivalCandidate['id'] ?>">
+                            <p class="notice">到着対象: <?= format_cycle_candidate_label($onlyArrivalCandidate, $facilityNamesById) ?></p>
                         <?php else: ?>
                             <p class="notice">到着待ちのサイクルが複数あります。対象を選んでください。</p>
                             <?php foreach ($step2['arrival_candidates'] as $index => $cycle): ?>
                                 <div class="candidate-row">
                                     <label>
-                                        <input type="radio" name="arrival_cycle_id" value="<?= (int) $cycle['id'] ?>" <?= $index === 0 ? 'checked' : '' ?>>
+                                        <input type="radio" name="arrival_cycle_id" value="<?= (int) $cycle['id'] ?>" data-pickup-bag-count="<?= $cycle['pickup_bag_count'] !== null ? (int) $cycle['pickup_bag_count'] : '' ?>">
                                         <?= format_cycle_candidate_label($cycle, $facilityNamesById) ?>
                                     </label>
                                 </div>
@@ -908,7 +915,14 @@ function format_stage_cell($bagCount, $time): string
                         <?php endif; ?>
                         <div class="form-row">
                             <label for="arrival_bag_count">到着リネン袋数</label>
-                            <input type="number" id="arrival_bag_count" name="arrival_bag_count" min="0" step="1">
+                            <?php
+                            // 集荷リネン袋数がそのまま到着数として引き継がれることが多いため初期値にセットするが、
+                            // 現場での増減（一部だけ先に到着等）に対応できるよう編集は妨げない。
+                            $arrivalBagCountDefault = count($step2['arrival_candidates']) === 1
+                                ? ($step2['arrival_candidates'][0]['pickup_bag_count'] ?? '')
+                                : '';
+                            ?>
+                            <input type="number" id="arrival_bag_count" name="arrival_bag_count" min="0" step="1" value="<?= htmlspecialchars((string) $arrivalBagCountDefault, ENT_QUOTES, 'UTF-8') ?>">
                         </div>
                         <div class="form-grid">
                             <div class="form-row">
@@ -1273,5 +1287,15 @@ function format_stage_cell($bagCount, $time): string
     <?php endif; ?>
 </section>
 
+<script>
+document.querySelectorAll('input[name="arrival_cycle_id"][type="radio"]').forEach(function (radio) {
+    radio.addEventListener('change', function () {
+        var bagCountInput = document.getElementById('arrival_bag_count');
+        if (bagCountInput) {
+            bagCountInput.value = this.dataset.pickupBagCount || '';
+        }
+    });
+});
+</script>
 </body>
 </html>

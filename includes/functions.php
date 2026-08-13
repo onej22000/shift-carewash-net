@@ -1893,6 +1893,33 @@ function todays_pickup_schedule_label(DateTime $today): ?string
 }
 
 /**
+ * 集荷日と施設の集荷曜日設定（月・木／火・金／水・土）から、返却予定日（＝次回の同じ訪問日）を返す。
+ * 「返却は次回集荷と同じ訪問で行われることが多い」という業務フロー（build_jiro_checklist_dataの
+ * コメント参照）に基づき、集荷日の翌日以降で直近の該当曜日を探す（集荷日当日は含めない＝
+ * 同日を「次回」とは呼ばないため）。該当する曜日設定が無い場合はnullを返す。
+ */
+function calc_expected_return_date(string $pickupDate, ?string $pickupSchedule): ?string
+{
+    $scheduleWeekdays = [
+        '月・木' => [1, 4],
+        '火・金' => [2, 5],
+        '水・土' => [3, 6],
+    ];
+    if ($pickupSchedule === null || !isset($scheduleWeekdays[$pickupSchedule])) {
+        return null;
+    }
+
+    $date = new DateTime($pickupDate);
+    for ($i = 0; $i < 7; $i++) {
+        $date->modify('+1 day');
+        if (in_array((int) $date->format('N'), $scheduleWeekdays[$pickupSchedule], true)) {
+            return $date->format('Y-m-d');
+        }
+    }
+    return null;
+}
+
+/**
  * 集荷ドライバーの出発前チェックリスト（staff/jiro_dashboard.phpの一覧、staff/dashboard.phpの
  * サマリー表示）用のデータを組み立てる。
  *
@@ -1967,13 +1994,42 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
         $pendingReturnByFacility[(int) $row['facility_id']] = (int) $row['total'];
     }
 
-    $buildRow = static function (array $facility) use ($latestPickupByFacility, $facilityIdsWithHistory, $pendingReturnByFacility): array {
+    // 施設ごとの「直近サイクル」1件（pickup_date, id降順で最新）の処理状況。
+    // 上記の返却待ち合計（複数サイクルの合算、ドライバーの持ち物チェックリスト用）とは別軸の情報で、
+    // 「直近の集荷は今どの段階か」を一目で示すための状態表示（confirmed/in_progress/none）に使う。
+    $latestCycleStmt = $pdo->query(
+        'SELECT cc.facility_id, cc.return_bag_count, cc.return_ready_bag_count,
+                cc.return_ready_laundry_net_count, cc.pickup_bag_count
+         FROM collection_cycles cc
+         WHERE cc.deleted_at IS NULL
+           AND cc.id = (
+               SELECT cc2.id FROM collection_cycles cc2
+               WHERE cc2.facility_id = cc.facility_id AND cc2.deleted_at IS NULL
+               ORDER BY cc2.pickup_date DESC, cc2.id DESC
+               LIMIT 1
+           )'
+    );
+    $latestCycleByFacility = [];
+    foreach ($latestCycleStmt->fetchAll() as $row) {
+        $latestCycleByFacility[(int) $row['facility_id']] = $row;
+    }
+
+    $buildRow = static function (array $facility) use ($latestPickupByFacility, $facilityIdsWithHistory, $pendingReturnByFacility, $latestCycleByFacility): array {
         $facilityId = (int) $facility['id'];
         $lastPickupBagCount = $latestPickupByFacility[$facilityId] ?? null;
         $lastPickupColor = $facility['issued_linen_bag_orange'] !== null
             ? 'オレンジ'
             : ($facility['issued_linen_bag_yellow'] !== null ? '黄' : null);
         $returnReadyTotal = $pendingReturnByFacility[$facilityId] ?? 0;
+
+        $latestCycle = $latestCycleByFacility[$facilityId] ?? null;
+        if ($latestCycle === null) {
+            $latestCycleStatus = 'none';
+        } elseif ($latestCycle['return_bag_count'] !== null) {
+            $latestCycleStatus = 'confirmed';
+        } else {
+            $latestCycleStatus = 'in_progress';
+        }
 
         return [
             'facility_id' => $facilityId,
@@ -1983,6 +2039,10 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
             'last_pickup_color' => $lastPickupColor,
             'return_ready_total' => $returnReadyTotal,
             'row_total' => (int) $lastPickupBagCount + $returnReadyTotal,
+            'latest_cycle_status' => $latestCycleStatus,
+            'latest_cycle_return_bag_count' => $latestCycle['return_bag_count'] ?? null,
+            'latest_cycle_pickup_bag_count' => $latestCycle['pickup_bag_count'] ?? null,
+            'latest_cycle_laundry_net_count' => $latestCycle['return_ready_laundry_net_count'] ?? null,
         ];
     };
 

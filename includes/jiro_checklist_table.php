@@ -3,22 +3,23 @@
  * 集荷ドライバー出発前チェックリストのテーブル部分。$checklist（build_jiro_checklist_data()の
  * 戻り値）をスコープに用意した上でrequireすること。staff/jiro_dashboard.phpから使用する
  * （staff/dashboard.php側は件数・合計のみのサマリー表示のため、この部分テンプレートは使わない）。
+ *
+ * 返却空リネン袋（回収すべき空のオレンジ袋数）と返却リネン袋（青）数（洗濯代行が返却準備完了と
+ * して登録済みの袋数）は別物。前者は施設の直近サイクルのpickup_bag_countをそのまま表示し、
+ * 後者は直近サイクルの返却確定状況（return_bag_count）に応じて数値／「作業前」／空欄を出し分ける。
  */
 $renderChecklistRow = static function (array $row): void {
     ?>
     <tr>
         <td><?= htmlspecialchars($row['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
+        <td><?= $row['latest_cycle_pickup_bag_count'] !== null ? (int) $row['latest_cycle_pickup_bag_count'] . '袋' : '' ?></td>
         <td>
-            <?php if (!$row['has_history']): ?>
-                実績なし
-            <?php elseif ($row['last_pickup_bag_count'] === null): ?>
-                -
-            <?php else: ?>
-                <?= $row['last_pickup_color'] !== null ? htmlspecialchars($row['last_pickup_color'], ENT_QUOTES, 'UTF-8') . ' ' : '' ?><?= (int) $row['last_pickup_bag_count'] ?>袋
+            <?php if ($row['latest_cycle_status'] === 'confirmed'): ?>
+                <?= (int) $row['latest_cycle_return_bag_count'] ?>袋
+            <?php elseif ($row['latest_cycle_status'] === 'in_progress'): ?>
+                作業前
             <?php endif; ?>
         </td>
-        <td><?= $row['return_ready_total'] > 0 ? (int) $row['return_ready_total'] . '袋' : '-' ?></td>
-        <td><?= (int) $row['row_total'] ?>袋</td>
     </tr>
     <?php
 };
@@ -35,9 +36,8 @@ $scheduleDateLabel = $scheduleDateLabel ?? '本日';
             <thead>
                 <tr>
                     <th>施設名</th>
-                    <th>前回集荷袋数</th>
-                    <th>返却リネン袋数（青）</th>
-                    <th>合計</th>
+                    <th>返却空リネン袋</th>
+                    <th>返却リネン袋（青）数</th>
                 </tr>
             </thead>
             <tbody>
@@ -56,9 +56,8 @@ $scheduleDateLabel = $scheduleDateLabel ?? '本日';
             <thead>
                 <tr>
                     <th>施設名</th>
-                    <th>前回集荷袋数</th>
-                    <th>返却リネン袋数（青）</th>
-                    <th>合計</th>
+                    <th>返却空リネン袋</th>
+                    <th>返却リネン袋（青）数</th>
                 </tr>
             </thead>
             <tbody>
