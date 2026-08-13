@@ -54,8 +54,8 @@ foreach ($stageStmt->fetchAll() as $row) {
     ];
 }
 
-// リネン袋数・洗濯ネット数は、返却前の集荷サイクルだけを集計する。
-$bagDateCondition = str_replace('record_date', 'pickup_date', $dateCondition);
+// リネン袋数・洗濯ネット数は、返却前かつ「本日集荷」の集荷サイクルだけを集計する。
+$bagDateCondition = 'AND pickup_date = CURDATE()';
 $bagStmt = $pdo->prepare(
     "SELECT facility_id, SUM(COALESCE(arrival_bag_count, pickup_bag_count, 0)) AS total
      FROM collection_cycles
