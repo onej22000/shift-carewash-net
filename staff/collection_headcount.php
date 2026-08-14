@@ -965,7 +965,7 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
                     </td>
                 </tr>
                 <tr>
-                    <th>作業登録（人数）</th>
+                    <th>洗濯完了ネット数</th>
                     <td class="<?= $cycle['wsr_id'] !== null ? 'done' : '' ?>">
                         <?php if ($cycle['wsr_id'] !== null): ?>
                             <?= (int) $cycle['wsr_person_count'] ?>
