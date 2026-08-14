@@ -14,6 +14,9 @@ if (!in_array($employeeId, $validEmployeeIds, true)) {
     $employeeId = 0;
 }
 
+// 説明バナー（黄色い注記文）は2026-08-14に非表示化。テキスト自体は残し、表示のみこのフラグで条件分岐する。
+$showTravelTimeNotice = false;
+
 $yearMonth = (string) ($_GET['month'] ?? (new DateTime())->format('Y-m'));
 if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $yearMonth)) {
     $yearMonth = (new DateTime())->format('Y-m');
@@ -63,7 +66,9 @@ ksort($totalsByEmployee);
     <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん（管理者） | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a></nav>
 </header>
 
+<?php if ($showTravelTimeNotice): ?>
 <p class="notice">集荷・配送記録簿（集荷/クリーニング所到着/発送/返却）の日時・担当者・場所から、同一従業員が同一日に異なる施設で連続して記録した工程間の移動時間を算出しています。途中で休憩を取っていた場合はその時間を差し引いています。日付・時刻・担当者・場所のいずれかが未記録の工程は算出対象外です。</p>
+<?php endif; ?>
 
 <form method="get" action="/admin/travel_time.php" class="filter-row">
     <label for="employee_id">従業員:</label>
