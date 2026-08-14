@@ -33,7 +33,6 @@ $checklist = build_jiro_checklist_data($pdo, $viewDate);
         table.cycles th { background: #f5f5f5; }
         .jiro-checklist-totals table.cycles th { width: 90px; }
         table.cycles td.row-issued-orange { background: #ffe0b2; }
-        table.cycles td.row-issued-yellow { background: #fff9c4; }
         table.cycles td.row-return { background: #0b5ed7; color: #fff; }
         .links a { display: inline-block; margin-right: 12px; }
         .shared-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }

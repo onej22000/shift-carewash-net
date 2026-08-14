@@ -2027,19 +2027,17 @@ function group_open_cycles_into_facility_panels(PDO $pdo, array $cycles): array
 }
 
 /**
- * 集荷サイクルで交付されたリネン袋の色（オレンジ／黄）に応じたCSSクラス名を返す
- * （staff/collection_headcount.php・staff/collection_entry.phpのカード表内、到着行の
- * 背景色に使う）。施設は1色運用のため通常はどちらか一方にしか値が入らないが、
- * 念のため両方に値がある場合はオレンジを優先する（build_jiro_checklist_data()の
- * 同種の判定と同じ優先順位）。両方NULLの場合は空文字（デフォルト背景のまま）。
+ * 集荷サイクルで追加交付があった（issued_bag_orange/issued_bag_yellowのいずれかに
+ * 値がある）場合にCSSクラス名を返す（staff/collection_headcount.php・
+ * staff/collection_entry.phpのカード表内、到着行の背景色に使う）。
+ * 2026-08-14、オレンジ・黄の色分けを廃止し一律オレンジ表示に統一（仕様変更）。
+ * 両方NULLの場合（＝このサイクルでは追加交付が発生していない、通常運用で多いケース）は
+ * 空文字（デフォルト背景のまま）。
  */
 function issued_bag_color_row_class(array $cycle): string
 {
-    if ($cycle['issued_bag_orange'] !== null) {
+    if ($cycle['issued_bag_orange'] !== null || $cycle['issued_bag_yellow'] !== null) {
         return 'row-issued-orange';
-    }
-    if ($cycle['issued_bag_yellow'] !== null) {
-        return 'row-issued-yellow';
     }
     return '';
 }

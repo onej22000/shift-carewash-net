@@ -72,8 +72,15 @@ $scheduleDateLabel = $scheduleDateLabel ?? '本日';
     <?php
     $otherPickupTotal = 0;
     $otherReturnReadyTotal = 0;
+    $otherPickupHasIssuedColor = false;
     foreach ($checklist['other_rows'] as $row) {
         $otherPickupTotal += (int) ($row['latest_cycle_pickup_bag_count'] ?? 0);
+        if (issued_bag_color_row_class([
+            'issued_bag_orange' => $row['latest_cycle_issued_bag_orange'],
+            'issued_bag_yellow' => $row['latest_cycle_issued_bag_yellow'],
+        ]) !== '') {
+            $otherPickupHasIssuedColor = true;
+        }
         if ($row['latest_cycle_status'] === 'confirmed') {
             $otherReturnReadyTotal += (int) $row['latest_cycle_return_ready_bag_count'];
         }
@@ -98,9 +105,9 @@ $scheduleDateLabel = $scheduleDateLabel ?? '本日';
             <tfoot>
                 <tr>
                     <th>合計</th>
-                    <td><?= $otherPickupTotal ?>袋</td>
-                    <td><?= $otherReturnReadyTotal ?>袋</td>
-                    <td><?= $otherReturnReadyTotal ?>袋</td>
+                    <td class="<?= $otherPickupHasIssuedColor ? 'row-issued-orange' : '' ?>"><?= $otherPickupTotal ?>袋</td>
+                    <td class="row-return"><?= $otherReturnReadyTotal ?>袋</td>
+                    <td class="row-return"><?= $otherReturnReadyTotal ?>袋</td>
                 </tr>
             </tfoot>
         </table>

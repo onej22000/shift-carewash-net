@@ -1092,7 +1092,6 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
         table.cycle-table td form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
         table.cycle-table td input[type="number"] { width: 80px; }
         table.cycle-table tr.row-issued-orange th, table.cycle-table tr.row-issued-orange td { background: #ffe0b2; }
-        table.cycle-table tr.row-issued-yellow th, table.cycle-table tr.row-issued-yellow td { background: #fff9c4; }
         table.cycle-table tr.row-return th, table.cycle-table tr.row-return td { background: #0b5ed7; color: #fff; }
         table.cycle-table tr.row-return td.done { color: #fff; }
         .cycle-card-detail { margin-top: 8px; }
