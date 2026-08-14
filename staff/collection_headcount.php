@@ -46,6 +46,8 @@ function find_open_cycles(PDO $pdo): array
 {
     $sql = "SELECT cc.*, f.name AS facility_name, f.pickup_schedule AS facility_pickup_schedule,
                    f.onboarding_start_date AS facility_onboarding_start_date,
+                   f.issued_linen_bag_orange AS facility_issued_bag_orange,
+                   f.issued_linen_bag_yellow AS facility_issued_bag_yellow,
                    wsr.id AS wsr_id, wsr.person_count AS wsr_person_count,
                    wsr.record_date AS wsr_record_date, wsr.record_time AS wsr_record_time,
                    wsr.completed_at AS wsr_completed_at,
@@ -68,6 +70,8 @@ function find_open_cycles(PDO $pdo): array
 function find_returned_cycles(PDO $pdo): array
 {
     $sql = 'SELECT cc.*, f.name AS facility_name, f.pickup_schedule AS facility_pickup_schedule,
+                   f.issued_linen_bag_orange AS facility_issued_bag_orange,
+                   f.issued_linen_bag_yellow AS facility_issued_bag_yellow,
                    wsr.id AS wsr_id, wsr.person_count AS wsr_person_count,
                    wsr.record_date AS wsr_record_date, wsr.record_time AS wsr_record_time,
                    wsr.completed_at AS wsr_completed_at,
@@ -906,7 +910,10 @@ $facilityPanelGroups = $showHistory ? [] : group_open_cycles_into_facility_panel
 $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) use ($collectionHeadcountPath, $csrfToken, $isSharedAccount, $isAdminView, $employees, $staff): void {
     $cycleId = (int) $cycle['id'];
     $expectedReturnDate = calc_expected_return_date($cycle['pickup_date'], $cycle['facility_pickup_schedule']);
-    $issuedBagRowClass = issued_bag_color_row_class($cycle);
+    $issuedBagRowClass = issued_bag_color_row_class([
+        'issued_bag_orange' => $cycle['facility_issued_bag_orange'],
+        'issued_bag_yellow' => $cycle['facility_issued_bag_yellow'],
+    ]);
 
     // カード見出し右の編集メニューには、既に登録済み（＝編集先が実在する）項目だけを出す。
     $editMenuItems = [];

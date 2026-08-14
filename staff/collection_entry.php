@@ -822,7 +822,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($
 // 集荷曜日グループ化・受託開始日フィルタに使う。
 $openCyclesStmt = $pdo->query(
     "SELECT cc.*, f.name AS facility_name, f.pickup_schedule AS facility_pickup_schedule,
-            f.onboarding_start_date AS facility_onboarding_start_date
+            f.onboarding_start_date AS facility_onboarding_start_date,
+            f.issued_linen_bag_orange AS facility_issued_bag_orange,
+            f.issued_linen_bag_yellow AS facility_issued_bag_yellow
      FROM collection_cycles cc
      INNER JOIN facilities f ON f.id = cc.facility_id
      WHERE cc.return_bag_count IS NULL AND cc.pickup_bag_count IS NOT NULL AND cc.deleted_at IS NULL
@@ -836,7 +838,10 @@ $openCycleFacilityPanelGroups = group_open_cycles_into_facility_panels($pdo, $op
 // ---- カード1件分の描画（施設パネル表示から呼ぶ） ----
 $renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
     $cycleId = (int) $cycle['id'];
-    $issuedBagRowClass = issued_bag_color_row_class($cycle);
+    $issuedBagRowClass = issued_bag_color_row_class([
+        'issued_bag_orange' => $cycle['facility_issued_bag_orange'],
+        'issued_bag_yellow' => $cycle['facility_issued_bag_yellow'],
+    ]);
     ?>
     <article class="cycle-card">
         <div class="cycle-card-header">

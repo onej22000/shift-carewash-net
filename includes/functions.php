@@ -2027,12 +2027,21 @@ function group_open_cycles_into_facility_panels(PDO $pdo, array $cycles): array
 }
 
 /**
- * 集荷サイクルで追加交付があった（issued_bag_orange/issued_bag_yellowのいずれかに
- * 値がある）場合にCSSクラス名を返す（staff/collection_headcount.php・
- * staff/collection_entry.phpのカード表内、到着行の背景色に使う）。
+ * 施設が普段使っているリネン袋の色（issued_bag_orange/issued_bag_yellowの
+ * いずれかに値がある）場合にCSSクラス名を返す（staff/collection_headcount.php・
+ * staff/collection_entry.phpのカード表・staff/jiro_dashboard.phpの到着/返却空
+ * リネン袋の背景色に使う）。
+ *
+ * 2026-08-14（初版）: 誤ってcollection_cycles.issued_bag_orange/yellow
+ * （サイクル単位の追加交付、通常は空欄）を判定に使っていたため、追加交付が
+ * 発生しないサイクルでは常に無色になってしまっていた（例：アルク平野長吉）。
+ * 2026-08-14（修正）: facilities.issued_linen_bag_orange/issued_linen_bag_yellow
+ * （施設マスタの「その施設が普段使っている袋の色」、施設ごとに固定・1色運用）に
+ * 差し替え。呼び出し側はfacilities由来の値をissued_bag_orange/issued_bag_yellow
+ * というキー名で渡すこと（このキー名自体はテーブル名に依存しない汎用の引数名）。
+ *
  * 2026-08-14、オレンジ・黄の色分けを廃止し一律オレンジ表示に統一（仕様変更）。
- * 両方NULLの場合（＝このサイクルでは追加交付が発生していない、通常運用で多いケース）は
- * 空文字（デフォルト背景のまま）。
+ * 両方NULLの場合は空文字（デフォルト背景のまま）。
  */
 function issued_bag_color_row_class(array $cycle): string
 {
@@ -2122,8 +2131,7 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
     // 「直近の集荷は今どの段階か」を一目で示すための状態表示（confirmed/in_progress/none）に使う。
     $latestCycleStmt = $pdo->query(
         'SELECT cc.facility_id, cc.return_bag_count, cc.return_ready_bag_count,
-                cc.return_ready_laundry_net_count, cc.pickup_bag_count,
-                cc.issued_bag_orange, cc.issued_bag_yellow
+                cc.return_ready_laundry_net_count, cc.pickup_bag_count
          FROM collection_cycles cc
          WHERE cc.deleted_at IS NULL
            AND cc.id = (
@@ -2172,8 +2180,8 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
             'latest_cycle_return_ready_bag_count' => $latestCycle['return_ready_bag_count'] ?? null,
             'latest_cycle_pickup_bag_count' => $latestCycle['pickup_bag_count'] ?? null,
             'latest_cycle_laundry_net_count' => $latestCycle['return_ready_laundry_net_count'] ?? null,
-            'latest_cycle_issued_bag_orange' => $latestCycle['issued_bag_orange'] ?? null,
-            'latest_cycle_issued_bag_yellow' => $latestCycle['issued_bag_yellow'] ?? null,
+            'facility_issued_bag_orange' => $facility['issued_linen_bag_orange'],
+            'facility_issued_bag_yellow' => $facility['issued_linen_bag_yellow'],
         ];
     };
 

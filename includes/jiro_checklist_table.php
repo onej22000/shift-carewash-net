@@ -17,8 +17,8 @@
  */
 $renderChecklistRow = static function (array $row): void {
     $issuedBagCellClass = issued_bag_color_row_class([
-        'issued_bag_orange' => $row['latest_cycle_issued_bag_orange'],
-        'issued_bag_yellow' => $row['latest_cycle_issued_bag_yellow'],
+        'issued_bag_orange' => $row['facility_issued_bag_orange'],
+        'issued_bag_yellow' => $row['facility_issued_bag_yellow'],
     ]);
     ?>
     <tr>
@@ -76,8 +76,8 @@ $scheduleDateLabel = $scheduleDateLabel ?? '本日';
     foreach ($checklist['other_rows'] as $row) {
         $otherPickupTotal += (int) ($row['latest_cycle_pickup_bag_count'] ?? 0);
         if (issued_bag_color_row_class([
-            'issued_bag_orange' => $row['latest_cycle_issued_bag_orange'],
-            'issued_bag_yellow' => $row['latest_cycle_issued_bag_yellow'],
+            'issued_bag_orange' => $row['facility_issued_bag_orange'],
+            'issued_bag_yellow' => $row['facility_issued_bag_yellow'],
         ]) !== '') {
             $otherPickupHasIssuedColor = true;
         }
