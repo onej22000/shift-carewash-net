@@ -1920,6 +1920,46 @@ function calc_expected_return_date(string $pickupDate, ?string $pickupSchedule):
 }
 
 /**
+ * 受託開始日と集荷曜日設定から、最初の集荷予定日（受託開始日当日を含む）を返す。
+ * calc_expected_return_date()は「pickupDateより後で直近の該当曜日」（当日は含めない＝
+ * 次回集荷用の計算）だが、受託開始日の前日を渡して呼べば、そのまま「受託開始日を含めて
+ * 最初に該当する日」になる（同じ曜日計算ロジックを重複させず流用する）。
+ */
+function calc_first_pickup_date(string $onboardingStartDate, ?string $pickupSchedule): ?string
+{
+    $dayBeforeOnboarding = (new DateTime($onboardingStartDate))->modify('-1 day')->format('Y-m-d');
+    return calc_expected_return_date($dayBeforeOnboarding, $pickupSchedule);
+}
+
+/**
+ * 施設番号（受託開始日順の連番）をfacility_id => 番号で返す。admin/facilities.phpの
+ * display_number算出ロジック（クリーニング所は対象外、受託開始日ありのみ番号付け、
+ * 受託開始日→id順）と同じ基準。受託開始日未登録の施設は返り値に含まれない
+ * （呼び出し側で「番号なし＝末尾」として扱うこと）。
+ */
+function get_facility_pickup_numbers(PDO $pdo): array
+{
+    $stmt = $pdo->query(
+        "SELECT id, onboarding_start_date FROM facilities WHERE facility_type != 'クリーニング所'"
+    );
+    $numbered = array_values(array_filter(
+        $stmt->fetchAll(),
+        static fn (array $f): bool => $f['onboarding_start_date'] !== null
+    ));
+    usort($numbered, static function (array $a, array $b): int {
+        return $a['onboarding_start_date'] <=> $b['onboarding_start_date'] ?: $a['id'] <=> $b['id'];
+    });
+
+    $numbers = [];
+    $n = 1;
+    foreach ($numbered as $facility) {
+        $numbers[(int) $facility['id']] = $n;
+        $n++;
+    }
+    return $numbers;
+}
+
+/**
  * 集荷ドライバーの出発前チェックリスト（staff/jiro_dashboard.phpの一覧、staff/dashboard.phpの
  * サマリー表示）用のデータを組み立てる。
  *

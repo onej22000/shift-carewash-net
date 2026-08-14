@@ -35,10 +35,17 @@ const RETURN_READY_LOG_FIELDS = ['return_ready_bag_count', 'return_ready_at', 'r
  * pickup_bag_count IS NULLのサイクル（空袋・空ネットの納品のみで実集荷が発生していないもの）は
  * 到着（arrival）自体が発生せず返却袋数も確定しないため無期限にこの一覧へ残ってしまう。
  * データとしては削除しない（在庫トランザクション等が紐づく）が、この一覧の表示対象からは除外する。
+ *
+ * f.onboarding_start_dateは施設パネル一覧（2026-08-14）の「受託開始日から最初の集荷曜日が
+ * まだ来ていない施設を除外する」判定に使う。f.facility_type != 'クリーニング所'は、
+ * collection_cycles.facility_idは常に集荷元（介護施設・自社）でクリーニング所にはならない
+ * という既存の不変条件を、念のため明示的に保証するもの（施設パネル一覧がクリーニング所を
+ * 対象外とする要件のため）。
  */
 function find_open_cycles(PDO $pdo): array
 {
-    $sql = 'SELECT cc.*, f.name AS facility_name, f.pickup_schedule AS facility_pickup_schedule,
+    $sql = "SELECT cc.*, f.name AS facility_name, f.pickup_schedule AS facility_pickup_schedule,
+                   f.onboarding_start_date AS facility_onboarding_start_date,
                    wsr.id AS wsr_id, wsr.person_count AS wsr_person_count,
                    wsr.record_date AS wsr_record_date, wsr.record_time AS wsr_record_time,
                    wsr.completed_at AS wsr_completed_at,
@@ -49,8 +56,9 @@ function find_open_cycles(PDO $pdo): array
                    ON wsr.collection_cycle_id = cc.id AND wsr.deleted_at IS NULL
             LEFT JOIN employees rre ON rre.id = cc.return_ready_employee_id
             WHERE cc.return_bag_count IS NULL AND cc.pickup_bag_count IS NOT NULL AND cc.deleted_at IS NULL
+                  AND f.facility_type != 'クリーニング所'
             ORDER BY cc.pickup_date ASC, cc.id ASC
-            LIMIT 200';
+            LIMIT 200";
     return $pdo->query($sql)->fetchAll();
 }
 
@@ -902,6 +910,183 @@ if (!empty($wsrIds)) {
         $participantsByWsrId[(int) $row['work_stage_record_id']][] = $row['name'];
     }
 }
+
+// ---- 施設パネル用グループ化（返却未完了一覧のみ。履歴表示では使わない） ----
+// 集荷曜日（月・木／火・金／水・土）ごとにグループ化し、各グループ内は施設番号
+// （get_facility_pickup_numbers()、admin/facilities.phpのdisplay_numberと同じ基準）順。
+// 受託開始日から最初の集荷曜日がまだ来ていない施設は、パネル自体を表示しない
+// （通常、未返却サイクルが存在する時点でその施設は既に集荷済みのはずだが、
+// 受託開始日が後から修正された場合等の防御的なチェックとして残す）。
+$facilityPanelGroups = [];
+if (!$showHistory) {
+    $facilityNumbers = get_facility_pickup_numbers($pdo);
+    $todayStrForPanels = (new DateTime('today'))->format('Y-m-d');
+
+    $cyclesByFacility = [];
+    foreach ($cardCycles as $cycle) {
+        $cyclesByFacility[(int) $cycle['facility_id']][] = $cycle;
+    }
+
+    $scheduleGroupLabels = ['月・木' => '月・木コース', '火・金' => '火・金コース', '水・土' => '水・土コース'];
+    $groupedByScheduleLabel = [];
+    foreach ($cyclesByFacility as $facilityId => $cyclesForFacility) {
+        $firstCycle = $cyclesForFacility[0];
+        $schedule = $firstCycle['facility_pickup_schedule'];
+        $onboardingStartDate = $firstCycle['facility_onboarding_start_date'];
+
+        $firstPickupDate = $onboardingStartDate !== null
+            ? calc_first_pickup_date($onboardingStartDate, $schedule)
+            : null;
+        if ($firstPickupDate !== null && $firstPickupDate > $todayStrForPanels) {
+            continue;
+        }
+
+        $groupLabel = $scheduleGroupLabels[$schedule] ?? '集荷曜日未設定';
+        $groupedByScheduleLabel[$groupLabel][] = [
+            'facility_id' => $facilityId,
+            'facility_name' => $firstCycle['facility_name'],
+            'display_number' => $facilityNumbers[$facilityId] ?? null,
+            'cycles' => $cyclesForFacility,
+        ];
+    }
+
+    foreach (['月・木コース', '火・金コース', '水・土コース', '集荷曜日未設定'] as $label) {
+        if (!isset($groupedByScheduleLabel[$label])) {
+            continue;
+        }
+        usort($groupedByScheduleLabel[$label], static function (array $a, array $b): int {
+            $numA = $a['display_number'] ?? PHP_INT_MAX;
+            $numB = $b['display_number'] ?? PHP_INT_MAX;
+            return $numA <=> $numB ?: $a['facility_id'] <=> $b['facility_id'];
+        });
+        $facilityPanelGroups[$label] = $groupedByScheduleLabel[$label];
+    }
+}
+
+// ---- カード1件分の描画（履歴表示・施設パネル表示の両方から呼ぶ、二重管理を避けるため共通化） ----
+$renderCycleCard = function (array $cycle) use ($collectionHeadcountPath, $csrfToken, $participantsByWsrId, $isSharedAccount, $isAdminView, $employees, $staff): void {
+    $cycleId = (int) $cycle['id'];
+    $expectedReturnDate = calc_expected_return_date($cycle['pickup_date'], $cycle['facility_pickup_schedule']);
+    $participants = $participantsByWsrId[(int) ($cycle['wsr_id'] ?? 0)] ?? [];
+    ?>
+    <article class="cycle-card">
+        <p class="cycle-card-title"><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?>　集荷日 <?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></p>
+        <p class="cycle-card-info">返却予定日: <?= $expectedReturnDate !== null ? htmlspecialchars($expectedReturnDate, ENT_QUOTES, 'UTF-8') : '-' ?></p>
+
+        <div class="cycle-card-row">
+            <span class="label">1. 到着リネン袋数</span>
+            <span class="value <?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
+                <?= $cycle['arrival_bag_count'] !== null ? (int) $cycle['arrival_bag_count'] . '袋' : '未到着' ?>
+            </span>
+        </div>
+
+        <div class="cycle-card-row">
+            <span class="label">2. 洗濯ネット数</span>
+            <span class="value <?= $cycle['return_ready_laundry_net_count'] !== null ? 'done' : '' ?>">
+                <?php if ($cycle['return_ready_laundry_net_count'] !== null): ?>
+                    <?= (int) $cycle['return_ready_laundry_net_count'] ?>枚 ✓
+                    <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?edit_net=<?= $cycleId ?>">編集</a></small>
+                <?php elseif ($cycle['arrival_bag_count'] === null): ?>
+                    （到着後に入力可）
+                <?php else: ?>
+                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="action" value="register_net_count">
+                        <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
+                        <input type="number" name="laundry_net_count" min="0" step="1" required placeholder="枚数">
+                        <button type="submit">登録</button>
+                    </form>
+                <?php endif; ?>
+            </span>
+        </div>
+
+        <div class="cycle-card-row">
+            <span class="label">3. 作業登録</span>
+            <span class="value <?= $cycle['wsr_id'] !== null ? 'done' : '' ?>">
+                <?php if ($cycle['wsr_id'] !== null): ?>
+                    済（<?= (int) $cycle['wsr_person_count'] ?>名: <?= !empty($participants) ? htmlspecialchars(implode('・', $participants), ENT_QUOTES, 'UTF-8') : '-' ?>） ✓
+                    <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?edit=<?= (int) $cycle['wsr_id'] ?>">編集</a></small>
+                <?php elseif ($cycle['arrival_bag_count'] === null): ?>
+                    （到着後に入力可）
+                <?php else: ?>
+                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="action" value="complete_work">
+                        <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
+                        <?php if ($isSharedAccount || $isAdminView): ?>
+                            <select name="employee_ids[]" multiple size="<?= max(2, min(4, count($employees))) ?>" required>
+                                <?php foreach ($employees as $employee): ?>
+                                    <option value="<?= (int) $employee['id'] ?>" <?= !$isSharedAccount && (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        <?php else: ?>
+                            <input type="hidden" name="employee_ids[]" value="<?= (int) $staff['id'] ?>">
+                        <?php endif; ?>
+                        <button type="submit">完了</button>
+                    </form>
+                <?php endif; ?>
+            </span>
+        </div>
+
+        <div class="cycle-card-row">
+            <span class="label">4. 返却リネン袋（青）数</span>
+            <span class="value <?= $cycle['return_ready_bag_count'] !== null ? 'done' : '' ?>">
+                <?php if ($cycle['return_ready_bag_count'] !== null): ?>
+                    <?= (int) $cycle['return_ready_bag_count'] ?>袋 ✓
+                    <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?return_edit=<?= $cycleId ?>">編集</a></small>
+                <?php elseif ($cycle['arrival_bag_count'] === null): ?>
+                    （到着後に入力可）
+                <?php else: ?>
+                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="action" value="register_return">
+                        <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
+                        <input type="number" name="return_bag_count" min="0" step="1" required placeholder="袋数">
+                        <button type="submit">返却登録</button>
+                    </form>
+                <?php endif; ?>
+            </span>
+        </div>
+
+        <details class="cycle-card-detail">
+            <summary>▼詳細・削除</summary>
+            <div class="cycle-card-detail-body">
+                <?php if ($cycle['dispatch_bag_count'] !== null): ?>
+                    <dl>
+                        <dt>発送</dt>
+                        <dd><?= (int) $cycle['dispatch_bag_count'] ?>袋・<?= htmlspecialchars((string) $cycle['dispatch_date'], ENT_QUOTES, 'UTF-8') ?></dd>
+                    </dl>
+                <?php endif; ?>
+
+                <?php if ($cycle['return_ready_laundry_net_count'] !== null): ?>
+                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この洗濯ネット数の記録を削除しますか？');">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="action" value="delete_net_count">
+                        <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
+                        <button type="submit">洗濯ネット数を削除</button>
+                    </form>
+                <?php endif; ?>
+                <?php if ($cycle['wsr_id'] !== null): ?>
+                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この作業登録を削除しますか？');">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="action" value="delete_work">
+                        <input type="hidden" name="id" value="<?= (int) $cycle['wsr_id'] ?>">
+                        <button type="submit">作業登録を削除</button>
+                    </form>
+                <?php endif; ?>
+                <?php if ($cycle['return_ready_bag_count'] !== null): ?>
+                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この返却袋数（青）の記録を削除しますか？');">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="action" value="delete_return_ready">
+                        <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
+                        <button type="submit">返却袋数（青）を削除</button>
+                    </form>
+                <?php endif; ?>
+            </div>
+        </details>
+    </article>
+    <?php
+};
 ?>
 <!DOCTYPE html>
 <html lang="ja">
@@ -942,6 +1127,22 @@ if (!empty($wsrIds)) {
         .cycle-card-detail-body dl { margin: 0; }
         .cycle-card-detail-body dt { color: #666; margin-top: 6px; }
         .cycle-card-detail-body dd { margin: 0 0 2px; }
+
+        /* 施設パネル一覧（集荷曜日ごとにグループ化、nav-cardと同じ見た目のパネルをタップで展開） */
+        .facility-group { margin-bottom: 20px; }
+        .facility-group-title { font-size: 1.05em; margin: 0 0 10px; color: #333; }
+        .facility-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+        .facility-panel { border: 1px solid #aeb6c1; border-radius: 14px; background: linear-gradient(145deg, #f4f6f8 0%, #d6dce3 100%); box-shadow: 0 7px 16px rgba(30, 55, 90, 0.13), 0 2px 4px rgba(30, 55, 90, 0.08), inset 0 1px 0 rgba(255,255,255,0.95); overflow: hidden; }
+        .facility-panel[open] { grid-column: 1 / -1; }
+        .facility-panel-summary { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 18px; cursor: pointer; list-style: none; font-weight: bold; color: #0b5ed7; }
+        .facility-panel-summary::-webkit-details-marker { display: none; }
+        .facility-panel-summary::after { content: '▼'; font-size: 0.7em; color: #0b5ed7; }
+        .facility-panel[open] .facility-panel-summary::after { content: '▲'; }
+        .facility-panel-count { font-weight: normal; color: #555; font-size: 0.9em; }
+        .facility-panel-cycles { padding: 0 14px 14px; }
+        @media (max-width: 900px) {
+            .facility-panels { grid-template-columns: minmax(0, 1fr); }
+        }
     </style>
 </head>
 <body>
@@ -1066,134 +1267,41 @@ if (!empty($wsrIds)) {
     <p><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?><?= $showHistory ? '' : '?history=1' ?>"><?= $showHistory ? '未完了一覧に戻る' : '過去の履歴を表示' ?></a></p>
     <p class="notice">この記録簿はチーム共有のため、確認した本人以外でも修正・削除できます。変更内容は履歴に記録されます。</p>
 
-    <?php if (empty($cardCycles)): ?>
-        <p class="notice"><?= $showHistory ? '返却完了の記録はまだありません。' : '対応が必要な集荷サイクルはありません。' ?></p>
+    <?php if ($showHistory): ?>
+        <?php if (empty($cardCycles)): ?>
+            <p class="notice">返却完了の記録はまだありません。</p>
+        <?php else: ?>
+            <div class="cycle-cards">
+                <?php foreach ($cardCycles as $cycle): ?>
+                    <?php $renderCycleCard($cycle); ?>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
     <?php else: ?>
-        <div class="cycle-cards">
-            <?php foreach ($cardCycles as $cycle): ?>
-                <?php
-                $cycleId = (int) $cycle['id'];
-                $expectedReturnDate = calc_expected_return_date($cycle['pickup_date'], $cycle['facility_pickup_schedule']);
-                $participants = $participantsByWsrId[(int) ($cycle['wsr_id'] ?? 0)] ?? [];
-                ?>
-                <article class="cycle-card">
-                    <p class="cycle-card-title"><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?>　集荷日 <?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></p>
-                    <p class="cycle-card-info">返却予定日: <?= $expectedReturnDate !== null ? htmlspecialchars($expectedReturnDate, ENT_QUOTES, 'UTF-8') : '-' ?></p>
-
-                    <div class="cycle-card-row">
-                        <span class="label">1. 到着リネン袋数</span>
-                        <span class="value <?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
-                            <?= $cycle['arrival_bag_count'] !== null ? (int) $cycle['arrival_bag_count'] . '袋' : '未到着' ?>
-                        </span>
+        <?php if (empty($facilityPanelGroups)): ?>
+            <p class="notice">対応が必要な集荷サイクルはありません。</p>
+        <?php else: ?>
+            <?php foreach ($facilityPanelGroups as $groupLabel => $facilityPanels): ?>
+                <div class="facility-group">
+                    <h3 class="facility-group-title"><?= htmlspecialchars($groupLabel, ENT_QUOTES, 'UTF-8') ?></h3>
+                    <div class="facility-panels">
+                        <?php foreach ($facilityPanels as $panel): ?>
+                            <details class="facility-panel">
+                                <summary class="facility-panel-summary">
+                                    <span class="facility-panel-name"><?= htmlspecialchars($panel['facility_name'], ENT_QUOTES, 'UTF-8') ?></span>
+                                    <span class="facility-panel-count"><?= count($panel['cycles']) ?>件</span>
+                                </summary>
+                                <div class="cycle-cards facility-panel-cycles">
+                                    <?php foreach ($panel['cycles'] as $cycle): ?>
+                                        <?php $renderCycleCard($cycle); ?>
+                                    <?php endforeach; ?>
+                                </div>
+                            </details>
+                        <?php endforeach; ?>
                     </div>
-
-                    <div class="cycle-card-row">
-                        <span class="label">2. 洗濯ネット数</span>
-                        <span class="value <?= $cycle['return_ready_laundry_net_count'] !== null ? 'done' : '' ?>">
-                            <?php if ($cycle['return_ready_laundry_net_count'] !== null): ?>
-                                <?= (int) $cycle['return_ready_laundry_net_count'] ?>枚 ✓
-                                <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?edit_net=<?= $cycleId ?>">編集</a></small>
-                            <?php elseif ($cycle['arrival_bag_count'] === null): ?>
-                                （到着後に入力可）
-                            <?php else: ?>
-                                <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="register_net_count">
-                                    <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                    <input type="number" name="laundry_net_count" min="0" step="1" required placeholder="枚数">
-                                    <button type="submit">登録</button>
-                                </form>
-                            <?php endif; ?>
-                        </span>
-                    </div>
-
-                    <div class="cycle-card-row">
-                        <span class="label">3. 作業登録</span>
-                        <span class="value <?= $cycle['wsr_id'] !== null ? 'done' : '' ?>">
-                            <?php if ($cycle['wsr_id'] !== null): ?>
-                                済（<?= (int) $cycle['wsr_person_count'] ?>名: <?= !empty($participants) ? htmlspecialchars(implode('・', $participants), ENT_QUOTES, 'UTF-8') : '-' ?>） ✓
-                                <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?edit=<?= (int) $cycle['wsr_id'] ?>">編集</a></small>
-                            <?php elseif ($cycle['arrival_bag_count'] === null): ?>
-                                （到着後に入力可）
-                            <?php else: ?>
-                                <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="complete_work">
-                                    <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                    <?php if ($isSharedAccount || $isAdminView): ?>
-                                        <select name="employee_ids[]" multiple size="<?= max(2, min(4, count($employees))) ?>" required>
-                                            <?php foreach ($employees as $employee): ?>
-                                                <option value="<?= (int) $employee['id'] ?>" <?= !$isSharedAccount && (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
-                                            <?php endforeach; ?>
-                                        </select>
-                                    <?php else: ?>
-                                        <input type="hidden" name="employee_ids[]" value="<?= (int) $staff['id'] ?>">
-                                    <?php endif; ?>
-                                    <button type="submit">完了</button>
-                                </form>
-                            <?php endif; ?>
-                        </span>
-                    </div>
-
-                    <div class="cycle-card-row">
-                        <span class="label">4. 返却リネン袋（青）数</span>
-                        <span class="value <?= $cycle['return_ready_bag_count'] !== null ? 'done' : '' ?>">
-                            <?php if ($cycle['return_ready_bag_count'] !== null): ?>
-                                <?= (int) $cycle['return_ready_bag_count'] ?>袋 ✓
-                                <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?return_edit=<?= $cycleId ?>">編集</a></small>
-                            <?php elseif ($cycle['arrival_bag_count'] === null): ?>
-                                （到着後に入力可）
-                            <?php else: ?>
-                                <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="register_return">
-                                    <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                    <input type="number" name="return_bag_count" min="0" step="1" required placeholder="袋数">
-                                    <button type="submit">返却登録</button>
-                                </form>
-                            <?php endif; ?>
-                        </span>
-                    </div>
-
-                    <details class="cycle-card-detail">
-                        <summary>▼詳細・削除</summary>
-                        <div class="cycle-card-detail-body">
-                            <?php if ($cycle['dispatch_bag_count'] !== null): ?>
-                                <dl>
-                                    <dt>発送</dt>
-                                    <dd><?= (int) $cycle['dispatch_bag_count'] ?>袋・<?= htmlspecialchars((string) $cycle['dispatch_date'], ENT_QUOTES, 'UTF-8') ?></dd>
-                                </dl>
-                            <?php endif; ?>
-
-                            <?php if ($cycle['return_ready_laundry_net_count'] !== null): ?>
-                                <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この洗濯ネット数の記録を削除しますか？');">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="delete_net_count">
-                                    <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                    <button type="submit">洗濯ネット数を削除</button>
-                                </form>
-                            <?php endif; ?>
-                            <?php if ($cycle['wsr_id'] !== null): ?>
-                                <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この作業登録を削除しますか？');">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="delete_work">
-                                    <input type="hidden" name="id" value="<?= (int) $cycle['wsr_id'] ?>">
-                                    <button type="submit">作業登録を削除</button>
-                                </form>
-                            <?php endif; ?>
-                            <?php if ($cycle['return_ready_bag_count'] !== null): ?>
-                                <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この返却袋数（青）の記録を削除しますか？');">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="delete_return_ready">
-                                    <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                    <button type="submit">返却袋数（青）を削除</button>
-                                </form>
-                            <?php endif; ?>
-                        </div>
-                    </details>
-                </article>
+                </div>
             <?php endforeach; ?>
-        </div>
+        <?php endif; ?>
     <?php endif; ?>
 </section>
 
