@@ -836,6 +836,7 @@ $openCycleFacilityPanelGroups = group_open_cycles_into_facility_panels($pdo, $op
 // ---- カード1件分の描画（施設パネル表示から呼ぶ） ----
 $renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
     $cycleId = (int) $cycle['id'];
+    $issuedBagRowClass = issued_bag_color_row_class($cycle);
     ?>
     <article class="cycle-card">
         <div class="cycle-card-header">
@@ -852,7 +853,7 @@ $renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
                     <th>集荷<?php if ($cycle['pickup_time'] !== null): ?>・<?= htmlspecialchars(substr($cycle['pickup_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
                     <td class="done"><?= (int) $cycle['pickup_bag_count'] ?></td>
                 </tr>
-                <tr>
+                <tr class="<?= $issuedBagRowClass ?>">
                     <th>到着<?php if ($cycle['arrival_bag_count'] !== null && $cycle['arrival_time'] !== null): ?>・<?= htmlspecialchars(substr($cycle['arrival_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
                     <td class="<?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
                         <?php if ($cycle['arrival_bag_count'] !== null): ?>
@@ -874,8 +875,8 @@ $renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
                         <?php endif; ?>
                     </td>
                 </tr>
-                <tr>
-                    <th>返却</th>
+                <tr class="row-return">
+                    <th>返却リネン袋数</th>
                     <td>
                         <?php if ($cycle['dispatch_bag_count'] === null): ?>
                             未返却
@@ -967,6 +968,10 @@ function format_stage_cell($bagCount, $time): string
         table.cycle-table td.done { color: #1e7e34; font-weight: bold; }
         table.cycle-table td form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
         table.cycle-table td input[type="number"] { width: 70px; }
+        table.cycle-table tr.row-issued-orange th, table.cycle-table tr.row-issued-orange td { background: #ffe0b2; }
+        table.cycle-table tr.row-issued-yellow th, table.cycle-table tr.row-issued-yellow td { background: #fff9c4; }
+        table.cycle-table tr.row-return th, table.cycle-table tr.row-return td { background: #0b5ed7; color: #fff; }
+        table.cycle-table tr.row-return td.done { color: #fff; }
 
         /* 施設パネル一覧（集荷曜日ごとにグループ化、nav-cardと同じ見た目。デフォルト展開で
            幅に応じたレスポンシブグリッド表示）。カード内の文字量が減ったため、auto-fitの

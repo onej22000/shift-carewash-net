@@ -906,6 +906,7 @@ $facilityPanelGroups = $showHistory ? [] : group_open_cycles_into_facility_panel
 $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) use ($collectionHeadcountPath, $csrfToken, $isSharedAccount, $isAdminView, $employees, $staff): void {
     $cycleId = (int) $cycle['id'];
     $expectedReturnDate = calc_expected_return_date($cycle['pickup_date'], $cycle['facility_pickup_schedule']);
+    $issuedBagRowClass = issued_bag_color_row_class($cycle);
 
     // カード見出し右の編集メニューには、既に登録済み（＝編集先が実在する）項目だけを出す。
     $editMenuItems = [];
@@ -940,7 +941,7 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
                 <tr><th>項目</th><th>数値</th></tr>
             </thead>
             <tbody>
-                <tr>
+                <tr class="<?= $issuedBagRowClass ?>">
                     <th>到着リネン袋数</th>
                     <td class="<?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
                         <?= $cycle['arrival_bag_count'] !== null ? (int) $cycle['arrival_bag_count'] : '未到着' ?>
@@ -990,8 +991,8 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
                         <?php endif; ?>
                     </td>
                 </tr>
-                <tr>
-                    <th>返却リネン袋（青）数</th>
+                <tr class="row-return">
+                    <th>返却リネン袋数</th>
                     <td class="<?= $cycle['return_ready_bag_count'] !== null ? 'done' : '' ?>">
                         <?php if ($cycle['return_ready_bag_count'] !== null): ?>
                             <?= (int) $cycle['return_ready_bag_count'] ?>
@@ -1090,6 +1091,10 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
         table.cycle-table td.done { color: #1e7e34; font-weight: bold; }
         table.cycle-table td form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
         table.cycle-table td input[type="number"] { width: 80px; }
+        table.cycle-table tr.row-issued-orange th, table.cycle-table tr.row-issued-orange td { background: #ffe0b2; }
+        table.cycle-table tr.row-issued-yellow th, table.cycle-table tr.row-issued-yellow td { background: #fff9c4; }
+        table.cycle-table tr.row-return th, table.cycle-table tr.row-return td { background: #0b5ed7; color: #fff; }
+        table.cycle-table tr.row-return td.done { color: #fff; }
         .cycle-card-detail { margin-top: 8px; }
         .cycle-card-detail summary { cursor: pointer; color: #0b5ed7; }
         .cycle-card-detail-body { padding: 8px 4px 0; font-size: 0.9em; }
