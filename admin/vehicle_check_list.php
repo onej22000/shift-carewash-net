@@ -60,7 +60,7 @@ function vc_parse_checklist_input(array $post, array $items): array
     return [$results, $alcoholValue, $overallStatus, false];
 }
 
-$employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' ORDER BY name");
+$employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' AND is_shared_account = 0 ORDER BY name");
 $employees = $employeesStmt->fetchAll();
 $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
 

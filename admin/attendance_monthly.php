@@ -70,7 +70,7 @@ $nextMonth = (clone $monthStart)->modify('+1 month')->format('Y-m');
 $pageUrl = '/admin/attendance_monthly.php?month=' . $yearMonth;
 
 // ---- 従業員一覧（過去の実績を追える監査用画面のため、状態を問わず全staffを対象とする） ----
-$employeesStmt = $pdo->query("SELECT id, name, status FROM employees WHERE role = 'staff' ORDER BY name");
+$employeesStmt = $pdo->query("SELECT id, name, status FROM employees WHERE role = 'staff' AND is_shared_account = 0 ORDER BY name");
 $employees = $employeesStmt->fetchAll();
 $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
 

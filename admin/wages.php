@@ -173,7 +173,7 @@ if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $yearMonth)) {
 $prevMonth = (DateTime::createFromFormat('Y-m-d', $yearMonth . '-01'))->modify('-1 month')->format('Y-m');
 $nextMonth = (DateTime::createFromFormat('Y-m-d', $yearMonth . '-01'))->modify('+1 month')->format('Y-m');
 
-$employeesStmt = $pdo->query("SELECT id, name, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount, status FROM employees WHERE role = 'staff' ORDER BY name");
+$employeesStmt = $pdo->query("SELECT id, name, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount, status FROM employees WHERE role = 'staff' AND is_shared_account = 0 ORDER BY name");
 $employees = $employeesStmt->fetchAll();
 
 $confirmedStmt = $pdo->prepare(

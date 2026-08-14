@@ -31,7 +31,7 @@ if ($period !== 'all') {
     $stageParams = [':start' => $start, ':end' => $end];
 }
 
-$employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' ORDER BY name");
+$employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' AND is_shared_account = 0 ORDER BY name");
 $employees = $employeesStmt->fetchAll();
 
 // ---- 効率算出用：従業員別・日次の実働時間(分) ----
