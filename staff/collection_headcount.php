@@ -29,7 +29,7 @@ const RETURN_READY_LOG_FIELDS = ['return_ready_bag_count', 'return_ready_at', 'r
 /**
  * 返却未完了（return_bag_count IS NULL）の集荷サイクルを、施設（集荷曜日設定含む）・作業実績
  * （work_stage_records、集荷サイクルに紐づく確認記録）・返却準備完了の担当者名まで含めて
- * 1クエリで取得する。1サイクル＝1行のメインテーブルで、集荷→到着→洗濯ネット数→返却袋数（青）
+ * 1クエリで取得する。1サイクル＝1行のメインテーブルで、集荷→到着→洗濯ネット数→返却リネン袋数
  * の流れをすべてこの1行から組み立てる。
  *
  * pickup_bag_count IS NULLのサイクル（空袋・空ネットの納品のみで実集荷が発生していないもの）は
@@ -320,7 +320,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         } elseif ($action === 'register_net_count') {
-            // 「2. 洗濯ネット数」の登録。作業登録（complete_work）・返却袋数（青）とは完全に独立しており、
+            // 「2. 洗濯ネット数」の登録。作業登録（complete_work）・返却リネン袋数とは完全に独立しており、
             // 従業員選択は行わない（誰が数えたかではなく、到着した数量そのものの確認のため）。
             $cycleId = (int) ($_POST['cycle_id'] ?? 0);
             $laundryNetCount = parse_laundry_net_count($_POST['laundry_net_count'] ?? '');
@@ -364,7 +364,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         } elseif ($action === 'edit_net_count' || $action === 'delete_net_count') {
-            // 「洗濯ネット数」の修正・取消。作業登録（work_stage_records）・返却袋数（青）は
+            // 「洗濯ネット数」の修正・取消。作業登録（work_stage_records）・返却リネン袋数は
             // 別ドメインのため、このアクションでは一切触れない。
             $cycleId = (int) ($_POST['cycle_id'] ?? 0);
             $cycleStmt = $pdo->prepare(
@@ -413,7 +413,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         } elseif ($action === 'complete_work') {
             // 「3. 作業登録」（新設）。このサイクル（collection_cycle_id）に直接紐付けて
-            // work_stage_recordsに記録する。洗濯ネット数・返却袋数（青）とは独立しており、
+            // work_stage_recordsに記録する。洗濯ネット数・返却リネン袋数とは独立しており、
             // どちらが先でも後でも登録できる。
             $cycleId = (int) ($_POST['cycle_id'] ?? 0);
             $employeeIds = [];
@@ -529,7 +529,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($targetCycle === null || $targetCycle['arrival_bag_count'] === null) {
                 $errorMessage = '対象のサイクルが無効です（未到着、または既に返却済みの可能性があります）。もう一度やり直してください。';
             } elseif ($targetCycle['return_ready_bag_count'] !== null) {
-                $errorMessage = '対象のサイクルは既に返却袋数（青）を登録済みです。もう一度やり直してください。';
+                $errorMessage = '対象のサイクルは既に返却リネン袋数を登録済みです。もう一度やり直してください。';
             } elseif ($returnReadyBagCount === null) {
                 $errorMessage = '返却リネン袋数は0以上の整数を入力してください。';
             } elseif ($returnReadyDate === false || $returnReadyTime === false || $returnReadyEmployeeId === false) {
@@ -575,7 +575,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ]);
 
                     $pdo->commit();
-                    set_flash('success', htmlspecialchars($targetCycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $targetCycle['pickup_date'] . '集荷分）の返却袋数（青、' . $returnReadyBagCount . '袋）を登録しました。');
+                    set_flash('success', htmlspecialchars($targetCycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $targetCycle['pickup_date'] . '集荷分）の返却リネン袋数（' . $returnReadyBagCount . '袋）を登録しました。');
                     header('Location: ' . $collectionHeadcountPath);
                     exit;
                 } catch (\Throwable $e) {
@@ -584,7 +584,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         } elseif ($action === 'edit_return_ready' || $action === 'delete_return_ready') {
-            // 「返却袋数（青）」の修正・取消。洗濯ネット数（return_ready_laundry_net_count）は
+            // 「返却リネン袋数」の修正・取消。洗濯ネット数（return_ready_laundry_net_count）は
             // 別ドメインのため、このアクションでは一切触れない。
             $cycleId = (int) ($_POST['cycle_id'] ?? 0);
             $cycleStmt = $pdo->prepare(
@@ -656,7 +656,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ':id' => $cycleId,
                         ]);
                         $pdo->commit();
-                        set_flash('success', $action === 'delete_return_ready' ? '返却袋数（青）の記録を削除しました。' : '返却袋数（青）の記録を更新しました。');
+                        set_flash('success', $action === 'delete_return_ready' ? '返却リネン袋数の記録を削除しました。' : '返却リネン袋数の記録を更新しました。');
                         header('Location: ' . $collectionHeadcountPath);
                         exit;
                     } catch (\Throwable $e) {
@@ -917,7 +917,7 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
         $editMenuItems[] = ['label' => '作業登録', 'url' => $collectionHeadcountPath . '?edit=' . (int) $cycle['wsr_id']];
     }
     if ($cycle['return_ready_bag_count'] !== null) {
-        $editMenuItems[] = ['label' => '返却袋数（青）', 'url' => $collectionHeadcountPath . '?return_edit=' . $cycleId];
+        $editMenuItems[] = ['label' => '返却リネン袋数', 'url' => $collectionHeadcountPath . '?return_edit=' . $cycleId];
     }
     ?>
     <article class="cycle-card">
@@ -1039,11 +1039,11 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
                     </form>
                 <?php endif; ?>
                 <?php if ($cycle['return_ready_bag_count'] !== null): ?>
-                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この返却袋数（青）の記録を削除しますか？');">
+                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="inline-form" onsubmit="return confirm('この返却リネン袋数の記録を削除しますか？');">
                         <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
                         <input type="hidden" name="action" value="delete_return_ready">
                         <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                        <button type="submit">返却袋数（青）を削除</button>
+                        <button type="submit">返却リネン袋数を削除</button>
                     </form>
                 <?php endif; ?>
             </div>
@@ -1221,13 +1221,13 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
 
 <?php if ($editingReturnReady !== null): ?>
 <section class="edit-form">
-    <h2>返却袋数（青）の修正（<?= htmlspecialchars($editingReturnReady['facility_name'], ENT_QUOTES, 'UTF-8') ?>　<?= htmlspecialchars($editingReturnReady['pickup_date'], ENT_QUOTES, 'UTF-8') ?>集荷分）</h2>
+    <h2>返却リネン袋数の修正（<?= htmlspecialchars($editingReturnReady['facility_name'], ENT_QUOTES, 'UTF-8') ?>　<?= htmlspecialchars($editingReturnReady['pickup_date'], ENT_QUOTES, 'UTF-8') ?>集荷分）</h2>
     <fieldset>
         <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
             <input type="hidden" name="action" value="edit_return_ready">
             <input type="hidden" name="cycle_id" value="<?= (int) $editingReturnReady['id'] ?>">
-            <div class="form-row"><label for="rr_bag_count">返却袋数（青）</label><input type="number" id="rr_bag_count" name="return_bag_count" min="0" step="1" value="<?= (int) $editingReturnReady['return_ready_bag_count'] ?>" required></div>
+            <div class="form-row"><label for="rr_bag_count">返却リネン袋数</label><input type="number" id="rr_bag_count" name="return_bag_count" min="0" step="1" value="<?= (int) $editingReturnReady['return_ready_bag_count'] ?>" required></div>
             <div class="form-row"><label for="rr_date">登録日</label><input type="date" id="rr_date" name="return_date" value="<?= htmlspecialchars(substr($editingReturnReady['return_ready_at'], 0, 10), ENT_QUOTES, 'UTF-8') ?>" required></div>
             <div class="form-row"><label for="rr_time">登録時間</label><input type="time" id="rr_time" name="return_time" value="<?= htmlspecialchars(substr($editingReturnReady['return_ready_at'], 11, 5), ENT_QUOTES, 'UTF-8') ?>" required></div>
             <div class="form-row"><label for="rr_employee">担当者</label><select id="rr_employee" name="return_employee_id"><?php foreach ($employees as $employee): ?><option value="<?= (int) $employee['id'] ?>" <?= (int) $employee['id'] === (int) $editingReturnReady['return_ready_employee_id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option><?php endforeach; ?></select></div>
