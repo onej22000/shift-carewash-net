@@ -1818,7 +1818,10 @@ function fetch_board_posts(PDO $pdo, string $boardType): array
 
 /**
  * work_stage_record_employees.started_at の算出: その従業員自身の直前のセッション
- * （work_stage_records.completed_at が今回より前で最も新しいもの）のcompleted_atを使う。
+ * （同じ日のwork_stage_records.completed_atが今回より前で最も新しいもの）のcompleted_atを使う。
+ * 日をまたぐ作業は業務上想定されていないため、直前セッションは同日に限定する（そうしないと、
+ * 何日も前の完了時刻をそのまま開始時刻として拾ってしまい、実働時間が数日分に膨れ上がるバグになる。
+ * 2026-08-14、実データで発覚・修正）。
  * その日まだ何も参加していなければ、当日の洗濯代行区分での出勤時刻（attendance.clock_in_at）を使う。
  * どちらも無い場合は今回のcompleted_at自体を使う（開始時刻不明のまま作業時間0にするよりまし）。
  */
@@ -1832,6 +1835,7 @@ function resolve_work_stage_started_at(PDO $pdo, int $employeeId, DateTime $comp
          INNER JOIN work_stage_records wsr ON wsr.id = wse.work_stage_record_id
          WHERE wse.employee_id = :employee_id
            AND wsr.completed_at IS NOT NULL AND wsr.completed_at < :completed_at
+           AND DATE(wsr.completed_at) = DATE(:completed_at)
            AND wsr.deleted_at IS NULL
          ORDER BY wsr.completed_at DESC
          LIMIT 1'
