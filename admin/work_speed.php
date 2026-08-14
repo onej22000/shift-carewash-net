@@ -2,7 +2,15 @@
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/functions.php';
 
-$admin = require_login('admin');
+// staff/work_speed.php（薄いラッパー、admin/collection_headcount.phpと同じ方式）経由で
+// 読み込まれた場合、「日別サイクル明細」をstaff権限でも閲覧できるようにする。表示される内容は
+// 常にこのファイルと同一（従業員別・施設別サイクル明細は下記$showEmployeeSpeedTable/
+// $showCycleDetailTableで元々非表示、staff向けにはさらに念のため!$isStaffViewでも二重にガードする）。
+$isStaffView = defined('WORK_SPEED_STAFF_VIEW') && WORK_SPEED_STAFF_VIEW;
+$admin = require_login($isStaffView ? 'staff' : 'admin');
+$dashboardPath = $isStaffView ? '/staff/dashboard.php' : '/admin/dashboard.php';
+$logoutPath = $isStaffView ? '/staff/logout.php' : '/admin/logout.php';
+$pageTitle = $isStaffView ? '日別サイクル明細' : '作業速度分析';
 $pdo = getPdo();
 
 $periodLabels = [
@@ -223,7 +231,10 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>作業速度分析 | 管理者</title>
+    <?php if ($isStaffView): ?>
+    <link rel="stylesheet" href="/staff/mobile-ui.css?v=20260807-1">
+    <?php endif; ?>
+    <title><?= htmlspecialchars($pageTitle, ENT_QUOTES, 'UTF-8') ?> | <?= $isStaffView ? 'シフト管理' : '管理者' ?></title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
@@ -243,8 +254,8 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
 </head>
 <body>
 <header>
-    <h1>作業速度分析</h1>
-    <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん（管理者） | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a></nav>
+    <h1><?= htmlspecialchars($pageTitle, ENT_QUOTES, 'UTF-8') ?></h1>
+    <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん<?= $isStaffView ? '' : '（管理者）' ?> | <a href="<?= htmlspecialchars($dashboardPath, ENT_QUOTES, 'UTF-8') ?>">ダッシュボード</a> | <a href="<?= htmlspecialchars($logoutPath, ENT_QUOTES, 'UTF-8') ?>">ログアウト</a></nav>
 </header>
 
 <div class="period-nav">
@@ -253,7 +264,7 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
     <?php endforeach; ?>
 </div>
 
-<?php if ($showEmployeeSpeedTable): ?>
+<?php if ($showEmployeeSpeedTable && !$isStaffView): ?>
 <section class="by-employee">
     <h2>従業員別 1人あたり平均所要時間</h2>
     <p class="notice">参加者ごとの開始時刻（本人の直前セッションの完了時刻、無ければ当日の洗濯代行出勤時刻）〜作業完了時刻の実測に基づく集計です。
@@ -289,7 +300,7 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
 </section>
 <?php endif; ?>
 
-<?php if ($showCycleDetailTable): ?>
+<?php if ($showCycleDetailTable && !$isStaffView): ?>
 <section class="by-cycle">
     <h2>施設別・日別 サイクル明細</h2>
     <p class="notice">

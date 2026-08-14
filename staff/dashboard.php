@@ -515,7 +515,7 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
     <h2>その他機能</h2>
     <div class="nav-cards">
         <a class="nav-card" href="/staff/team_shifts.php"><h3>シフト表</h3></a>
-        <a class="nav-card laundry-related" href="/staff/team_stats.php"><h3>作業実績比較</h3></a>
+        <a class="nav-card laundry-related" href="/staff/work_speed.php"><h3>日別サイクル明細</h3></a>
         <a class="nav-card" href="/staff/facilities.php"><h3>施設一覧</h3></a>
         <a class="nav-card pickup-related" href="/staff/collection_records.php"><h3>集荷記録簿</h3></a>
         <a class="nav-card pickup-related" href="/staff/travel_time.php"><h3>移動時間</h3></a>
