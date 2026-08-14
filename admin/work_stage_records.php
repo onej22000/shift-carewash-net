@@ -82,16 +82,6 @@ function parse_work_stage_record_input(array $post, array $validEmployeeIds, arr
     ];
 }
 
-$periodLabels = [
-    'all' => '全期間',
-    '7' => '直近7日',
-    '30' => '直近30日',
-];
-$period = (string) ($_GET['period'] ?? '30');
-if (!isset($periodLabels[$period])) {
-    $period = '30';
-}
-
 $employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' AND is_shared_account = 0 ORDER BY name");
 $employees = $employeesStmt->fetchAll();
 $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
@@ -108,53 +98,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         $action = (string) ($_POST['action'] ?? '');
 
-        if ($action === 'delete') {
-            $recordId = (int) ($_POST['id'] ?? 0);
-            $recordStmt = $pdo->prepare('SELECT * FROM work_stage_records WHERE id = :id AND deleted_at IS NULL');
-            $recordStmt->execute([':id' => $recordId]);
-            $record = $recordStmt->fetch();
-
-            if ($record === false) {
-                $errorMessage = '対象の作業実績が見つかりません。';
-            } else {
-                try {
-                    $pdo->beginTransaction();
-
-                    $logStmt = $pdo->prepare(
-                        'INSERT INTO work_stage_record_edit_logs (work_stage_record_id, edited_by, action, field_name, old_value, new_value)
-                         VALUES (:record_id, :edited_by, :action, :field_name, :old_value, NULL)'
-                    );
-                    foreach (WSR_EDITABLE_FIELDS as $field) {
-                        if ($record[$field] === null) {
-                            continue;
-                        }
-                        $logStmt->execute([
-                            ':record_id' => $recordId,
-                            ':edited_by' => $admin['id'],
-                            ':action' => 'delete',
-                            ':field_name' => $field,
-                            ':old_value' => $record[$field],
-                        ]);
-                    }
-
-                    $deleteStmt = $pdo->prepare('UPDATE work_stage_records SET deleted_at = :deleted_at WHERE id = :id');
-                    $deleteStmt->execute([':deleted_at' => (new DateTime())->format('Y-m-d H:i:s'), ':id' => $recordId]);
-
-                    $pdo->commit();
-                    set_flash('success', '作業実績を削除しました。');
-                    header('Location: /admin/work_stage_records.php?period=' . urlencode($period));
-                    exit;
-                } catch (\Throwable $e) {
-                    $pdo->rollBack();
-                    $errorMessage = '削除に失敗しました。もう一度お試しください。';
-                }
-            }
-        } elseif ($action === 'create' || $action === 'update') {
+        if ($action === 'create') {
             [$values, $parseErrors] = parse_work_stage_record_input($_POST, $validEmployeeIds, $validFacilityIds);
 
             if (!empty($parseErrors)) {
                 $errorMessage = implode(' ', $parseErrors);
-            } elseif ($action === 'create') {
+            } else {
                 try {
                     $pdo->beginTransaction();
 
@@ -201,105 +150,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     $pdo->commit();
                     set_flash('success', '作業実績を登録しました。');
-                    header('Location: /admin/work_stage_records.php?period=' . urlencode($period));
+                    header('Location: /admin/work_stage_records.php');
                     exit;
                 } catch (\Throwable $e) {
                     $pdo->rollBack();
                     $errorMessage = '登録に失敗しました。もう一度お試しください。';
-                }
-            } else {
-                $recordId = (int) ($_POST['id'] ?? 0);
-                $recordStmt = $pdo->prepare('SELECT * FROM work_stage_records WHERE id = :id AND deleted_at IS NULL');
-                $recordStmt->execute([':id' => $recordId]);
-                $record = $recordStmt->fetch();
-
-                if ($record === false) {
-                    $errorMessage = '対象の作業実績が見つかりません。';
-                } else {
-                    $oldEmployeeIdsStmt = $pdo->prepare('SELECT employee_id FROM work_stage_record_employees WHERE work_stage_record_id = :id ORDER BY employee_id');
-                    $oldEmployeeIdsStmt->execute([':id' => $recordId]);
-                    $oldEmployeeIds = array_map('intval', array_column($oldEmployeeIdsStmt->fetchAll(), 'employee_id'));
-                    $newEmployeeIds = $values['employee_ids'];
-                    sort($oldEmployeeIds);
-                    $sortedNewEmployeeIds = $newEmployeeIds;
-                    sort($sortedNewEmployeeIds);
-                    $employeeIdsChanged = $oldEmployeeIds !== $sortedNewEmployeeIds;
-                    // completed_atが変わった場合、既存参加者のstarted_atは古いcompleted_atを起点に
-                    // 計算済みのため、参加者に変更が無くても開始時刻を計算し直す必要がある。
-                    $completedAtChanged = (string) $values['completed_at'] !== (string) $record['completed_at'];
-                    $employeesNeedRecompute = $employeeIdsChanged || $completedAtChanged;
-
-                    try {
-                        $pdo->beginTransaction();
-
-                        $logStmt = $pdo->prepare(
-                            'INSERT INTO work_stage_record_edit_logs (work_stage_record_id, edited_by, action, field_name, old_value, new_value)
-                             VALUES (:record_id, :edited_by, :action, :field_name, :old_value, :new_value)'
-                        );
-                        $changedCount = 0;
-                        foreach (WSR_EDITABLE_FIELDS as $field) {
-                            if ((string) $values[$field] === (string) $record[$field]) {
-                                continue;
-                            }
-                            $logStmt->execute([
-                                ':record_id' => $recordId,
-                                ':edited_by' => $admin['id'],
-                                ':action' => 'update',
-                                ':field_name' => $field,
-                                ':old_value' => $record[$field],
-                                ':new_value' => $values[$field],
-                            ]);
-                            $changedCount++;
-                        }
-                        if ($employeeIdsChanged) {
-                            $logStmt->execute([
-                                ':record_id' => $recordId,
-                                ':edited_by' => $admin['id'],
-                                ':action' => 'update',
-                                ':field_name' => 'employee_ids',
-                                ':old_value' => implode(',', $oldEmployeeIds),
-                                ':new_value' => implode(',', $newEmployeeIds),
-                            ]);
-                            $changedCount++;
-                        }
-
-                        $updateStmt = $pdo->prepare(
-                            'UPDATE work_stage_records
-                             SET employee_id = :employee_id, category = :category, facility_id = :facility_id,
-                                 stage = :stage, person_count = :person_count, record_date = :record_date, record_time = :record_time,
-                                 completed_at = :completed_at
-                             WHERE id = :id'
-                        );
-                        $updateStmt->execute([
-                            ':employee_id' => $values['employee_id'],
-                            ':category' => $values['category'],
-                            ':facility_id' => $values['facility_id'],
-                            ':stage' => $values['stage'],
-                            ':person_count' => $values['person_count'],
-                            ':record_date' => $values['record_date'],
-                            ':record_time' => $values['record_time'],
-                            ':completed_at' => $values['completed_at'],
-                            ':id' => $recordId,
-                        ]);
-
-                        if ($employeesNeedRecompute) {
-                            $deleteEmployeesStmt = $pdo->prepare('DELETE FROM work_stage_record_employees WHERE work_stage_record_id = :id');
-                            $deleteEmployeesStmt->execute([':id' => $recordId]);
-                            if (!empty($newEmployeeIds)) {
-                                record_work_stage_employees($pdo, $recordId, $newEmployeeIds, new DateTime($values['completed_at']));
-                            }
-                        }
-
-                        $pdo->commit();
-                        set_flash('success', $changedCount > 0
-                            ? '作業実績を修正しました（' . $changedCount . '件のフィールドを変更）。'
-                            : '変更点はありませんでした。');
-                        header('Location: /admin/work_stage_records.php?period=' . urlencode($period));
-                        exit;
-                    } catch (\Throwable $e) {
-                        $pdo->rollBack();
-                        $errorMessage = '保存に失敗しました。もう一度お試しください。';
-                    }
                 }
             }
         }
@@ -309,20 +164,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $flash = pop_flash();
 $csrfToken = csrf_token();
 
-// ---- 編集対象の読み込み ----
-$editingRecord = null;
-if (isset($_GET['edit'])) {
-    $editId = (int) $_GET['edit'];
-    $stmt = $pdo->prepare('SELECT * FROM work_stage_records WHERE id = :id AND deleted_at IS NULL');
-    $stmt->execute([':id' => $editId]);
-    $row = $stmt->fetch();
-    if ($row !== false) {
-        $editingRecord = $row;
-    }
-}
-
-$formAction = 'create';
-$formId = null;
 $formEmployeeId = '';
 $formFacilityId = '';
 $formEmployeeIds = [];
@@ -331,66 +172,12 @@ $formRecordDate = (new DateTime())->format('Y-m-d');
 $formRecordTime = (new DateTime())->format('H:i');
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
-    $formAction = (string) ($_POST['action'] ?? 'create');
-    $formId = $formAction === 'update' ? (int) ($_POST['id'] ?? 0) : null;
     $formEmployeeId = (string) ($_POST['employee_id'] ?? '');
     $formFacilityId = (string) ($_POST['facility_id'] ?? '');
     $formEmployeeIds = array_map('intval', (array) ($_POST['employee_ids'] ?? []));
     $formLaundryNetCount = (string) ($_POST['laundry_net_count'] ?? '0');
     $formRecordDate = (string) ($_POST['record_date'] ?? '');
     $formRecordTime = (string) ($_POST['record_time'] ?? '');
-} elseif ($editingRecord !== null) {
-    $formAction = 'update';
-    $formId = (int) $editingRecord['id'];
-    $formEmployeeId = (string) $editingRecord['employee_id'];
-    $formFacilityId = (string) $editingRecord['facility_id'];
-    $editingEmployeeIdsStmt = $pdo->prepare('SELECT employee_id FROM work_stage_record_employees WHERE work_stage_record_id = :id');
-    $editingEmployeeIdsStmt->execute([':id' => (int) $editingRecord['id']]);
-    $formEmployeeIds = array_map('intval', array_column($editingEmployeeIdsStmt->fetchAll(), 'employee_id'));
-    $formLaundryNetCount = (string) $editingRecord['person_count'];
-    $formRecordDate = $editingRecord['record_date'];
-    $formRecordTime = $editingRecord['record_time'] !== null ? substr($editingRecord['record_time'], 0, 5) : (new DateTime())->format('H:i');
-}
-
-// ---- 一覧の取得 ----
-$dateCondition = '';
-$dateParams = [];
-if ($period !== 'all') {
-    $end = (new DateTime())->format('Y-m-d');
-    $start = (new DateTime())->modify('-' . ((int) $period - 1) . ' days')->format('Y-m-d');
-    $dateCondition = 'AND w.record_date BETWEEN :start AND :end';
-    $dateParams = [':start' => $start, ':end' => $end];
-}
-
-$listStmt = $pdo->prepare(
-    "SELECT w.id, w.record_date, w.record_time, w.stage, w.person_count, w.created_at,
-            e.name AS employee_name, f.name AS facility_name
-     FROM work_stage_records w
-     INNER JOIN employees e ON e.id = w.employee_id
-     INNER JOIN facilities f ON f.id = w.facility_id
-     WHERE w.deleted_at IS NULL $dateCondition
-     ORDER BY w.record_date DESC, w.id DESC
-     LIMIT 300"
-);
-$listStmt->execute($dateParams);
-$records = $listStmt->fetchAll();
-
-// ---- 一覧の参加者名をまとめて取得 ----
-$participantsByRecordId = [];
-if (!empty($records)) {
-    $recordIds = array_column($records, 'id');
-    $placeholders = implode(',', array_fill(0, count($recordIds), '?'));
-    $participantsStmt = $pdo->prepare(
-        "SELECT wse.work_stage_record_id, e.name
-         FROM work_stage_record_employees wse
-         INNER JOIN employees e ON e.id = wse.employee_id
-         WHERE wse.work_stage_record_id IN ($placeholders)
-         ORDER BY e.name"
-    );
-    $participantsStmt->execute($recordIds);
-    foreach ($participantsStmt->fetchAll() as $row) {
-        $participantsByRecordId[(int) $row['work_stage_record_id']][] = $row['name'];
-    }
 }
 ?>
 <!DOCTYPE html>
@@ -398,7 +185,7 @@ if (!empty($records)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>作業実績の管理 | 管理者</title>
+    <title>作業実績の新規登録 | 管理者</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
@@ -411,18 +198,11 @@ if (!empty($records)) {
         fieldset { border: 1px solid #ccc; border-radius: 4px; padding: 12px; }
         .form-row { margin-bottom: 8px; }
         .form-row label { display: inline-block; width: 90px; }
-        .period-nav { margin-bottom: 12px; }
-        .period-nav a { margin-right: 12px; padding: 4px 10px; border: 1px solid #ccc; border-radius: 12px; text-decoration: none; color: #222; }
-        .period-nav a.active { background: #0b5ed7; color: #fff; border-color: #0b5ed7; }
-        table.records { border-collapse: collapse; width: 100%; }
-        table.records th, table.records td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; font-size: 0.9em; }
-        table.records th { background: #f5f5f5; }
-        .inline-form { display: inline; }
     </style>
 </head>
 <body>
 <header>
-    <h1>作業実績の管理</h1>
+    <h1>作業実績の新規登録</h1>
     <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん（管理者） | <a href="/admin/work_stage_record_edit_logs.php">修正履歴</a> | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a></nav>
 </header>
 
@@ -435,14 +215,11 @@ if (!empty($records)) {
 <?php endif; ?>
 
 <section class="record-form" id="record-form-section">
-    <h2><?= $formAction === 'update' ? '作業実績の修正' : '作業実績の新規登録' ?></h2>
+    <h2>作業実績の新規登録</h2>
     <fieldset>
         <form method="post" action="/admin/work_stage_records.php">
             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-            <input type="hidden" name="action" value="<?= $formAction === 'update' ? 'update' : 'create' ?>">
-            <?php if ($formAction === 'update'): ?>
-                <input type="hidden" name="id" value="<?= (int) $formId ?>">
-            <?php endif; ?>
+            <input type="hidden" name="action" value="create">
 
             <div class="form-row">
                 <label for="employee_id">記録担当</label>
@@ -492,64 +269,9 @@ if (!empty($records)) {
                 <input type="number" id="laundry_net_count" name="laundry_net_count" min="0" step="1" value="<?= htmlspecialchars($formLaundryNetCount, ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
 
-            <button type="submit"><?= $formAction === 'update' ? '更新する' : '登録する' ?></button>
-            <?php if ($formAction === 'update'): ?>
-                <a href="/admin/work_stage_records.php?period=<?= htmlspecialchars($period, ENT_QUOTES, 'UTF-8') ?>">キャンセル</a>
-            <?php endif; ?>
+            <button type="submit">登録する</button>
         </form>
     </fieldset>
-</section>
-
-<div class="period-nav">
-    <?php foreach ($periodLabels as $key => $label): ?>
-        <a href="?period=<?= htmlspecialchars($key, ENT_QUOTES, 'UTF-8') ?>" class="<?= $period === $key ? 'active' : '' ?>"><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></a>
-    <?php endforeach; ?>
-</div>
-
-<section class="record-list">
-    <h2>作業実績一覧</h2>
-    <?php if (empty($records)): ?>
-        <p class="notice">対象期間の作業実績はありません。</p>
-    <?php else: ?>
-        <table class="records">
-            <thead>
-                <tr>
-                    <th>作業日</th>
-                    <th>時刻</th>
-                    <th>記録担当</th>
-                    <th>参加した従業員</th>
-                    <th>施設</th>
-                    <th>工程</th>
-                    <th>洗濯ネット数</th>
-                    <th>登録日時</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($records as $record): ?>
-                    <tr>
-                        <td><?= htmlspecialchars($record['record_date'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= $record['record_time'] !== null ? htmlspecialchars(substr($record['record_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '-' ?></td>
-                        <td><?= htmlspecialchars($record['employee_name'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= !empty($participantsByRecordId[(int) $record['id']]) ? htmlspecialchars(implode('・', $participantsByRecordId[(int) $record['id']]), ENT_QUOTES, 'UTF-8') : '-' ?></td>
-                        <td><?= htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= htmlspecialchars(WORK_RECORD_STAGE_LABEL, ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= (int) $record['person_count'] ?>枚</td>
-                        <td><?= htmlspecialchars($record['created_at'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td>
-                            <a href="/admin/work_stage_records.php?period=<?= htmlspecialchars($period, ENT_QUOTES, 'UTF-8') ?>&edit=<?= (int) $record['id'] ?>">編集</a>
-                            <form method="post" action="/admin/work_stage_records.php" class="inline-form" onsubmit="return confirm('この作業実績を削除しますか？');">
-                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                <input type="hidden" name="action" value="delete">
-                                <input type="hidden" name="id" value="<?= (int) $record['id'] ?>">
-                                <button type="submit">削除</button>
-                            </form>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
-    <?php endif; ?>
 </section>
 </body>
 </html>
