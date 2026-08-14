@@ -96,10 +96,9 @@ $csrfToken = csrf_token();
 <section class="dashboard-section work-related">
     <h2>作業関係</h2>
     <div class="nav-cards">
-        <a class="nav-card" href="/admin/work_status.php"><h2>作業状況</h2></a>
         <a class="nav-card" href="/admin/work_speed.php"><h2>作業速度分析</h2></a>
         <a class="nav-card" href="/admin/work_stage_records.php"><h2>作業実績の管理</h2></a>
-        <a class="nav-card" href="/admin/collection_headcount.php"><h2>洗濯ネット・返却リネン袋数</h2></a>
+        <a class="nav-card" href="/admin/collection_headcount.php"><h2>作業登録</h2></a>
         <a class="nav-card" href="/admin/consumable_stock.php"><h2>消耗品在庫管理</h2></a>
     </div>
 </section>

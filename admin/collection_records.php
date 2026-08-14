@@ -558,6 +558,84 @@ function cr_issued(array $record): string
     }
     return empty($parts) ? '-' : implode('・', $parts);
 }
+
+// ---- カード一覧（返却未完了の集荷サイクル。1サイクル＝1カード。施設パネル表示のため
+//      施設ごとにグループ化する。介護施設・自社が対象で、クリーニング所は対象外）。
+//      staff/collection_entry.phpの同名セクションと同じクエリ・同じ共有関数
+//      （group_open_cycles_into_facility_panels/issued_bag_color_row_class）を使い、
+//      既存の全項目手動フォーム・月別フラット監査テーブル・削除・PDF出力には一切手を加えない。 ----
+$openCyclesStmt = $pdo->query(
+    "SELECT cc.*, f.name AS facility_name, f.pickup_schedule AS facility_pickup_schedule,
+            f.onboarding_start_date AS facility_onboarding_start_date,
+            f.issued_linen_bag_orange AS facility_issued_bag_orange,
+            f.issued_linen_bag_yellow AS facility_issued_bag_yellow
+     FROM collection_cycles cc
+     INNER JOIN facilities f ON f.id = cc.facility_id
+     WHERE cc.return_bag_count IS NULL AND cc.pickup_bag_count IS NOT NULL AND cc.deleted_at IS NULL
+           AND f.facility_type != 'クリーニング所'
+     ORDER BY cc.pickup_date ASC, cc.id ASC
+     LIMIT 200"
+);
+$openCycles = $openCyclesStmt->fetchAll();
+$openCycleFacilityPanelGroups = group_open_cycles_into_facility_panels($pdo, $openCycles);
+
+// ---- カード1件分の描画。管理者はこのページ自体に登録先の全項目手動フォームを持っているため、
+//      staff版のようなカード内の「返却登録」ミニフォームは設置せず、見出し右の「編集」1つに
+//      入り口を集約する（既存の全項目手動フォームは無変更のまま、そこへ誘導するだけ）。 ----
+$openCardEditBaseUrl = '/admin/collection_records.php?facility_id=' . $facilityId . '&month=' . urlencode($yearMonth);
+$renderOpenCycleCard = function (array $cycle) use ($openCardEditBaseUrl): void {
+    $cycleId = (int) $cycle['id'];
+    $issuedBagRowClass = issued_bag_color_row_class([
+        'issued_bag_orange' => $cycle['facility_issued_bag_orange'],
+        'issued_bag_yellow' => $cycle['facility_issued_bag_yellow'],
+    ]);
+    ?>
+    <article class="cycle-card">
+        <div class="cycle-card-header">
+            <p class="cycle-card-title">集荷日 <?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></p>
+            <a class="cycle-card-edit-link" href="<?= htmlspecialchars($openCardEditBaseUrl, ENT_QUOTES, 'UTF-8') ?>&edit=<?= $cycleId ?>">編集</a>
+        </div>
+
+        <table class="cycle-table">
+            <thead>
+                <tr><th>工程</th><th>袋数</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <th>集荷<?php if ($cycle['pickup_time'] !== null): ?>・<?= htmlspecialchars(substr($cycle['pickup_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
+                    <td class="done"><?= (int) $cycle['pickup_bag_count'] ?></td>
+                </tr>
+                <tr class="<?= $issuedBagRowClass ?>">
+                    <th>到着<?php if ($cycle['arrival_bag_count'] !== null && $cycle['arrival_time'] !== null): ?>・<?= htmlspecialchars(substr($cycle['arrival_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
+                    <td class="<?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
+                        <?php if ($cycle['arrival_bag_count'] !== null): ?>
+                            <?= (int) $cycle['arrival_bag_count'] ?>
+                        <?php else: ?>
+                            未到着
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th>発送<?php if ($cycle['dispatch_bag_count'] !== null && $cycle['dispatch_time'] !== null): ?>・<?= htmlspecialchars(substr($cycle['dispatch_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
+                    <td class="<?= $cycle['dispatch_bag_count'] !== null ? 'done' : '' ?>">
+                        <?php if ($cycle['dispatch_bag_count'] !== null): ?>
+                            <?= (int) $cycle['dispatch_bag_count'] ?>
+                        <?php elseif ($cycle['arrival_bag_count'] === null): ?>
+                            （到着後に入力可）
+                        <?php else: ?>
+                            未発送
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr class="row-return">
+                    <th>返却リネン袋数</th>
+                    <td>未返却</td>
+                </tr>
+            </tbody>
+        </table>
+    </article>
+    <?php
+};
 ?>
 <!DOCTYPE html>
 <html lang="ja">
@@ -585,6 +663,38 @@ function cr_issued(array $record): string
         .form-row label { display: block; font-size: 0.85em; margin-bottom: 2px; }
         .form-row input, .form-row select { width: 100%; box-sizing: border-box; }
         .inline-form { display: inline; }
+
+        /* カード一覧（1サイクル＝1カード、集荷→到着→発送→返却を表形式で表示）。
+           staff/collection_entry.phpと同じデザイン・同じクラス名。 */
+        .cycle-cards { display: flex; flex-direction: column; gap: 12px; }
+        .cycle-card { border: 1px solid #ccc; border-radius: 8px; padding: 12px 14px; background: #fff; }
+        .cycle-card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 8px; }
+        .cycle-card-title { font-weight: bold; font-size: 1.05em; margin: 0; }
+        .cycle-card-edit-link { flex-shrink: 0; display: inline-block; padding: 4px 10px; border: 1px solid #0b5ed7; border-radius: 6px; font-size: 0.85em; color: #0b5ed7; text-decoration: none; }
+        table.cycle-table { width: 100%; border-collapse: collapse; }
+        table.cycle-table th, table.cycle-table td { border: 1px solid #ddd; padding: 6px 8px; font-size: 0.9em; text-align: left; }
+        table.cycle-table thead th { background: #f5f5f5; font-weight: bold; }
+        table.cycle-table tbody th { font-weight: normal; color: #444; white-space: nowrap; width: 40%; }
+        table.cycle-table td.done { color: #1e7e34; font-weight: bold; }
+        table.cycle-table tr.row-issued-orange th, table.cycle-table tr.row-issued-orange td { background: #ffe0b2; }
+        table.cycle-table tr.row-return th, table.cycle-table tr.row-return td { background: #0b5ed7; color: #fff; }
+        table.cycle-table tr.row-return td.done { color: #fff; }
+
+        /* 施設パネル一覧（集荷曜日ごとにグループ化、デフォルト展開。900px未満は1列、900px以上は3列固定）。
+           staff/collection_entry.phpと同じデザイン・同じクラス名。 */
+        .facility-group { margin-bottom: 20px; }
+        .facility-group-title { font-size: 1.05em; margin: 0 0 10px; color: #333; }
+        .facility-panels { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+        @media (min-width: 900px) {
+            .facility-panels { grid-template-columns: repeat(3, 1fr); }
+        }
+        .facility-panel { min-width: 0; border: 1px solid #aeb6c1; border-radius: 14px; background: linear-gradient(145deg, #f4f6f8 0%, #d6dce3 100%); box-shadow: 0 7px 16px rgba(30, 55, 90, 0.13), 0 2px 4px rgba(30, 55, 90, 0.08), inset 0 1px 0 rgba(255,255,255,0.95); overflow: hidden; }
+        .facility-panel-summary { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 18px; cursor: pointer; list-style: none; font-weight: bold; color: #0b5ed7; }
+        .facility-panel-summary::-webkit-details-marker { display: none; }
+        .facility-panel-summary::after { content: '▲'; font-size: 0.7em; color: #0b5ed7; }
+        .facility-panel:not([open]) .facility-panel-summary::after { content: '▼'; }
+        .facility-panel-count { font-weight: normal; color: #555; font-size: 0.9em; }
+        .facility-panel-cycles { padding: 0 14px 14px; }
     </style>
 </head>
 <body>
@@ -781,6 +891,16 @@ function cr_issued(array $record): string
             </p>
         </form>
     </fieldset>
+</section>
+
+<section class="open-cycle-list">
+    <h2>集荷サイクル一覧（返却未完了）</h2>
+    <?php
+    $facilityPanelGroups = $openCycleFacilityPanelGroups;
+    $renderCycleCard = $renderOpenCycleCard;
+    $emptyMessage = '返却未完了の集荷サイクルはありません。';
+    require __DIR__ . '/../includes/facility_panel_list.php';
+    ?>
 </section>
 
     <h2><?= $selectedFacilityName !== '' ? htmlspecialchars($selectedFacilityName, ENT_QUOTES, 'UTF-8') : '全施設' ?>　<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>分</h2>
