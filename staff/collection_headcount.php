@@ -893,24 +893,6 @@ if ($editingReturnReadyId > 0) {
 $showHistory = isset($_GET['history']);
 $cardCycles = $showHistory ? find_returned_cycles($pdo) : find_open_cycles($pdo);
 
-// ---- 参加者名をまとめて取得（作業登録の詳細表示・編集リンク先で使う） ----
-$participantsByWsrId = [];
-$wsrIds = array_filter(array_map(static fn (array $c): ?int => $c['wsr_id'] !== null ? (int) $c['wsr_id'] : null, $cardCycles));
-if (!empty($wsrIds)) {
-    $placeholders = implode(',', array_fill(0, count($wsrIds), '?'));
-    $participantsStmt = $pdo->prepare(
-        "SELECT wse.work_stage_record_id, e.name
-         FROM work_stage_record_employees wse
-         INNER JOIN employees e ON e.id = wse.employee_id
-         WHERE wse.work_stage_record_id IN ($placeholders)
-         ORDER BY e.name"
-    );
-    $participantsStmt->execute(array_values($wsrIds));
-    foreach ($participantsStmt->fetchAll() as $row) {
-        $participantsByWsrId[(int) $row['work_stage_record_id']][] = $row['name'];
-    }
-}
-
 // ---- 施設パネル用グループ化（返却未完了一覧のみ。履歴表示では使わない） ----
 // グルーピング・並び順・除外ロジックはgroup_open_cycles_into_facility_panels()
 // （includes/functions.php）に共通化済み。staff/collection_entry.phpの介護施設向け
@@ -921,89 +903,113 @@ $facilityPanelGroups = $showHistory ? [] : group_open_cycles_into_facility_panel
 // $includeFacilityName: 施設パネル表示ではパネル見出しに施設名が既に出ているため、
 // カード見出し側は集荷日のみにして重複を避ける（改善1）。履歴表示（?history=1）は
 // パネルを使わない施設横断のフラット一覧なので、そちらだけ施設名を出す。
-$renderCycleCard = function (array $cycle, bool $includeFacilityName = false) use ($collectionHeadcountPath, $csrfToken, $participantsByWsrId, $isSharedAccount, $isAdminView, $employees, $staff): void {
+$renderCycleCard = function (array $cycle, bool $includeFacilityName = false) use ($collectionHeadcountPath, $csrfToken, $isSharedAccount, $isAdminView, $employees, $staff): void {
     $cycleId = (int) $cycle['id'];
     $expectedReturnDate = calc_expected_return_date($cycle['pickup_date'], $cycle['facility_pickup_schedule']);
-    $participants = $participantsByWsrId[(int) ($cycle['wsr_id'] ?? 0)] ?? [];
+
+    // カード見出し右の編集メニューには、既に登録済み（＝編集先が実在する）項目だけを出す。
+    $editMenuItems = [];
+    if ($cycle['return_ready_laundry_net_count'] !== null) {
+        $editMenuItems[] = ['label' => '洗濯ネット数', 'url' => $collectionHeadcountPath . '?edit_net=' . $cycleId];
+    }
+    if ($cycle['wsr_id'] !== null) {
+        $editMenuItems[] = ['label' => '作業登録', 'url' => $collectionHeadcountPath . '?edit=' . (int) $cycle['wsr_id']];
+    }
+    if ($cycle['return_ready_bag_count'] !== null) {
+        $editMenuItems[] = ['label' => '返却袋数（青）', 'url' => $collectionHeadcountPath . '?return_edit=' . $cycleId];
+    }
     ?>
     <article class="cycle-card">
-        <p class="cycle-card-title"><?php if ($includeFacilityName): ?><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?>　<?php endif; ?>集荷日 <?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></p>
+        <div class="cycle-card-header">
+            <p class="cycle-card-title"><?php if ($includeFacilityName): ?><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?>　<?php endif; ?>集荷日 <?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></p>
+            <?php if (!empty($editMenuItems)): ?>
+                <details class="cycle-card-edit-menu">
+                    <summary>編集</summary>
+                    <ul class="cycle-card-edit-menu-list">
+                        <?php foreach ($editMenuItems as $item): ?>
+                            <li><a href="<?= htmlspecialchars($item['url'], ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($item['label'], ENT_QUOTES, 'UTF-8') ?></a></li>
+                        <?php endforeach; ?>
+                    </ul>
+                </details>
+            <?php endif; ?>
+        </div>
         <p class="cycle-card-info">返却予定日: <?= $expectedReturnDate !== null ? htmlspecialchars($expectedReturnDate, ENT_QUOTES, 'UTF-8') : '-' ?></p>
 
-        <div class="cycle-card-row">
-            <span class="label">1. 到着リネン袋数</span>
-            <span class="value <?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
-                <?= $cycle['arrival_bag_count'] !== null ? (int) $cycle['arrival_bag_count'] . '袋' : '未到着' ?>
-            </span>
-        </div>
-
-        <div class="cycle-card-row">
-            <span class="label">2. 洗濯ネット数</span>
-            <span class="value <?= $cycle['return_ready_laundry_net_count'] !== null ? 'done' : '' ?>">
-                <?php if ($cycle['return_ready_laundry_net_count'] !== null): ?>
-                    <?= (int) $cycle['return_ready_laundry_net_count'] ?>枚 ✓
-                    <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?edit_net=<?= $cycleId ?>">編集</a></small>
-                <?php elseif ($cycle['arrival_bag_count'] === null): ?>
-                    （到着後に入力可）
-                <?php else: ?>
-                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
-                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                        <input type="hidden" name="action" value="register_net_count">
-                        <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                        <input type="number" name="laundry_net_count" min="0" step="1" required placeholder="枚数">
-                        <button type="submit">登録</button>
-                    </form>
-                <?php endif; ?>
-            </span>
-        </div>
-
-        <div class="cycle-card-row">
-            <span class="label">3. 作業登録</span>
-            <span class="value <?= $cycle['wsr_id'] !== null ? 'done' : '' ?>">
-                <?php if ($cycle['wsr_id'] !== null): ?>
-                    済（<?= (int) $cycle['wsr_person_count'] ?>名: <?= !empty($participants) ? htmlspecialchars(implode('・', $participants), ENT_QUOTES, 'UTF-8') : '-' ?>） ✓
-                    <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?edit=<?= (int) $cycle['wsr_id'] ?>">編集</a></small>
-                <?php elseif ($cycle['arrival_bag_count'] === null): ?>
-                    （到着後に入力可）
-                <?php else: ?>
-                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
-                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                        <input type="hidden" name="action" value="complete_work">
-                        <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                        <?php if ($isSharedAccount || $isAdminView): ?>
-                            <select name="employee_ids[]" multiple size="<?= max(2, min(4, count($employees))) ?>" required>
-                                <?php foreach ($employees as $employee): ?>
-                                    <option value="<?= (int) $employee['id'] ?>" <?= !$isSharedAccount && (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
-                                <?php endforeach; ?>
-                            </select>
+        <table class="cycle-table">
+            <thead>
+                <tr><th>項目</th><th>数値</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <th>到着リネン袋数</th>
+                    <td class="<?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
+                        <?= $cycle['arrival_bag_count'] !== null ? (int) $cycle['arrival_bag_count'] : '未到着' ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th>洗濯ネット数</th>
+                    <td class="<?= $cycle['return_ready_laundry_net_count'] !== null ? 'done' : '' ?>">
+                        <?php if ($cycle['return_ready_laundry_net_count'] !== null): ?>
+                            <?= (int) $cycle['return_ready_laundry_net_count'] ?>
+                        <?php elseif ($cycle['arrival_bag_count'] === null): ?>
+                            （到着後に入力可）
                         <?php else: ?>
-                            <input type="hidden" name="employee_ids[]" value="<?= (int) $staff['id'] ?>">
+                            <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                <input type="hidden" name="action" value="register_net_count">
+                                <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
+                                <input type="number" name="laundry_net_count" min="0" step="1" required placeholder="枚数">
+                                <button type="submit">登録</button>
+                            </form>
                         <?php endif; ?>
-                        <button type="submit">完了</button>
-                    </form>
-                <?php endif; ?>
-            </span>
-        </div>
-
-        <div class="cycle-card-row">
-            <span class="label">4. 返却リネン袋（青）数</span>
-            <span class="value <?= $cycle['return_ready_bag_count'] !== null ? 'done' : '' ?>">
-                <?php if ($cycle['return_ready_bag_count'] !== null): ?>
-                    <?= (int) $cycle['return_ready_bag_count'] ?>袋 ✓
-                    <br><small><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?return_edit=<?= $cycleId ?>">編集</a></small>
-                <?php elseif ($cycle['arrival_bag_count'] === null): ?>
-                    （到着後に入力可）
-                <?php else: ?>
-                    <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
-                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                        <input type="hidden" name="action" value="register_return">
-                        <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                        <input type="number" name="return_bag_count" min="0" step="1" required placeholder="袋数">
-                        <button type="submit">返却登録</button>
-                    </form>
-                <?php endif; ?>
-            </span>
-        </div>
+                    </td>
+                </tr>
+                <tr>
+                    <th>作業登録（人数）</th>
+                    <td class="<?= $cycle['wsr_id'] !== null ? 'done' : '' ?>">
+                        <?php if ($cycle['wsr_id'] !== null): ?>
+                            <?= (int) $cycle['wsr_person_count'] ?>
+                        <?php elseif ($cycle['arrival_bag_count'] === null): ?>
+                            （到着後に入力可）
+                        <?php else: ?>
+                            <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                <input type="hidden" name="action" value="complete_work">
+                                <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
+                                <?php if ($isSharedAccount || $isAdminView): ?>
+                                    <select name="employee_ids[]" multiple size="<?= max(2, min(4, count($employees))) ?>" required>
+                                        <?php foreach ($employees as $employee): ?>
+                                            <option value="<?= (int) $employee['id'] ?>" <?= !$isSharedAccount && (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                <?php else: ?>
+                                    <input type="hidden" name="employee_ids[]" value="<?= (int) $staff['id'] ?>">
+                                <?php endif; ?>
+                                <button type="submit">完了</button>
+                            </form>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th>返却リネン袋（青）数</th>
+                    <td class="<?= $cycle['return_ready_bag_count'] !== null ? 'done' : '' ?>">
+                        <?php if ($cycle['return_ready_bag_count'] !== null): ?>
+                            <?= (int) $cycle['return_ready_bag_count'] ?>
+                        <?php elseif ($cycle['arrival_bag_count'] === null): ?>
+                            （到着後に入力可）
+                        <?php else: ?>
+                            <form method="post" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                <input type="hidden" name="action" value="register_return">
+                                <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
+                                <input type="number" name="return_bag_count" min="0" step="1" required placeholder="袋数">
+                                <button type="submit">返却登録</button>
+                            </form>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
 
         <details class="cycle-card-detail">
             <summary>▼詳細・削除</summary>
@@ -1066,18 +1072,24 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
         .form-row label { display: inline-block; width: 90px; }
         .inline-form { display: inline; }
 
-        /* カード一覧（1サイクル＝1カード、4段階を縦積み） */
+        /* カード一覧（1サイクル＝1カード、4項目を表形式で表示） */
         .cycle-cards { display: flex; flex-direction: column; gap: 12px; }
         .cycle-card { border: 1px solid #ccc; border-radius: 8px; padding: 12px 14px; background: #fff; }
-        .cycle-card-title { font-weight: bold; font-size: 1.05em; margin: 0 0 4px; }
+        .cycle-card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+        .cycle-card-title { font-weight: bold; font-size: 1.05em; margin: 0; }
         .cycle-card-info { color: #666; font-size: 0.85em; margin: 0 0 8px; }
-        .cycle-card-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid #eee; flex-wrap: wrap; }
-        .cycle-card-row:first-of-type { border-top: none; }
-        .cycle-card-row .label { color: #666; font-size: 0.85em; min-width: 7em; }
-        .cycle-card-row .value { text-align: right; flex: 1; }
-        .cycle-card-row .value.done { color: #1e7e34; }
-        .cycle-card-row .value form { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
-        .cycle-card-row .value input[type="number"] { width: 80px; }
+        .cycle-card-edit-menu { flex-shrink: 0; }
+        .cycle-card-edit-menu summary { cursor: pointer; color: #0b5ed7; list-style: none; padding: 4px 10px; border: 1px solid #0b5ed7; border-radius: 6px; font-size: 0.85em; }
+        .cycle-card-edit-menu summary::-webkit-details-marker { display: none; }
+        .cycle-card-edit-menu-list { list-style: none; margin: 6px 0 0; padding: 0; text-align: right; }
+        .cycle-card-edit-menu-list li { margin-bottom: 4px; }
+        table.cycle-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+        table.cycle-table th, table.cycle-table td { border: 1px solid #ddd; padding: 6px 8px; font-size: 0.9em; text-align: left; }
+        table.cycle-table thead th { background: #f5f5f5; font-weight: bold; }
+        table.cycle-table tbody th { font-weight: normal; color: #444; white-space: nowrap; width: 40%; }
+        table.cycle-table td.done { color: #1e7e34; font-weight: bold; }
+        table.cycle-table td form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+        table.cycle-table td input[type="number"] { width: 80px; }
         .cycle-card-detail { margin-top: 8px; }
         .cycle-card-detail summary { cursor: pointer; color: #0b5ed7; }
         .cycle-card-detail-body { padding: 8px 4px 0; font-size: 0.9em; }
