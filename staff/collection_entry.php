@@ -68,6 +68,28 @@ function find_previous_cycle_for_facility(PDO $pdo, int $facilityId): ?array
     return $row !== false ? $row : null;
 }
 
+function format_cycle_candidate_label(array $cycle, array $facilityNamesById = []): string
+{
+    $facilityLabel = $facilityNamesById[(int) $cycle['facility_id']] ?? null;
+    $parts = [
+        ($facilityLabel !== null ? htmlspecialchars($facilityLabel, ENT_QUOTES, 'UTF-8') . ' ' : '')
+        . '集荷日 ' . htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8'),
+    ];
+    if ($cycle['pickup_bag_count'] !== null) {
+        $parts[] = '集荷' . (int) $cycle['pickup_bag_count'] . '袋';
+    }
+    if ($cycle['arrival_bag_count'] !== null) {
+        $parts[] = '到着' . (int) $cycle['arrival_bag_count'] . '袋';
+    }
+    if ($cycle['dispatch_bag_count'] !== null) {
+        $parts[] = '発送' . (int) $cycle['dispatch_bag_count'] . '袋';
+    }
+    if (($cycle['return_ready_bag_count'] ?? null) !== null) {
+        $parts[] = '洗濯代行登録' . (int) $cycle['return_ready_bag_count'] . '袋';
+    }
+    return $parts[0] . '（' . implode('／', array_slice($parts, 1)) . '）';
+}
+
 function parse_bag_count($raw): ?int
 {
     $raw = trim((string) $raw);
@@ -403,7 +425,7 @@ $facilitiesStmt = $pdo->query("SELECT id, name, facility_type FROM facilities WH
 $facilities = $facilitiesStmt->fetchAll();
 $validFacilityIds = array_map('intval', array_column($facilities, 'id'));
 $facilityNamesById = array_column($facilities, 'name', 'id');
-$pickupFacilities = array_values(array_filter($facilities, static fn (array $f): bool => $f['facility_type'] !== 'クリーニング所'));
+$facilityTypesById = array_column($facilities, 'facility_type', 'id');
 
 $cleaningFacilitiesStmt = $pdo->query("SELECT id, name FROM facilities WHERE facility_type = 'クリーニング所' ORDER BY name");
 $cleaningFacilities = $cleaningFacilitiesStmt->fetchAll();
@@ -413,13 +435,17 @@ $employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff
 $employees = $employeesStmt->fetchAll();
 $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
 
-// 新規集荷登録フォームに表示する「施設ごとの前回サイクル状況」用。jiro_dashboard.php
-// （本日の集荷予定）と同じソース・同じロジックを再利用する（別計算式は作らない）。
+// 場所選択で介護施設を選んだ際の「直前の確認画面」に表示する施設ごとの前回サイクル状況。
+// jiro_dashboard.php（本日の集荷予定）と同じソース・同じロジックを再利用する（別計算式は作らない）。
 $pickupChecklist = build_jiro_checklist_data($pdo, new DateTime());
-$pickupChecklistRows = array_merge($pickupChecklist['today_rows'], $pickupChecklist['other_rows']);
-usort($pickupChecklistRows, static fn (array $a, array $b): int => $a['facility_name'] <=> $b['facility_name']);
+$pickupChecklistByFacility = [];
+foreach (array_merge($pickupChecklist['today_rows'], $pickupChecklist['other_rows']) as $row) {
+    $pickupChecklistByFacility[$row['facility_id']] = $row;
+}
 
 $errorMessage = '';
+// ステップ2（袋数入力）を描画するための状態。resolve_locationが成功した時だけセットする。
+$step2 = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
@@ -430,127 +456,172 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $todayStr = $now->format('Y-m-d');
         $nowTimeStr = $now->format('H:i:s');
 
-        if ($action === 'create_pickup') {
-            // 上部の独立フォーム。新規のcollection_cyclesレコードを作る唯一の入り口。
-            $facilityId = (int) ($_POST['facility_id'] ?? 0);
-            $pickupBagCount = parse_bag_count($_POST['pickup_bag_count'] ?? '');
-            $issuedBagOrange = parse_bag_count($_POST['issued_bag_orange'] ?? '');
-            $issuedBagYellow = parse_bag_count($_POST['issued_bag_yellow'] ?? '');
-            $issuedBagBlue = parse_bag_count($_POST['issued_bag_blue'] ?? '');
-            $issuedLaundryNetCount = parse_bag_count($_POST['issued_laundry_net_count'] ?? '');
-            $pickupDate = resolve_entry_date($_POST['pickup_date'] ?? '', $todayStr);
-            $pickupTime = resolve_entry_time($_POST['pickup_time'] ?? '', $nowTimeStr);
-            $pickupEmployeeId = resolve_entry_employee_id($_POST['pickup_employee_id'] ?? '', (int) $staff['id'], $validEmployeeIds);
-
-            $wantsPickup = $pickupBagCount !== null || $issuedBagOrange !== null || $issuedBagYellow !== null
-                || $issuedBagBlue !== null || $issuedLaundryNetCount !== null;
+        if ($action === 'resolve_location') {
+            // 場所選択（ステップ1）。介護施設・自社なら集荷登録、クリーニング所なら
+            // 発送・到着登録のステップ2を描画するための状態を組み立てる。
+            $facilityId = (int) ($_POST['location'] ?? 0);
+            $isCleaningSite = ($facilityTypesById[$facilityId] ?? null) === 'クリーニング所';
 
             if (!in_array($facilityId, $validFacilityIds, true)) {
                 $errorMessage = '施設を選択してください。';
-            } elseif (!$wantsPickup) {
-                $errorMessage = '集荷リネン袋数、または交付袋数のいずれかを入力してください。';
-            } elseif ($pickupDate === false || $pickupTime === false || $pickupEmployeeId === false) {
-                $errorMessage = '集荷の日付・時間・担当者の入力内容が正しくありません。';
+            } elseif ($isCleaningSite) {
+                $step2 = [
+                    'facility_id' => $facilityId,
+                    'is_cleaning_site' => true,
+                    'arrival_candidates' => find_candidate_cycles($pdo, 'arrival'),
+                    'dispatch_candidates' => find_candidate_cycles($pdo, 'dispatch'),
+                ];
+            } else {
+                $step2 = [
+                    'facility_id' => $facilityId,
+                    'is_cleaning_site' => false,
+                ];
+            }
+        } elseif ($action === 'finalize') {
+            // ステップ2の確定（ステップ1で選んだ場所に応じて、クリーニング所なら
+            // 発送・到着登録を、介護施設・自社なら集荷登録を行う）。
+            $facilityId = (int) ($_POST['facility_id'] ?? 0);
+            $isCleaningSite = ($_POST['is_cleaning_site'] ?? '') === '1';
+
+            if (!in_array($facilityId, $validFacilityIds, true)) {
+                $errorMessage = '施設を選択してください。最初からやり直してください。';
             } else {
                 $facilityName = $facilityNamesById[$facilityId];
-                // 新規サイクルのINSERT前に取得する＝この時点でfacility_idに存在する最新サイクルが
-                // そのまま「前回サイクル」になる（find_previous_cycle_for_facility()のdocblock参照）。
-                $previousCycle = find_previous_cycle_for_facility($pdo, $facilityId);
-                $autoConfirmedReturnBagCount = null;
 
-                $pdo->beginTransaction();
-                try {
-                    $newCycleId = insert_pickup(
-                        $pdo, $facilityId, $pickupBagCount, $pickupDate, $pickupTime, $pickupEmployeeId,
-                        $issuedBagOrange, $issuedBagYellow, $issuedBagBlue, $issuedLaundryNetCount
-                    );
-                    record_collection_cycle_issuance_stock_adjustment($pdo, null, [
-                        'issued_bag_orange' => $issuedBagOrange,
-                        'issued_bag_yellow' => $issuedBagYellow,
-                        'issued_bag_blue' => $issuedBagBlue,
-                        'issued_laundry_net_count' => $issuedLaundryNetCount,
-                    ], $facilityId, $facilityName, $newCycleId, $staff['id']);
+                if ($isCleaningSite) {
+                    // 他ドライバーの更新と競合していないか確認するため、ここで状態を再計算する
+                    // （ステップ1描画時の状態をそのまま信用しない）。
+                    $arrivalCandidates = find_candidate_cycles($pdo, 'arrival');
+                    $dispatchCandidates = find_candidate_cycles($pdo, 'dispatch');
+                    $validArrivalIds = array_map('intval', array_column($arrivalCandidates, 'id'));
+                    $validDispatchIds = array_map('intval', array_column($dispatchCandidates, 'id'));
 
-                    // 前回サイクルの「返却」自動確定：洗濯代行が返却リネン袋（青）数
-                    // （return_ready_bag_count）を確定済みで、ドライバーの最終返却確定
-                    // （return_bag_count）がまだの場合、今回の集荷登録（＝次回訪問時に
-                    // 前回分を返却したこと）をもって自動でそのまま確定する。これにより
-                    // 独立した「返却登録」操作は不要になる（collection_headcount.phpの
-                    // register_returnは手動での例外対応用に残す）。
-                    if ($previousCycle !== null
-                        && $previousCycle['return_ready_bag_count'] !== null
-                        && $previousCycle['return_bag_count'] === null) {
-                        $autoConfirmedReturnBagCount = (int) $previousCycle['return_ready_bag_count'];
-                        update_return(
-                            $pdo, (int) $previousCycle['id'], $autoConfirmedReturnBagCount,
-                            $pickupDate, $pickupTime, $pickupEmployeeId
-                        );
+                    $arrivalBagCount = parse_bag_count($_POST['arrival_bag_count'] ?? '');
+                    $dispatchBagCount = parse_bag_count($_POST['dispatch_bag_count'] ?? '');
+                    $arrivalCycleId = (int) ($_POST['arrival_cycle_id'] ?? 0);
+                    $dispatchCycleId = (int) ($_POST['dispatch_cycle_id'] ?? 0);
+
+                    $arrivalDate = resolve_entry_date($_POST['arrival_date'] ?? '', $todayStr);
+                    $arrivalTime = resolve_entry_time($_POST['arrival_time'] ?? '', $nowTimeStr);
+                    $arrivalEmployeeId = resolve_entry_employee_id($_POST['arrival_employee_id'] ?? '', (int) $staff['id'], $validEmployeeIds);
+                    $dispatchDate = resolve_entry_date($_POST['dispatch_date'] ?? '', $todayStr);
+                    $dispatchTime = resolve_entry_time($_POST['dispatch_time'] ?? '', $nowTimeStr);
+                    $dispatchEmployeeId = resolve_entry_employee_id($_POST['dispatch_employee_id'] ?? '', (int) $staff['id'], $validEmployeeIds);
+
+                    // 対象サイクルが存在し、かつ袋数が入力されている項目だけを「今回記録する」とみなす。
+                    $wantsArrival = !empty($arrivalCandidates) && $arrivalBagCount !== null;
+                    $wantsDispatch = !empty($dispatchCandidates) && $dispatchBagCount !== null;
+
+                    // ラジオボタンは自動選択せず、担当者が明示的に選ばないとarrival_cycle_id/
+                    // dispatch_cycle_id自体がPOSTされない。候補が複数あるのに未選択のまま
+                    // 送信された場合は専用メッセージで弾く（8/13に到着側で導入した安全装置。
+                    // 場所選択フロー復活を機に発送側にも同じバリデーションを適用する）。
+                    if ($wantsArrival && count($arrivalCandidates) > 1 && !isset($_POST['arrival_cycle_id'])) {
+                        $errorMessage = '到着対象を選択してください。';
+                    } elseif ($wantsDispatch && count($dispatchCandidates) > 1 && !isset($_POST['dispatch_cycle_id'])) {
+                        $errorMessage = '発送対象を選択してください。';
+                    } elseif ($wantsArrival && !in_array($arrivalCycleId, $validArrivalIds, true)) {
+                        $errorMessage = '到着対象のサイクルが無効です（既に他の記録で更新された可能性があります）。もう一度やり直してください。';
+                    } elseif ($wantsDispatch && !in_array($dispatchCycleId, $validDispatchIds, true)) {
+                        $errorMessage = '発送対象のサイクルが無効です（既に他の記録で更新された可能性があります）。もう一度やり直してください。';
+                    } elseif (!$wantsArrival && !$wantsDispatch) {
+                        $errorMessage = '到着・発送のいずれかにリネン袋数を入力してください。';
+                    } elseif ($wantsArrival && ($arrivalDate === false || $arrivalTime === false || $arrivalEmployeeId === false)) {
+                        $errorMessage = '到着の日付・時間・担当者の入力内容が正しくありません。';
+                    } elseif ($wantsDispatch && ($dispatchDate === false || $dispatchTime === false || $dispatchEmployeeId === false)) {
+                        $errorMessage = '発送の日付・時間・担当者の入力内容が正しくありません。';
+                    } else {
+                        $pdo->beginTransaction();
+                        try {
+                            if ($wantsDispatch) {
+                                update_dispatch($pdo, $dispatchCycleId, $dispatchBagCount, $dispatchDate, $dispatchTime, $dispatchEmployeeId, $facilityId);
+                            }
+                            if ($wantsArrival) {
+                                update_arrival($pdo, $arrivalCycleId, $arrivalBagCount, $arrivalDate, $arrivalTime, $arrivalEmployeeId, $facilityId);
+                            }
+                            $pdo->commit();
+                        } catch (\Throwable $e) {
+                            $pdo->rollBack();
+                            throw $e;
+                        }
+                        $parts = [];
+                        if ($wantsDispatch) {
+                            $parts[] = 'クリーニング所発送（' . $dispatchBagCount . '袋）';
+                        }
+                        if ($wantsArrival) {
+                            $parts[] = 'クリーニング所到着（' . $arrivalBagCount . '袋）';
+                        }
+                        set_flash('success', implode('と', $parts) . 'を記録しました（' . $facilityName . '）。');
+                        header('Location: /staff/collection_entry.php');
+                        exit;
                     }
+                } else {
+                    // 介護施設・自社：集荷登録（＋前回サイクルの返却自動確定）。
+                    $pickupBagCount = parse_bag_count($_POST['pickup_bag_count'] ?? '');
+                    $issuedBagOrange = parse_bag_count($_POST['issued_bag_orange'] ?? '');
+                    $issuedBagYellow = parse_bag_count($_POST['issued_bag_yellow'] ?? '');
+                    $issuedBagBlue = parse_bag_count($_POST['issued_bag_blue'] ?? '');
+                    $issuedLaundryNetCount = parse_bag_count($_POST['issued_laundry_net_count'] ?? '');
+                    $pickupDate = resolve_entry_date($_POST['pickup_date'] ?? '', $todayStr);
+                    $pickupTime = resolve_entry_time($_POST['pickup_time'] ?? '', $nowTimeStr);
+                    $pickupEmployeeId = resolve_entry_employee_id($_POST['pickup_employee_id'] ?? '', (int) $staff['id'], $validEmployeeIds);
 
-                    $pdo->commit();
-                } catch (\Throwable $e) {
-                    $pdo->rollBack();
-                    throw $e;
+                    $wantsPickup = $pickupBagCount !== null || $issuedBagOrange !== null || $issuedBagYellow !== null
+                        || $issuedBagBlue !== null || $issuedLaundryNetCount !== null;
+
+                    if (!$wantsPickup) {
+                        $errorMessage = '集荷リネン袋数、または交付袋数のいずれかを入力してください。';
+                    } elseif ($pickupDate === false || $pickupTime === false || $pickupEmployeeId === false) {
+                        $errorMessage = '集荷の日付・時間・担当者の入力内容が正しくありません。';
+                    } else {
+                        // 新規サイクルのINSERT前に取得する＝この時点でfacility_idに存在する最新サイクルが
+                        // そのまま「前回サイクル」になる（find_previous_cycle_for_facility()のdocblock参照）。
+                        $previousCycle = find_previous_cycle_for_facility($pdo, $facilityId);
+                        $autoConfirmedReturnBagCount = null;
+
+                        $pdo->beginTransaction();
+                        try {
+                            $newCycleId = insert_pickup(
+                                $pdo, $facilityId, $pickupBagCount, $pickupDate, $pickupTime, $pickupEmployeeId,
+                                $issuedBagOrange, $issuedBagYellow, $issuedBagBlue, $issuedLaundryNetCount
+                            );
+                            record_collection_cycle_issuance_stock_adjustment($pdo, null, [
+                                'issued_bag_orange' => $issuedBagOrange,
+                                'issued_bag_yellow' => $issuedBagYellow,
+                                'issued_bag_blue' => $issuedBagBlue,
+                                'issued_laundry_net_count' => $issuedLaundryNetCount,
+                            ], $facilityId, $facilityName, $newCycleId, $staff['id']);
+
+                            // 前回サイクルの「返却」自動確定：洗濯代行が返却リネン袋（青）数
+                            // （return_ready_bag_count）を確定済みで、ドライバーの最終返却確定
+                            // （return_bag_count）がまだの場合、今回の集荷登録（＝次回訪問時に
+                            // 前回分を返却したこと）をもって自動でそのまま確定する。これにより
+                            // 独立した「返却登録」操作は不要になる（collection_headcount.phpの
+                            // register_returnは手動での例外対応用に残す）。
+                            if ($previousCycle !== null
+                                && $previousCycle['return_ready_bag_count'] !== null
+                                && $previousCycle['return_bag_count'] === null) {
+                                $autoConfirmedReturnBagCount = (int) $previousCycle['return_ready_bag_count'];
+                                update_return(
+                                    $pdo, (int) $previousCycle['id'], $autoConfirmedReturnBagCount,
+                                    $pickupDate, $pickupTime, $pickupEmployeeId
+                                );
+                            }
+
+                            $pdo->commit();
+                        } catch (\Throwable $e) {
+                            $pdo->rollBack();
+                            throw $e;
+                        }
+                        $flashMessage = ($pickupBagCount !== null ? '集荷（' . $pickupBagCount . '袋）' : '集荷（交付のみ）') . 'を記録しました（' . $facilityName . '）。';
+                        if ($autoConfirmedReturnBagCount !== null) {
+                            $flashMessage .= '　前回サイクルの返却（' . $autoConfirmedReturnBagCount . '袋）も自動確定しました。';
+                        }
+                        set_flash('success', $flashMessage);
+                        header('Location: /staff/collection_entry.php');
+                        exit;
+                    }
                 }
-                $flashMessage = ($pickupBagCount !== null ? '集荷（' . $pickupBagCount . '袋）' : '集荷（交付のみ）') . 'を記録しました（' . $facilityName . '）。';
-                if ($autoConfirmedReturnBagCount !== null) {
-                    $flashMessage .= '　前回サイクルの返却（' . $autoConfirmedReturnBagCount . '袋）も自動確定しました。';
-                }
-                set_flash('success', $flashMessage);
-                header('Location: /staff/collection_entry.php');
-                exit;
-            }
-        } elseif ($action === 'register_arrival') {
-            // カードの「到着」行。cycle_idはカードのhidden inputで直接指定されるため、
-            // ラジオでの選び直しは不要（カードそのものが選択を兼ねる）。
-            $cycleId = (int) ($_POST['cycle_id'] ?? 0);
-            $arrivalCandidates = find_candidate_cycles($pdo, 'arrival');
-            $validArrivalIds = array_map('intval', array_column($arrivalCandidates, 'id'));
-
-            $bagCount = parse_bag_count($_POST['arrival_bag_count'] ?? '');
-            $date = resolve_entry_date($_POST['arrival_date'] ?? '', $todayStr);
-            $time = resolve_entry_time($_POST['arrival_time'] ?? '', $nowTimeStr);
-            $employeeId = resolve_entry_employee_id($_POST['arrival_employee_id'] ?? '', (int) $staff['id'], $validEmployeeIds);
-            $cleaningFacilityId = cc_parse_facility_id($_POST['arrival_facility_id'] ?? '', $validCleaningFacilityIds);
-
-            if (!in_array($cycleId, $validArrivalIds, true)) {
-                $errorMessage = '対象のサイクルが無効です（既に他の記録で更新された可能性があります）。ページを再読み込みしてください。';
-            } elseif ($bagCount === null) {
-                $errorMessage = '到着リネン袋数は0以上の整数を入力してください。';
-            } elseif ($date === false || $time === false || $employeeId === false) {
-                $errorMessage = '到着の日付・時間・担当者の入力内容が正しくありません。';
-            } elseif ($cleaningFacilityId === false || $cleaningFacilityId === null) {
-                $errorMessage = '到着クリーニング所を選択してください。';
-            } else {
-                update_arrival($pdo, $cycleId, $bagCount, $date, $time, $employeeId, $cleaningFacilityId);
-                set_flash('success', 'クリーニング所到着（' . $bagCount . '袋）を記録しました。');
-                header('Location: /staff/collection_entry.php');
-                exit;
-            }
-        } elseif ($action === 'register_dispatch') {
-            $cycleId = (int) ($_POST['cycle_id'] ?? 0);
-            $dispatchCandidates = find_candidate_cycles($pdo, 'dispatch');
-            $validDispatchIds = array_map('intval', array_column($dispatchCandidates, 'id'));
-
-            $bagCount = parse_bag_count($_POST['dispatch_bag_count'] ?? '');
-            $date = resolve_entry_date($_POST['dispatch_date'] ?? '', $todayStr);
-            $time = resolve_entry_time($_POST['dispatch_time'] ?? '', $nowTimeStr);
-            $employeeId = resolve_entry_employee_id($_POST['dispatch_employee_id'] ?? '', (int) $staff['id'], $validEmployeeIds);
-            $cleaningFacilityId = cc_parse_facility_id($_POST['dispatch_facility_id'] ?? '', $validCleaningFacilityIds);
-
-            if (!in_array($cycleId, $validDispatchIds, true)) {
-                $errorMessage = '対象のサイクルが無効です（既に他の記録で更新された可能性があります）。ページを再読み込みしてください。';
-            } elseif ($bagCount === null) {
-                $errorMessage = '発送リネン袋数は0以上の整数を入力してください。';
-            } elseif ($date === false || $time === false || $employeeId === false) {
-                $errorMessage = '発送の日付・時間・担当者の入力内容が正しくありません。';
-            } elseif ($cleaningFacilityId === false || $cleaningFacilityId === null) {
-                $errorMessage = '発送元クリーニング所を選択してください。';
-            } else {
-                update_dispatch($pdo, $cycleId, $bagCount, $date, $time, $employeeId, $cleaningFacilityId);
-                set_flash('success', 'クリーニング所発送（' . $bagCount . '袋）を記録しました。');
-                header('Location: /staff/collection_entry.php');
-                exit;
             }
         } elseif ($action === 'register_return') {
             $cycleId = (int) ($_POST['cycle_id'] ?? 0);
@@ -808,6 +879,9 @@ function format_stage_cell($bagCount, $time): string
         section { margin-bottom: 24px; }
         fieldset { border: 1px solid #ccc; border-radius: 4px; padding: 12px; margin-bottom: 12px; }
         fieldset legend { font-weight: bold; padding: 0 6px; }
+        fieldset.disabled { background: #f5f5f5; }
+        .candidate-row { border: 1px solid #ccc; border-radius: 4px; padding: 8px; margin-bottom: 6px; }
+        .candidate-row label { display: block; }
         .form-row { margin-bottom: 8px; }
         .form-row label { display: inline-block; width: 130px; }
         .form-row select, .form-row input[type="number"] { width: 220px; }
@@ -849,97 +923,210 @@ function format_stage_cell($bagCount, $time): string
     <p class="message error"><?= htmlspecialchars($errorMessage, ENT_QUOTES, 'UTF-8') ?></p>
 <?php endif; ?>
 
-<section class="entry-form">
-    <h2>新規集荷登録</h2>
-
-    <?php if (!empty($pickupChecklistRows)): ?>
-        <p class="notice">施設ごとの前回サイクル状況（本日の集荷予定と同じデータです）。返却空リネン袋（オレンジ）＝前回の集荷リネン袋数、集荷空リネン袋（青）＝洗濯代行が確定した返却リネン袋数。集荷登録すると、集荷空リネン袋（青）の数がそのまま前回サイクルの返却として自動確定されます。</p>
-        <table class="records">
-            <thead>
-                <tr>
-                    <th>施設名</th>
-                    <th>返却空リネン袋（オレンジ）</th>
-                    <th>集荷空リネン袋（青）</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($pickupChecklistRows as $row): ?>
-                    <tr>
-                        <td><?= htmlspecialchars($row['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= $row['latest_cycle_pickup_bag_count'] !== null ? (int) $row['latest_cycle_pickup_bag_count'] . '袋' : '-' ?></td>
-                        <td>
-                            <?php if ($row['latest_cycle_status'] === 'confirmed'): ?>
-                                <?= (int) $row['latest_cycle_return_ready_bag_count'] ?>袋
-                            <?php elseif ($row['latest_cycle_status'] === 'in_progress'): ?>
-                                作業前
-                            <?php else: ?>
-                                -
-                            <?php endif; ?>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
-    <?php endif; ?>
-
-    <fieldset>
+<?php if (empty($facilities)): ?>
+    <p class="notice">有効な施設が登録されていません。管理者にお問い合わせください。</p>
+<?php elseif ($step2 !== null): ?>
+    <?php $step2FacilityName = htmlspecialchars($facilityNamesById[$step2['facility_id']], ENT_QUOTES, 'UTF-8'); ?>
+    <section class="entry-form">
+        <h2><?= $step2FacilityName ?>の記録</h2>
         <form method="post" action="/staff/collection_entry.php">
             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-            <input type="hidden" name="action" value="create_pickup">
+            <input type="hidden" name="action" value="finalize">
+            <input type="hidden" name="facility_id" value="<?= (int) $step2['facility_id'] ?>">
+            <input type="hidden" name="is_cleaning_site" value="<?= $step2['is_cleaning_site'] ? '1' : '0' ?>">
 
-            <div class="form-row">
-                <label for="new_facility_id">施設</label>
-                <select id="new_facility_id" name="facility_id" required>
-                    <option value="">選択してください</option>
-                    <?php foreach ($pickupFacilities as $facility): ?>
-                        <option value="<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="form-row">
-                <label for="new_pickup_bag_count">集荷リネン袋数</label>
-                <input type="number" id="new_pickup_bag_count" name="pickup_bag_count" min="0" step="1">
-            </div>
-            <div class="form-grid">
+            <?php if ($step2['is_cleaning_site']): ?>
+                <fieldset<?= empty($step2['dispatch_candidates']) ? ' class="disabled"' : '' ?>>
+                    <legend>発送（前回持ち込み分）</legend>
+                    <?php if (empty($step2['dispatch_candidates'])): ?>
+                        <p class="notice">現在、発送待ちのサイクルはありません。</p>
+                    <?php else: ?>
+                        <?php if (count($step2['dispatch_candidates']) === 1): ?>
+                            <?php $onlyDispatchCandidate = $step2['dispatch_candidates'][0]; ?>
+                            <input type="hidden" name="dispatch_cycle_id" value="<?= (int) $onlyDispatchCandidate['id'] ?>">
+                            <p class="notice">発送対象: <?= format_cycle_candidate_label($onlyDispatchCandidate, $facilityNamesById) ?></p>
+                        <?php else: ?>
+                            <p class="notice">発送待ちのサイクルが複数あります。対象を選んでください。</p>
+                            <?php foreach ($step2['dispatch_candidates'] as $cycle): ?>
+                                <div class="candidate-row">
+                                    <label>
+                                        <input type="radio" name="dispatch_cycle_id" value="<?= (int) $cycle['id'] ?>" data-return-ready-bag-count="<?= $cycle['return_ready_bag_count'] !== null ? (int) $cycle['return_ready_bag_count'] : '' ?>">
+                                        <?= format_cycle_candidate_label($cycle, $facilityNamesById) ?>
+                                    </label>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                        <div class="form-row">
+                            <label for="dispatch_bag_count">発送リネン袋数</label>
+                            <?php
+                            // 洗濯代行が確定した返却リネン袋（青）数をそのまま発送数の初期値にする
+                            // （手動での編集は引き続き可能）。候補が複数ある場合は初期値を空にし、
+                            // ラジオ選択時にJSで反映する（下部のscript参照）。
+                            $dispatchBagCountDefault = count($step2['dispatch_candidates']) === 1
+                                ? ($step2['dispatch_candidates'][0]['return_ready_bag_count'] ?? '')
+                                : '';
+                            ?>
+                            <input type="number" id="dispatch_bag_count" name="dispatch_bag_count" min="0" step="1" value="<?= htmlspecialchars((string) $dispatchBagCountDefault, ENT_QUOTES, 'UTF-8') ?>">
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-row">
+                                <label for="dispatch_date">発送日</label>
+                                <input type="date" id="dispatch_date" name="dispatch_date" value="<?= (new DateTime())->format('Y-m-d') ?>">
+                            </div>
+                            <div class="form-row">
+                                <label for="dispatch_time">発送時間</label>
+                                <input type="time" id="dispatch_time" name="dispatch_time" value="<?= (new DateTime())->format('H:i') ?>">
+                            </div>
+                            <div class="form-row">
+                                <label for="dispatch_employee_id">発送担当者</label>
+                                <select id="dispatch_employee_id" name="dispatch_employee_id">
+                                    <?php foreach ($employees as $employee): ?>
+                                        <option value="<?= (int) $employee['id'] ?>" <?= (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                        </div>
+                    <?php endif; ?>
+                </fieldset>
+                <fieldset<?= empty($step2['arrival_candidates']) ? ' class="disabled"' : '' ?>>
+                    <legend>到着（今回持ち込み分）</legend>
+                    <?php if (empty($step2['arrival_candidates'])): ?>
+                        <p class="notice">現在、到着待ちのサイクル（未到着の集荷）はありません。</p>
+                    <?php else: ?>
+                        <?php if (count($step2['arrival_candidates']) === 1): ?>
+                            <?php $onlyArrivalCandidate = $step2['arrival_candidates'][0]; ?>
+                            <input type="hidden" name="arrival_cycle_id" value="<?= (int) $onlyArrivalCandidate['id'] ?>">
+                            <p class="notice">到着対象: <?= format_cycle_candidate_label($onlyArrivalCandidate, $facilityNamesById) ?></p>
+                        <?php else: ?>
+                            <p class="notice">到着待ちのサイクルが複数あります。対象を選んでください。</p>
+                            <?php foreach ($step2['arrival_candidates'] as $cycle): ?>
+                                <div class="candidate-row">
+                                    <label>
+                                        <input type="radio" name="arrival_cycle_id" value="<?= (int) $cycle['id'] ?>" data-pickup-bag-count="<?= $cycle['pickup_bag_count'] !== null ? (int) $cycle['pickup_bag_count'] : '' ?>">
+                                        <?= format_cycle_candidate_label($cycle, $facilityNamesById) ?>
+                                    </label>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                        <div class="form-row">
+                            <label for="arrival_bag_count">到着リネン袋数</label>
+                            <?php
+                            // 集荷リネン袋数がそのまま到着数として引き継がれることが多いため初期値にセットするが、
+                            // 現場での増減（一部だけ先に到着等）に対応できるよう編集は妨げない。
+                            $arrivalBagCountDefault = count($step2['arrival_candidates']) === 1
+                                ? ($step2['arrival_candidates'][0]['pickup_bag_count'] ?? '')
+                                : '';
+                            ?>
+                            <input type="number" id="arrival_bag_count" name="arrival_bag_count" min="0" step="1" value="<?= htmlspecialchars((string) $arrivalBagCountDefault, ENT_QUOTES, 'UTF-8') ?>">
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-row">
+                                <label for="arrival_date">到着日</label>
+                                <input type="date" id="arrival_date" name="arrival_date" value="<?= (new DateTime())->format('Y-m-d') ?>">
+                            </div>
+                            <div class="form-row">
+                                <label for="arrival_time">到着時間</label>
+                                <input type="time" id="arrival_time" name="arrival_time" value="<?= (new DateTime())->format('H:i') ?>">
+                            </div>
+                            <div class="form-row">
+                                <label for="arrival_employee_id">到着担当者</label>
+                                <select id="arrival_employee_id" name="arrival_employee_id">
+                                    <?php foreach ($employees as $employee): ?>
+                                        <option value="<?= (int) $employee['id'] ?>" <?= (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                        </div>
+                    <?php endif; ?>
+                </fieldset>
+            <?php else: ?>
+                <?php $prevCycleRow = $pickupChecklistByFacility[$step2['facility_id']] ?? null; ?>
+                <?php if ($prevCycleRow !== null): ?>
+                    <p class="notice">
+                        前回サイクル状況：返却空リネン袋（オレンジ）
+                        <?= $prevCycleRow['latest_cycle_pickup_bag_count'] !== null ? (int) $prevCycleRow['latest_cycle_pickup_bag_count'] . '袋' : '-' ?>
+                        ／ 集荷空リネン袋（青）
+                        <?php if ($prevCycleRow['latest_cycle_status'] === 'confirmed'): ?>
+                            <?= (int) $prevCycleRow['latest_cycle_return_ready_bag_count'] ?>袋（今回の集荷登録で前回サイクルの返却として自動確定されます）
+                        <?php elseif ($prevCycleRow['latest_cycle_status'] === 'in_progress'): ?>
+                            作業前
+                        <?php else: ?>
+                            -
+                        <?php endif; ?>
+                    </p>
+                <?php endif; ?>
+                <fieldset>
+                    <legend>集荷（今回分・新規サイクル）</legend>
+                    <div class="form-row">
+                        <label for="pickup_bag_count">集荷リネン袋数</label>
+                        <input type="number" id="pickup_bag_count" name="pickup_bag_count" min="0" step="1">
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-row">
+                            <label for="pickup_date">集荷日</label>
+                            <input type="date" id="pickup_date" name="pickup_date" value="<?= (new DateTime())->format('Y-m-d') ?>">
+                        </div>
+                        <div class="form-row">
+                            <label for="pickup_time">集荷時間</label>
+                            <input type="time" id="pickup_time" name="pickup_time" value="<?= (new DateTime())->format('H:i') ?>">
+                        </div>
+                        <div class="form-row">
+                            <label for="pickup_employee_id">集荷担当者</label>
+                            <select id="pickup_employee_id" name="pickup_employee_id">
+                                <?php foreach ($employees as $employee): ?>
+                                    <option value="<?= (int) $employee['id'] ?>" <?= (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                    <p class="notice">集荷時に施設へ渡した交換用の空袋・ネットの数（任意）</p>
+                    <div class="form-row">
+                        <label for="issued_bag_orange">リネン袋交付数（オレンジ）</label>
+                        <input type="number" id="issued_bag_orange" name="issued_bag_orange" min="0" step="1">
+                    </div>
+                    <div class="form-row">
+                        <label for="issued_bag_yellow">リネン袋交付数（黄）</label>
+                        <input type="number" id="issued_bag_yellow" name="issued_bag_yellow" min="0" step="1">
+                    </div>
+                    <div class="form-row">
+                        <label for="issued_bag_blue">リネン袋交付数（青）</label>
+                        <input type="number" id="issued_bag_blue" name="issued_bag_blue" min="0" step="1">
+                    </div>
+                    <div class="form-row">
+                        <label for="issued_laundry_net_count">洗濯ネット交付数</label>
+                        <input type="number" id="issued_laundry_net_count" name="issued_laundry_net_count" min="0" step="1">
+                    </div>
+                </fieldset>
+            <?php endif; ?>
+
+            <p class="notice">日付・時間は現在日時、担当者はログイン中のご本人（<?= htmlspecialchars($staff['name'], ENT_QUOTES, 'UTF-8') ?>）を初期値にしています。必要に応じて変更できます。リネン袋数の入力欄が空欄のままの項目は今回記録されません。</p>
+            <button type="submit">記録する</button>
+            <a href="/staff/collection_entry.php">最初からやり直す</a>
+        </form>
+    </section>
+<?php else: ?>
+    <section class="entry-form">
+        <h2>場所を選択</h2>
+        <fieldset>
+            <form method="post" action="/staff/collection_entry.php">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                <input type="hidden" name="action" value="resolve_location">
+
                 <div class="form-row">
-                    <label for="new_pickup_date">集荷日</label>
-                    <input type="date" id="new_pickup_date" name="pickup_date" value="<?= (new DateTime())->format('Y-m-d') ?>">
-                </div>
-                <div class="form-row">
-                    <label for="new_pickup_time">集荷時間</label>
-                    <input type="time" id="new_pickup_time" name="pickup_time" value="<?= (new DateTime())->format('H:i') ?>">
-                </div>
-                <div class="form-row">
-                    <label for="new_pickup_employee_id">集荷担当者</label>
-                    <select id="new_pickup_employee_id" name="pickup_employee_id">
-                        <?php foreach ($employees as $employee): ?>
-                            <option value="<?= (int) $employee['id'] ?>" <?= (int) $employee['id'] === (int) $staff['id'] ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                    <label for="location">場所</label>
+                    <select id="location" name="location" required>
+                        <option value="">選択してください</option>
+                        <?php foreach ($facilities as $facility): ?>
+                            <option value="<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
-            </div>
-            <p class="notice">集荷時に施設へ渡した交換用の空袋・ネットの数（任意）</p>
-            <div class="form-row">
-                <label for="new_issued_bag_orange">リネン袋交付数（オレンジ）</label>
-                <input type="number" id="new_issued_bag_orange" name="issued_bag_orange" min="0" step="1">
-            </div>
-            <div class="form-row">
-                <label for="new_issued_bag_yellow">リネン袋交付数（黄）</label>
-                <input type="number" id="new_issued_bag_yellow" name="issued_bag_yellow" min="0" step="1">
-            </div>
-            <div class="form-row">
-                <label for="new_issued_bag_blue">リネン袋交付数（青）</label>
-                <input type="number" id="new_issued_bag_blue" name="issued_bag_blue" min="0" step="1">
-            </div>
-            <div class="form-row">
-                <label for="new_issued_laundry_net_count">洗濯ネット交付数</label>
-                <input type="number" id="new_issued_laundry_net_count" name="issued_laundry_net_count" min="0" step="1">
-            </div>
-            <p class="notice">日付・時間は現在日時、担当者はログイン中のご本人（<?= htmlspecialchars($staff['name'], ENT_QUOTES, 'UTF-8') ?>）を初期値にしています。</p>
-            <button type="submit">記録する</button>
-        </form>
-    </fieldset>
-</section>
+
+                <button type="submit">次へ</button>
+            </form>
+        </fieldset>
+    </section>
+<?php endif; ?>
 
 <?php if ($editFormValues !== null): ?>
 <section class="edit-form">
@@ -1121,19 +1308,7 @@ function format_stage_cell($bagCount, $time): string
                             <?php if ($cycle['arrival_bag_count'] !== null): ?>
                                 <?= (int) $cycle['arrival_bag_count'] ?>袋・<?= $cycle['arrival_time'] !== null ? htmlspecialchars(substr($cycle['arrival_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '-' ?>
                             <?php else: ?>
-                                <form method="post" action="/staff/collection_entry.php">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="register_arrival">
-                                    <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                    <input type="number" name="arrival_bag_count" min="0" step="1" required placeholder="袋数" value="<?= $cycle['pickup_bag_count'] !== null ? (int) $cycle['pickup_bag_count'] : '' ?>">
-                                    <select name="arrival_facility_id" required>
-                                        <option value="">クリーニング所</option>
-                                        <?php foreach ($cleaningFacilities as $facility): ?>
-                                            <option value="<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
-                                        <?php endforeach; ?>
-                                    </select>
-                                    <button type="submit">到着登録</button>
-                                </form>
+                                未到着（上部の「場所を選択」でクリーニング所を選んで登録してください）
                             <?php endif; ?>
                         </span>
                     </div>
@@ -1146,22 +1321,7 @@ function format_stage_cell($bagCount, $time): string
                             <?php elseif ($cycle['arrival_bag_count'] === null): ?>
                                 （到着後に入力可）
                             <?php else: ?>
-                                <form method="post" action="/staff/collection_entry.php">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="register_dispatch">
-                                    <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                    <input type="number" name="dispatch_bag_count" min="0" step="1" required placeholder="袋数" value="<?= $cycle['return_ready_bag_count'] !== null ? (int) $cycle['return_ready_bag_count'] : '' ?>">
-                                    <select name="dispatch_facility_id" required>
-                                        <option value="">クリーニング所</option>
-                                        <?php foreach ($cleaningFacilities as $facility): ?>
-                                            <option value="<?= (int) $facility['id'] ?>" <?= (int) $facility['id'] === (int) $cycle['arrival_facility_id'] ? 'selected' : '' ?>><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
-                                        <?php endforeach; ?>
-                                    </select>
-                                    <button type="submit">発送登録</button>
-                                </form>
-                                <?php if ($cycle['return_ready_bag_count'] !== null): ?>
-                                    <br><small>洗濯代行の登録数（<?= (int) $cycle['return_ready_bag_count'] ?>袋）を初期値にしています。</small>
-                                <?php endif; ?>
+                                未発送（上部の「場所を選択」でクリーニング所を選んで登録してください）
                             <?php endif; ?>
                         </span>
                     </div>
@@ -1256,5 +1416,24 @@ function format_stage_cell($bagCount, $time): string
         </table>
     <?php endif; ?>
 </section>
+
+<script>
+document.querySelectorAll('input[name="arrival_cycle_id"][type="radio"]').forEach(function (radio) {
+    radio.addEventListener('change', function () {
+        var bagCountInput = document.getElementById('arrival_bag_count');
+        if (bagCountInput) {
+            bagCountInput.value = this.dataset.pickupBagCount || '';
+        }
+    });
+});
+document.querySelectorAll('input[name="dispatch_cycle_id"][type="radio"]').forEach(function (radio) {
+    radio.addEventListener('change', function () {
+        var bagCountInput = document.getElementById('dispatch_bag_count');
+        if (bagCountInput) {
+            bagCountInput.value = this.dataset.returnReadyBagCount || '';
+        }
+    });
+});
+</script>
 </body>
 </html>
