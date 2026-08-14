@@ -1368,7 +1368,6 @@ function format_stage_cell($bagCount, $time): string
 
 <section class="cycle-list">
     <h2>集荷サイクル一覧（返却未完了）</h2>
-    <p class="notice">この記録簿はチーム共有のため、記録した本人以外でも登録・修正・削除できます。</p>
 
     <?php
     $facilityPanelGroups = $openCycleFacilityPanelGroups;

@@ -1224,7 +1224,6 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
 <section class="cycle-list">
     <h2><?= $showHistory ? '過去の履歴（返却完了分）' : '集荷サイクル一覧（返却未完了）' ?></h2>
     <p><a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?><?= $showHistory ? '' : '?history=1' ?>"><?= $showHistory ? '未完了一覧に戻る' : '過去の履歴を表示' ?></a></p>
-    <p class="notice">この記録簿はチーム共有のため、確認した本人以外でも修正・削除できます。変更内容は履歴に記録されます。</p>
 
     <?php if ($showHistory): ?>
         <?php if (empty($cardCycles)): ?>
