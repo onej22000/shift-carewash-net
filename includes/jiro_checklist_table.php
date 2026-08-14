@@ -4,17 +4,34 @@
  * 戻り値）をスコープに用意した上でrequireすること。staff/jiro_dashboard.phpから使用する
  * （staff/dashboard.php側は件数・合計のみのサマリー表示のため、この部分テンプレートは使わない）。
  *
- * 返却空リネン袋（回収すべき空のオレンジ袋数）と返却リネン袋（青）数（洗濯代行が返却準備完了と
+ * 返却空リネン袋（回収すべき空のオレンジ袋数）と返却リネン袋数（洗濯代行が返却準備完了と
  * して登録済みの袋数）は別物。前者は施設の直近サイクルのpickup_bag_countをそのまま表示し、
  * 後者は直近サイクルの返却準備完了状況（return_ready_bag_count）に応じて数値／「作業前」／
  * 空欄を出し分ける（ドライバーの最終返却確定=return_bag_countとは別物）。
+ * 集荷空リネン袋列は返却リネン袋数列と同じソース・同じロジック（値は同一）で、
+ * staff/collection_entry.phpの新規集荷登録時の表示と用語を揃えるために追加した列（2026-08-14）。
+ *
+ * 背景色はcollection_headcount.php・collection_entry.phpのカード表と同じ関数
+ * issued_bag_color_row_class()を再利用する（本来tr向けの命名だが、この表は
+ * 施設名列を含む横長の表のため行全体ではなくセル単位で色を付ける）。
  */
 $renderChecklistRow = static function (array $row): void {
+    $issuedBagCellClass = issued_bag_color_row_class([
+        'issued_bag_orange' => $row['latest_cycle_issued_bag_orange'],
+        'issued_bag_yellow' => $row['latest_cycle_issued_bag_yellow'],
+    ]);
     ?>
     <tr>
         <td><?= htmlspecialchars($row['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
-        <td><?= $row['latest_cycle_pickup_bag_count'] !== null ? (int) $row['latest_cycle_pickup_bag_count'] . '袋' : '' ?></td>
-        <td>
+        <td class="<?= $issuedBagCellClass ?>"><?= $row['latest_cycle_pickup_bag_count'] !== null ? (int) $row['latest_cycle_pickup_bag_count'] . '袋' : '' ?></td>
+        <td class="row-return">
+            <?php if ($row['latest_cycle_status'] === 'confirmed'): ?>
+                <?= (int) $row['latest_cycle_return_ready_bag_count'] ?>袋
+            <?php elseif ($row['latest_cycle_status'] === 'in_progress'): ?>
+                作業前
+            <?php endif; ?>
+        </td>
+        <td class="row-return">
             <?php if ($row['latest_cycle_status'] === 'confirmed'): ?>
                 <?= (int) $row['latest_cycle_return_ready_bag_count'] ?>袋
             <?php elseif ($row['latest_cycle_status'] === 'in_progress'): ?>
@@ -38,7 +55,8 @@ $scheduleDateLabel = $scheduleDateLabel ?? '本日';
                 <tr>
                     <th>施設名</th>
                     <th>返却空リネン袋</th>
-                    <th>返却リネン袋（青）数</th>
+                    <th>返却リネン袋</th>
+                    <th>集荷空リネン袋</th>
                 </tr>
             </thead>
             <tbody>
@@ -68,7 +86,8 @@ $scheduleDateLabel = $scheduleDateLabel ?? '本日';
                 <tr>
                     <th>施設名</th>
                     <th>返却空リネン袋</th>
-                    <th>返却リネン袋（青）数</th>
+                    <th>返却リネン袋</th>
+                    <th>集荷空リネン袋</th>
                 </tr>
             </thead>
             <tbody>
@@ -80,6 +99,7 @@ $scheduleDateLabel = $scheduleDateLabel ?? '本日';
                 <tr>
                     <th>合計</th>
                     <td><?= $otherPickupTotal ?>袋</td>
+                    <td><?= $otherReturnReadyTotal ?>袋</td>
                     <td><?= $otherReturnReadyTotal ?>袋</td>
                 </tr>
             </tfoot>

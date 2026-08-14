@@ -29,6 +29,9 @@ $checklist = build_jiro_checklist_data($pdo, $viewDate);
         table.cycles th, table.cycles td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; font-size: 0.9em; }
         table.cycles th { background: #f5f5f5; }
         .jiro-checklist-totals table.cycles th { width: 90px; }
+        table.cycles td.row-issued-orange { background: #ffe0b2; }
+        table.cycles td.row-issued-yellow { background: #fff9c4; }
+        table.cycles td.row-return { background: #0b5ed7; color: #fff; }
         .schedule-nav { display: flex; gap: 10px; margin: 8px 0 20px; flex-wrap: wrap; }
         .schedule-nav a { padding: 10px 18px; border: 1px solid #0b5ed7; border-radius: 12px; color: #0b5ed7; text-decoration: none; font-weight: bold; background: #fff; }
         .schedule-nav a.active { color: #fff; background: #0b5ed7; }

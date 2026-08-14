@@ -2124,7 +2124,8 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
     // 「直近の集荷は今どの段階か」を一目で示すための状態表示（confirmed/in_progress/none）に使う。
     $latestCycleStmt = $pdo->query(
         'SELECT cc.facility_id, cc.return_bag_count, cc.return_ready_bag_count,
-                cc.return_ready_laundry_net_count, cc.pickup_bag_count
+                cc.return_ready_laundry_net_count, cc.pickup_bag_count,
+                cc.issued_bag_orange, cc.issued_bag_yellow
          FROM collection_cycles cc
          WHERE cc.deleted_at IS NULL
            AND cc.id = (
@@ -2173,6 +2174,8 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
             'latest_cycle_return_ready_bag_count' => $latestCycle['return_ready_bag_count'] ?? null,
             'latest_cycle_pickup_bag_count' => $latestCycle['pickup_bag_count'] ?? null,
             'latest_cycle_laundry_net_count' => $latestCycle['return_ready_laundry_net_count'] ?? null,
+            'latest_cycle_issued_bag_orange' => $latestCycle['issued_bag_orange'] ?? null,
+            'latest_cycle_issued_bag_yellow' => $latestCycle['issued_bag_yellow'] ?? null,
         ];
     };
 
