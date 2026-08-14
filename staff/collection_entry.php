@@ -48,6 +48,26 @@ function find_candidate_cycles(PDO $pdo, string $stage, ?int $facilityId = null)
     }
 }
 
+/**
+ * 新規集荷登録の対象facility_idについて、直近の既存サイクル（＝これから登録する
+ * サイクルの「前回サイクル」）を1件返す。「直近」はbuild_jiro_checklist_data()の
+ * latestPickupStmt/latestCycleStmtと同じ基準（pickup_date DESC, id DESC）。
+ * この関数は新規サイクルのINSERT前に呼ぶ前提のため、除外条件なしで「facility_idの
+ * 既存サイクルの最新1件」を取れば、それがそのまま「前回サイクル」になる。
+ */
+function find_previous_cycle_for_facility(PDO $pdo, int $facilityId): ?array
+{
+    $stmt = $pdo->prepare(
+        'SELECT * FROM collection_cycles
+         WHERE facility_id = :facility_id AND deleted_at IS NULL
+         ORDER BY pickup_date DESC, id DESC
+         LIMIT 1'
+    );
+    $stmt->execute([':facility_id' => $facilityId]);
+    $row = $stmt->fetch();
+    return $row !== false ? $row : null;
+}
+
 function parse_bag_count($raw): ?int
 {
     $raw = trim((string) $raw);
@@ -393,6 +413,12 @@ $employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff
 $employees = $employeesStmt->fetchAll();
 $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
 
+// 新規集荷登録フォームに表示する「施設ごとの前回サイクル状況」用。jiro_dashboard.php
+// （本日の集荷予定）と同じソース・同じロジックを再利用する（別計算式は作らない）。
+$pickupChecklist = build_jiro_checklist_data($pdo, new DateTime());
+$pickupChecklistRows = array_merge($pickupChecklist['today_rows'], $pickupChecklist['other_rows']);
+usort($pickupChecklistRows, static fn (array $a, array $b): int => $a['facility_name'] <=> $b['facility_name']);
+
 $errorMessage = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -427,6 +453,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errorMessage = '集荷の日付・時間・担当者の入力内容が正しくありません。';
             } else {
                 $facilityName = $facilityNamesById[$facilityId];
+                // 新規サイクルのINSERT前に取得する＝この時点でfacility_idに存在する最新サイクルが
+                // そのまま「前回サイクル」になる（find_previous_cycle_for_facility()のdocblock参照）。
+                $previousCycle = find_previous_cycle_for_facility($pdo, $facilityId);
+                $autoConfirmedReturnBagCount = null;
+
                 $pdo->beginTransaction();
                 try {
                     $newCycleId = insert_pickup(
@@ -439,12 +470,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'issued_bag_blue' => $issuedBagBlue,
                         'issued_laundry_net_count' => $issuedLaundryNetCount,
                     ], $facilityId, $facilityName, $newCycleId, $staff['id']);
+
+                    // 前回サイクルの「返却」自動確定：洗濯代行が返却リネン袋（青）数
+                    // （return_ready_bag_count）を確定済みで、ドライバーの最終返却確定
+                    // （return_bag_count）がまだの場合、今回の集荷登録（＝次回訪問時に
+                    // 前回分を返却したこと）をもって自動でそのまま確定する。これにより
+                    // 独立した「返却登録」操作は不要になる（collection_headcount.phpの
+                    // register_returnは手動での例外対応用に残す）。
+                    if ($previousCycle !== null
+                        && $previousCycle['return_ready_bag_count'] !== null
+                        && $previousCycle['return_bag_count'] === null) {
+                        $autoConfirmedReturnBagCount = (int) $previousCycle['return_ready_bag_count'];
+                        update_return(
+                            $pdo, (int) $previousCycle['id'], $autoConfirmedReturnBagCount,
+                            $pickupDate, $pickupTime, $pickupEmployeeId
+                        );
+                    }
+
                     $pdo->commit();
                 } catch (\Throwable $e) {
                     $pdo->rollBack();
                     throw $e;
                 }
-                set_flash('success', ($pickupBagCount !== null ? '集荷（' . $pickupBagCount . '袋）' : '集荷（交付のみ）') . 'を記録しました（' . $facilityName . '）。');
+                $flashMessage = ($pickupBagCount !== null ? '集荷（' . $pickupBagCount . '袋）' : '集荷（交付のみ）') . 'を記録しました（' . $facilityName . '）。';
+                if ($autoConfirmedReturnBagCount !== null) {
+                    $flashMessage .= '　前回サイクルの返却（' . $autoConfirmedReturnBagCount . '袋）も自動確定しました。';
+                }
+                set_flash('success', $flashMessage);
                 header('Location: /staff/collection_entry.php');
                 exit;
             }
@@ -702,11 +754,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($
 }
 
 // ---- カード一覧（返却未完了の集荷サイクル。1サイクル＝1カード。施設を問わずシステム全体） ----
+// pickup_bag_count IS NULLのサイクル（空袋・空ネット納品のみで実集荷が発生していないもの）は
+// 到着・発送・返却のいずれも発生しないため、無期限に「未返却」として残ってしまう。
+// collection_headcount.phpのfind_open_cycles()と同じ考え方で一覧から除外する。
 $openCyclesStmt = $pdo->query(
     "SELECT cc.*, f.name AS facility_name
      FROM collection_cycles cc
      INNER JOIN facilities f ON f.id = cc.facility_id
-     WHERE cc.return_bag_count IS NULL AND cc.deleted_at IS NULL
+     WHERE cc.return_bag_count IS NULL AND cc.pickup_bag_count IS NOT NULL AND cc.deleted_at IS NULL
      ORDER BY cc.pickup_date ASC, cc.id ASC
      LIMIT 200"
 );
@@ -796,6 +851,37 @@ function format_stage_cell($bagCount, $time): string
 
 <section class="entry-form">
     <h2>新規集荷登録</h2>
+
+    <?php if (!empty($pickupChecklistRows)): ?>
+        <p class="notice">施設ごとの前回サイクル状況（本日の集荷予定と同じデータです）。返却空リネン袋（オレンジ）＝前回の集荷リネン袋数、集荷空リネン袋（青）＝洗濯代行が確定した返却リネン袋数。集荷登録すると、集荷空リネン袋（青）の数がそのまま前回サイクルの返却として自動確定されます。</p>
+        <table class="records">
+            <thead>
+                <tr>
+                    <th>施設名</th>
+                    <th>返却空リネン袋（オレンジ）</th>
+                    <th>集荷空リネン袋（青）</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($pickupChecklistRows as $row): ?>
+                    <tr>
+                        <td><?= htmlspecialchars($row['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= $row['latest_cycle_pickup_bag_count'] !== null ? (int) $row['latest_cycle_pickup_bag_count'] . '袋' : '-' ?></td>
+                        <td>
+                            <?php if ($row['latest_cycle_status'] === 'confirmed'): ?>
+                                <?= (int) $row['latest_cycle_return_ready_bag_count'] ?>袋
+                            <?php elseif ($row['latest_cycle_status'] === 'in_progress'): ?>
+                                作業前
+                            <?php else: ?>
+                                -
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+    <?php endif; ?>
+
     <fieldset>
         <form method="post" action="/staff/collection_entry.php">
             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
@@ -1064,7 +1150,7 @@ function format_stage_cell($bagCount, $time): string
                                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
                                     <input type="hidden" name="action" value="register_dispatch">
                                     <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                    <input type="number" name="dispatch_bag_count" min="0" step="1" required placeholder="袋数" value="<?= (int) $cycle['arrival_bag_count'] ?>">
+                                    <input type="number" name="dispatch_bag_count" min="0" step="1" required placeholder="袋数" value="<?= $cycle['return_ready_bag_count'] !== null ? (int) $cycle['return_ready_bag_count'] : '' ?>">
                                     <select name="dispatch_facility_id" required>
                                         <option value="">クリーニング所</option>
                                         <?php foreach ($cleaningFacilities as $facility): ?>
@@ -1073,6 +1159,9 @@ function format_stage_cell($bagCount, $time): string
                                     </select>
                                     <button type="submit">発送登録</button>
                                 </form>
+                                <?php if ($cycle['return_ready_bag_count'] !== null): ?>
+                                    <br><small>洗濯代行の登録数（<?= (int) $cycle['return_ready_bag_count'] ?>袋）を初期値にしています。</small>
+                                <?php endif; ?>
                             <?php endif; ?>
                         </span>
                     </div>
