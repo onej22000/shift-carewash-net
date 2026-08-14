@@ -918,13 +918,16 @@ if (!empty($wsrIds)) {
 $facilityPanelGroups = $showHistory ? [] : group_open_cycles_into_facility_panels($pdo, $cardCycles);
 
 // ---- カード1件分の描画（履歴表示・施設パネル表示の両方から呼ぶ、二重管理を避けるため共通化） ----
-$renderCycleCard = function (array $cycle) use ($collectionHeadcountPath, $csrfToken, $participantsByWsrId, $isSharedAccount, $isAdminView, $employees, $staff): void {
+// $includeFacilityName: 施設パネル表示ではパネル見出しに施設名が既に出ているため、
+// カード見出し側は集荷日のみにして重複を避ける（改善1）。履歴表示（?history=1）は
+// パネルを使わない施設横断のフラット一覧なので、そちらだけ施設名を出す。
+$renderCycleCard = function (array $cycle, bool $includeFacilityName = false) use ($collectionHeadcountPath, $csrfToken, $participantsByWsrId, $isSharedAccount, $isAdminView, $employees, $staff): void {
     $cycleId = (int) $cycle['id'];
     $expectedReturnDate = calc_expected_return_date($cycle['pickup_date'], $cycle['facility_pickup_schedule']);
     $participants = $participantsByWsrId[(int) ($cycle['wsr_id'] ?? 0)] ?? [];
     ?>
     <article class="cycle-card">
-        <p class="cycle-card-title"><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?>　集荷日 <?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></p>
+        <p class="cycle-card-title"><?php if ($includeFacilityName): ?><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?>　<?php endif; ?>集荷日 <?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></p>
         <p class="cycle-card-info">返却予定日: <?= $expectedReturnDate !== null ? htmlspecialchars($expectedReturnDate, ENT_QUOTES, 'UTF-8') : '-' ?></p>
 
         <div class="cycle-card-row">
@@ -1083,11 +1086,15 @@ $renderCycleCard = function (array $cycle) use ($collectionHeadcountPath, $csrfT
         .cycle-card-detail-body dd { margin: 0 0 2px; }
 
         /* 施設パネル一覧（集荷曜日ごとにグループ化、nav-cardと同じ見た目。デフォルト展開で
-           幅に応じたレスポンシブグリッド表示。auto-fit+minmaxのみで列数を決めるため、
-           スマホ幅は自然に1列、タブレット〜PC幅で2〜3列になる（固定ブレークポイント不要）。 */
+           幅に応じたレスポンシブグリッド表示）。カード内の文字量が減ったため、auto-fitの
+           成り行きではなく明示的なブレークポイントで列数を固定する：900px未満は1列、
+           900px以上は3列固定。 */
         .facility-group { margin-bottom: 20px; }
         .facility-group-title { font-size: 1.05em; margin: 0 0 10px; color: #333; }
-        .facility-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+        .facility-panels { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+        @media (min-width: 900px) {
+            .facility-panels { grid-template-columns: repeat(3, 1fr); }
+        }
         .facility-panel { min-width: 0; border: 1px solid #aeb6c1; border-radius: 14px; background: linear-gradient(145deg, #f4f6f8 0%, #d6dce3 100%); box-shadow: 0 7px 16px rgba(30, 55, 90, 0.13), 0 2px 4px rgba(30, 55, 90, 0.08), inset 0 1px 0 rgba(255,255,255,0.95); overflow: hidden; }
         .facility-panel-summary { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 18px; cursor: pointer; list-style: none; font-weight: bold; color: #0b5ed7; }
         .facility-panel-summary::-webkit-details-marker { display: none; }
@@ -1225,7 +1232,7 @@ $renderCycleCard = function (array $cycle) use ($collectionHeadcountPath, $csrfT
         <?php else: ?>
             <div class="cycle-cards">
                 <?php foreach ($cardCycles as $cycle): ?>
-                    <?php $renderCycleCard($cycle); ?>
+                    <?php $renderCycleCard($cycle, true); ?>
                 <?php endforeach; ?>
             </div>
         <?php endif; ?>
