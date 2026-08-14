@@ -878,7 +878,7 @@ $renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
                     <th>返却</th>
                     <td>
                         <?php if ($cycle['dispatch_bag_count'] === null): ?>
-                            次回集荷時に自動登録されます
+                            未返却
                         <?php else: ?>
                             <form method="post" action="/staff/collection_entry.php">
                                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
