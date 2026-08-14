@@ -28,7 +28,9 @@ if ($period !== 'all') {
     $end = '2099-12-31';
 }
 
-$facilityCategoryStats = calc_facility_category_work_stats($pdo, $start, $end);
+// 「従業員別 1人あたり平均所要時間」表は2026-08-14に非表示化。データ取得・計算ロジック自体は
+// 将来的な復活・別用途での利用に備えてそのまま残し、下部のHTML出力のみこのフラグで条件分岐する。
+$showEmployeeSpeedTable = false;
 
 // ---- 従業員別: 参加セッションごとの実働時間（work_stage_record_employees.started_at〜
 // work_stage_records.completed_atの実測）----
@@ -46,7 +48,27 @@ $sessionStmt = $pdo->prepare(
 );
 $sessionStmt->execute($stageParams);
 
-$employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' AND is_shared_account = 0 ORDER BY name");
+// 「施設別・日別 サイクル明細」表は2026-08-14に非表示化。理由: 作業時間の算出が
+// resolve_work_stage_started_at()ベース（work_stage_recordsの登録間隔）のため、後からまとめて
+// 入力した場合に実際の作業時間ではなく登録間隔を拾ってしまう可能性があり、1施設1サイクル単位
+// では不正確になり得る。また1日に複数施設をまたぐ場合、実際の出退勤時間を施設ごとに按分する
+// 合理的な方法がない。データ取得・計算ロジック自体は将来的な復活・別用途に備えて残し、
+// 下部のHTML出力のみこのフラグで条件分岐する。
+$showCycleDetailTable = false;
+
+// 「日別サイクル明細」の説明バナー（黄色い注記文）は2026-08-14に非表示化。
+// テキスト自体は残し、表示のみこのフラグで条件分岐する。
+$showByDayNotice = false;
+
+// 洗濯代行の実働メンバーのみに絞る（2026-08-14、明示的な指定により固定）。
+const WORK_SPEED_TARGET_EMPLOYEE_NAMES = ['山本真実', '山本真栄', '森香奈子', '渡邊友梨'];
+$employeesStmt = $pdo->prepare(
+    "SELECT id, name FROM employees
+     WHERE role = 'staff' AND is_shared_account = 0
+       AND name IN (" . implode(',', array_fill(0, count(WORK_SPEED_TARGET_EMPLOYEE_NAMES), '?')) . ")
+     ORDER BY name"
+);
+$employeesStmt->execute(WORK_SPEED_TARGET_EMPLOYEE_NAMES);
 $employees = $employeesStmt->fetchAll();
 
 $sessionStatsByEmployee = [];
@@ -72,21 +94,128 @@ foreach ($employees as $employee) {
     ];
 }
 
-// ---- 施設別: 洗濯代行の人数合計 ----
-// 洗濯・乾燥・畳みは2026-08-06に「洗濯」1工程へ統合したため、工程別の内訳ではなく施設別合計のみを出す。
-$facilityStmt = $pdo->prepare(
-    "SELECT w.facility_id, f.name AS facility_name, SUM(w.person_count) AS total
-     FROM work_stage_records w
-     INNER JOIN facilities f ON f.id = w.facility_id
-     WHERE w.stage = 'wash' AND w.deleted_at IS NULL $stageDateCondition
-     GROUP BY w.facility_id, f.name"
+// ---- 施設別・日別 サイクル明細一覧（1サイクル1行）----
+// 施設別・区分別の按分集計（旧calc_facility_category_work_stats()、廃止）に代えて、
+// collection_cycles ⇔ work_stage_records.collection_cycle_id の直接紐付けに基づく明細を出す。
+// 1サイクルにつきwork_stage_recordsは最大1件（admin/collection_headcount.phpのcomplete_workが
+// 重複登録をブロックしているため）だが、その1件に複数参加者がいることはある。
+// resolve_work_stage_started_at()はstarted_atを参加者ごとに個別解決するため、実際には
+// 参加者間でstarted_atが一致しない（実データで確認済み）。作業時間は「その作業自体にかかった
+// 実時間」を1本の値で示すため、合算ではなく、参加者のうち最も早いstarted_at（＝completed_atとの
+// 差分が最大になる参加者のTIMESTAMPDIFF）を採用する（2026-08-14、合算方式から変更）。
+// 作業氏名は従来通り参加者全員を「・」区切りで連結する。
+$cycleDetailStmt = $pdo->prepare(
+    "SELECT cc.id AS cycle_id, f.name AS facility_name, cc.pickup_date,
+            cc.pickup_bag_count, cc.return_ready_laundry_net_count,
+            wsr.id AS wsr_id, wsr.completed_at AS wsr_completed_at
+     FROM collection_cycles cc
+     INNER JOIN facilities f ON f.id = cc.facility_id
+     LEFT JOIN work_stage_records wsr ON wsr.collection_cycle_id = cc.id AND wsr.deleted_at IS NULL
+     WHERE cc.deleted_at IS NULL AND f.facility_type != 'クリーニング所'
+           AND cc.pickup_date BETWEEN :start AND :end
+     ORDER BY f.name, cc.pickup_date"
 );
-$facilityStmt->execute($stageParams);
+$cycleDetailStmt->execute([':start' => $start, ':end' => $end]);
+$cycleDetailRows = $cycleDetailStmt->fetchAll();
 
-$facilityData = [];
-foreach ($facilityStmt->fetchAll() as $row) {
-    $facilityId = (int) $row['facility_id'];
-    $facilityData[$facilityId] = ['name' => $row['facility_name'], 'total' => (int) $row['total']];
+$wsrIds = array_values(array_unique(array_filter(array_map(
+    static fn (array $row): ?int => $row['wsr_id'] !== null ? (int) $row['wsr_id'] : null,
+    $cycleDetailRows
+))));
+
+$workStatsByWsrId = [];
+if (!empty($wsrIds)) {
+    $placeholders = implode(',', array_fill(0, count($wsrIds), '?'));
+    $participantStmt = $pdo->prepare(
+        "SELECT wse.work_stage_record_id, e.name AS employee_name,
+                TIMESTAMPDIFF(MINUTE, wse.started_at, wsr.completed_at) AS session_minutes
+         FROM work_stage_record_employees wse
+         INNER JOIN work_stage_records wsr ON wsr.id = wse.work_stage_record_id
+         INNER JOIN employees e ON e.id = wse.employee_id
+         WHERE wse.work_stage_record_id IN ($placeholders)
+         ORDER BY e.name"
+    );
+    $participantStmt->execute($wsrIds);
+    foreach ($participantStmt->fetchAll() as $row) {
+        $wsrId = (int) $row['work_stage_record_id'];
+        if (!isset($workStatsByWsrId[$wsrId])) {
+            $workStatsByWsrId[$wsrId] = ['elapsed_minutes' => 0, 'names' => []];
+        }
+        $workStatsByWsrId[$wsrId]['elapsed_minutes'] = max($workStatsByWsrId[$wsrId]['elapsed_minutes'], max(0, (int) $row['session_minutes']));
+        $workStatsByWsrId[$wsrId]['names'][] = $row['employee_name'];
+    }
+}
+
+// ---- 日別サイクル明細一覧（1日1行、全施設集約）----
+// 施設数・集荷リネン袋数合計・洗濯ネット数合計は collection_cycles を pickup_date で
+// GROUP BYするだけで求まる（work_stage_recordsの有無を問わない）。
+// 2026-08-14修正: 交付のみ（空袋・空ネット納品のみで、pickup_bag_count・arrival_bag_countが
+// どちらもNULL＝物理的に何も動いていない）のサイクルは「実務が発生した日」に含めない。
+// 集荷リネン袋数（合計）は、manual_register経由（collection_headcount.php上部フォーム）で
+// 作成された一部のレコードがpickup_bag_countを持たずarrival_bag_countのみに値が入るため、
+// COALESCE(pickup_bag_count, arrival_bag_count)の合計に変更。
+$dailyTotalsStmt = $pdo->prepare(
+    "SELECT cc.pickup_date,
+            COUNT(DISTINCT cc.facility_id) AS facility_count,
+            SUM(COALESCE(cc.pickup_bag_count, cc.arrival_bag_count)) AS pickup_bag_total,
+            SUM(cc.return_ready_laundry_net_count) AS net_total
+     FROM collection_cycles cc
+     INNER JOIN facilities f ON f.id = cc.facility_id
+     WHERE cc.deleted_at IS NULL AND f.facility_type != 'クリーニング所'
+           AND cc.pickup_date BETWEEN :start AND :end
+           AND (cc.pickup_bag_count IS NOT NULL OR cc.arrival_bag_count IS NOT NULL)
+     GROUP BY cc.pickup_date
+     ORDER BY cc.pickup_date"
+);
+$dailyTotalsStmt->execute([':start' => $start, ':end' => $end]);
+$dailyTotalsRows = $dailyTotalsStmt->fetchAll();
+
+// 作業氏名（重複なし）は、その日に洗濯代行の作業に関わった全従業員が対象——
+// collection_cycle_idの有無は問わない（2026-08-14修正、元の指示はcycle紐付きに限定していなかった）。
+// work_stage_records.record_dateを直接の日付キーとして使う（collection_cycles経由ではない）ため、
+// facility_typeによる絞り込みも不要（work_stage_records単体で完結する）。
+// stage='wash'は「洗濯代行」区分のレコードのみを対象にする既存の絞り込み（本ファイル上部の
+// $sessionStmtと同じ条件）——category='洗濯代行'は常にstage='wash'とペアになっている。
+$dailyParticipantStmt = $pdo->prepare(
+    "SELECT wsr.record_date, e.name AS employee_name
+     FROM work_stage_records wsr
+     INNER JOIN work_stage_record_employees wse ON wse.work_stage_record_id = wsr.id
+     INNER JOIN employees e ON e.id = wse.employee_id
+     WHERE wsr.deleted_at IS NULL AND wsr.stage = 'wash'
+           AND wsr.record_date BETWEEN :start AND :end"
+);
+$dailyParticipantStmt->execute([':start' => $start, ':end' => $end]);
+
+$dailyWorkStatsByDate = [];
+foreach ($dailyParticipantStmt->fetchAll() as $row) {
+    $date = $row['record_date'];
+    if (!isset($dailyWorkStatsByDate[$date])) {
+        $dailyWorkStatsByDate[$date] = ['names' => []];
+    }
+    $dailyWorkStatsByDate[$date]['names'][$row['employee_name']] = true;
+}
+
+// 作業時間（その日全体の稼働の幅）は、2026-08-14に
+// resolve_work_stage_started_at()ベース（work_stage_recordsの登録間隔）から、
+// その日の「洗濯代行」区分の出退勤打刻（attendance、客観的な実測値）ベースに変更。
+// 1サイクル単位のstarted_atは後からまとめて入力した際の登録間隔を拾ってしまう可能性があり、
+// また複数施設をまたぐ日には施設ごとの按分方法が無いため、打刻という日単位の客観的事実を
+// そのまま採用する。status = 'done'（clock_out_at確定済み）のみを対象にする。
+$dailyAttendanceStmt = $pdo->prepare(
+    "SELECT DATE(clock_in_at) AS work_day, MIN(clock_in_at) AS earliest_clock_in, MAX(clock_out_at) AS latest_clock_out
+     FROM attendance
+     WHERE category = '洗濯代行' AND status = 'done' AND deleted_at IS NULL
+           AND DATE(clock_in_at) BETWEEN :start AND :end
+     GROUP BY DATE(clock_in_at)"
+);
+$dailyAttendanceStmt->execute([':start' => $start, ':end' => $end]);
+
+$dailyAttendanceSpanByDate = [];
+foreach ($dailyAttendanceStmt->fetchAll() as $row) {
+    $dailyAttendanceSpanByDate[$row['work_day']] = [
+        'earliest_clock_in' => $row['earliest_clock_in'],
+        'latest_clock_out' => $row['latest_clock_out'],
+    ];
 }
 ?>
 <!DOCTYPE html>
@@ -108,6 +237,7 @@ foreach ($facilityStmt->fetchAll() as $row) {
         table.speed th, table.speed td { border: 1px solid #ccc; padding: 8px; text-align: right; }
         table.speed th:first-child, table.speed td:first-child { text-align: left; }
         table.speed th { background: #f5f5f5; }
+        table.speed tfoot th, table.speed tfoot td { background: #eef3fb; font-weight: bold; }
         .total-col { font-weight: bold; }
     </style>
 </head>
@@ -123,6 +253,7 @@ foreach ($facilityStmt->fetchAll() as $row) {
     <?php endforeach; ?>
 </div>
 
+<?php if ($showEmployeeSpeedTable): ?>
 <section class="by-employee">
     <h2>従業員別 1人あたり平均所要時間</h2>
     <p class="notice">参加者ごとの開始時刻（本人の直前セッションの完了時刻、無ければ当日の洗濯代行出勤時刻）〜作業完了時刻の実測に基づく集計です。
@@ -145,10 +276,10 @@ foreach ($facilityStmt->fetchAll() as $row) {
                 <?php foreach ($employeeSpeed as $data): ?>
                     <tr>
                         <td><?= htmlspecialchars($data['name'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= $data['total_minutes'] ?>分</td>
+                        <td><?= number_format($data['total_minutes'] / 60, 2) ?>時間</td>
                         <td><?= $data['session_count'] ?>件</td>
                         <td class="total-col">
-                            <?= $data['session_count'] > 0 ? number_format($data['total_minutes'] / $data['session_count'], 2) . '分' : '-' ?>
+                            <?= $data['session_count'] > 0 ? number_format($data['total_minutes'] / $data['session_count'] / 60, 2) . '時間' : '-' ?>
                         </td>
                     </tr>
                 <?php endforeach; ?>
@@ -156,68 +287,100 @@ foreach ($facilityStmt->fetchAll() as $row) {
         </table>
     <?php endif; ?>
 </section>
+<?php endif; ?>
 
-<section class="by-facility-category">
-    <h2>施設別・区分別 作業時間・作業効率</h2>
+<?php if ($showCycleDetailTable): ?>
+<section class="by-cycle">
+    <h2>施設別・日別 サイクル明細</h2>
     <p class="notice">
-        出退勤実績（実働時間）と作業実績（施設・区分・人数）が同じ従業員・同じ日に存在する分のみを対象に、
-        その日の実働時間を、その日の作業実績（区分問わず）の人数比で各施設・区分に按分して算出しています。
-        区分は work_stage_records 側（工程ごとの実際の区分。集荷は集荷・配送記録簿に移行したため、
-        現在の作業実績は洗濯・乾燥・畳みのみで区分は常に「洗濯代行」）を基準にしており、
-        打刻時の区分（その日の主な区分）とは一致しない場合があります。区分の記録が無い古い作業実績は対象外です。
+        集荷サイクル（collection_cycles）を施設・集荷日ごとに1行で並べた明細です。
+        作業時間は、そのサイクルに紐づく作業登録（work_stage_records.collection_cycle_id）の
+        参加者のうち最も早い開始時刻（本人の同日の直前セッション完了時刻、無ければ当日の洗濯代行出勤時刻）〜
+        作業完了時刻の1本の実時間です（参加人数によらず、その作業自体にかかった実時間を示します）。
+        作業氏名は参加者全員を「・」区切りで表示しています。作業登録が未登録のサイクルは「-」で表示されます。
     </p>
 
-    <?php if (empty($facilityCategoryStats)): ?>
-        <p class="notice">対象期間に、区分付きの出退勤実績と作業実績が両方そろっているデータがありません。</p>
+    <?php if (empty($cycleDetailRows)): ?>
+        <p class="notice">対象期間に集荷サイクルがありません。</p>
     <?php else: ?>
         <table class="speed">
             <thead>
                 <tr>
-                    <th>施設</th>
-                    <th>区分</th>
-                    <th>合計作業時間</th>
-                    <th>合計人数</th>
-                    <th>作業効率（1人あたり平均）</th>
+                    <th>施設名</th>
+                    <th>集荷日</th>
+                    <th>集荷リネン袋数</th>
+                    <th>洗濯ネット数</th>
+                    <th>作業時間</th>
+                    <th>作業氏名</th>
                 </tr>
             </thead>
             <tbody>
-                <?php foreach ($facilityCategoryStats as $facilityName => $categories): ?>
-                    <?php foreach ($categories as $category => $data): ?>
-                        <tr>
-                            <td><?= htmlspecialchars($facilityName, ENT_QUOTES, 'UTF-8') ?></td>
-                            <td><?= htmlspecialchars($category, ENT_QUOTES, 'UTF-8') ?></td>
-                            <td><?= $data['total_minutes'] ?>分</td>
-                            <td><?= $data['total_people'] ?>人</td>
-                            <td class="total-col">
-                                <?= $data['efficiency_minutes_per_person'] !== null ? number_format($data['efficiency_minutes_per_person'], 2) . '分' : '-' ?>
-                            </td>
-                        </tr>
-                    <?php endforeach; ?>
+                <?php foreach ($cycleDetailRows as $row): ?>
+                    <?php $workStats = $row['wsr_id'] !== null ? ($workStatsByWsrId[(int) $row['wsr_id']] ?? null) : null; ?>
+                    <tr>
+                        <td><?= htmlspecialchars($row['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars($row['pickup_date'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= $row['pickup_bag_count'] !== null ? (int) $row['pickup_bag_count'] . '袋' : '-' ?></td>
+                        <td><?= $row['return_ready_laundry_net_count'] !== null ? (int) $row['return_ready_laundry_net_count'] . '枚' : '-' ?></td>
+                        <td class="total-col">
+                            <?= $workStats !== null ? number_format($workStats['elapsed_minutes'] / 60, 2) . '時間' : '-' ?>
+                        </td>
+                        <td><?= $workStats !== null ? htmlspecialchars(implode('・', $workStats['names']), ENT_QUOTES, 'UTF-8') : '-' ?></td>
+                    </tr>
                 <?php endforeach; ?>
             </tbody>
         </table>
     <?php endif; ?>
 </section>
+<?php endif; ?>
 
-<section class="by-facility">
-    <h2>施設別 作業人数合計</h2>
-    <p class="notice">洗濯代行（洗濯・乾燥・畳みを2026-08-06に統合）の人数合計です。区分の紐付けが無い作業実績も含みます。</p>
+<section class="by-day">
+    <h2>日別サイクル明細</h2>
+    <?php if ($showByDayNotice): ?>
+    <p class="notice">
+        日付（collection_cycles.pickup_date）ごとに、その日の全施設・全サイクル（交付のみ＝
+        pickup_bag_count・arrival_bag_countが両方NULLのサイクルを除く）を集約した1行です。
+        作業時間は、その日の「洗濯代行」区分の出退勤打刻（attendance）のうち最も早い出勤時刻〜
+        最も遅い退勤時刻という、その日全体の稼働の幅を示します（work_stage_records側の登録間隔では
+        なく、客観的な打刻実績を使用しています）。作業氏名は、その日に洗濯代行の作業
+        （work_stage_record_employees）に関わった全従業員を重複なく列挙しています。
+    </p>
+    <?php endif; ?>
 
-    <?php if (empty($facilityData)): ?>
-        <p class="notice">対象期間に洗濯代行の記録がありません。</p>
+    <?php if (empty($dailyTotalsRows)): ?>
+        <p class="notice">対象期間に集荷サイクルがありません。</p>
     <?php else: ?>
         <table class="speed">
             <thead>
                 <tr>
-                    <th>施設</th>
-                    <th>洗濯代行 合計</th>
+                    <th>日付</th>
+                    <th>施設数</th>
+                    <th>集荷リネン袋数（合計）</th>
+                    <th>洗濯ネット数（合計）</th>
+                    <th>作業時間</th>
+                    <th>作業氏名</th>
                 </tr>
             </thead>
             <tbody>
-                <?php foreach ($facilityData as $data): ?>
+                <?php foreach ($dailyTotalsRows as $row): ?>
+                    <?php
+                    $dayStats = $dailyWorkStatsByDate[$row['pickup_date']] ?? null;
+                    $dayNames = $dayStats !== null ? array_keys($dayStats['names']) : [];
+                    sort($dayNames);
+                    $dayAttendanceSpan = $dailyAttendanceSpanByDate[$row['pickup_date']] ?? null;
+                    $daySpanMinutes = $dayAttendanceSpan !== null
+                        ? intdiv(strtotime($dayAttendanceSpan['latest_clock_out']) - strtotime($dayAttendanceSpan['earliest_clock_in']), 60)
+                        : null;
+                    ?>
                     <tr>
-                        <td><?= htmlspecialchars($data['name'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td class="total-col"><?= $data['total'] ?>人</td>
+                        <td><?= htmlspecialchars($row['pickup_date'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= (int) $row['facility_count'] ?></td>
+                        <td><?= $row['pickup_bag_total'] !== null ? (int) $row['pickup_bag_total'] . '袋' : '-' ?></td>
+                        <td><?= $row['net_total'] !== null ? (int) $row['net_total'] . '枚' : '-' ?></td>
+                        <td class="total-col">
+                            <?= $daySpanMinutes !== null ? number_format($daySpanMinutes / 60, 2) . '時間' : '-' ?>
+                        </td>
+                        <td><?= !empty($dayNames) ? htmlspecialchars(implode('・', $dayNames), ENT_QUOTES, 'UTF-8') : '-' ?></td>
                     </tr>
                 <?php endforeach; ?>
             </tbody>
