@@ -1715,7 +1715,7 @@ if ($isAdminView) {
 
 <div class="period-nav">
     <?php foreach ($wsrPeriodLabels as $key => $label): ?>
-        <a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?period=<?= htmlspecialchars($key, ENT_QUOTES, 'UTF-8') ?>" class="<?= $wsrPeriod === $key ? 'active' : '' ?>"><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></a>
+        <a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?period=<?= htmlspecialchars($key, ENT_QUOTES, 'UTF-8') ?>" class="<?= $wsrPeriod === (string) $key ? 'active' : '' ?>"><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></a>
     <?php endforeach; ?>
 </div>
 

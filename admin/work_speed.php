@@ -260,7 +260,7 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
 
 <div class="period-nav">
     <?php foreach ($periodLabels as $key => $label): ?>
-        <a href="?period=<?= htmlspecialchars($key, ENT_QUOTES, 'UTF-8') ?>" class="<?= $period === $key ? 'active' : '' ?>"><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></a>
+        <a href="?period=<?= htmlspecialchars($key, ENT_QUOTES, 'UTF-8') ?>" class="<?= $period === (string) $key ? 'active' : '' ?>"><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></a>
     <?php endforeach; ?>
 </div>
 
