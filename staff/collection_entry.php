@@ -824,19 +824,85 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($
     }
 }
 
-// ---- カード一覧（返却未完了の集荷サイクル。1サイクル＝1カード。施設を問わずシステム全体） ----
+// ---- カード一覧（返却未完了の集荷サイクル。1サイクル＝1カード。施設パネル表示のため
+//      施設ごとにグループ化する。介護施設・自社が対象で、クリーニング所は対象外） ----
 // pickup_bag_count IS NULLのサイクル（空袋・空ネット納品のみで実集荷が発生していないもの）は
 // 到着・発送・返却のいずれも発生しないため、無期限に「未返却」として残ってしまう。
 // collection_headcount.phpのfind_open_cycles()と同じ考え方で一覧から除外する。
+// facility_pickup_schedule/facility_onboarding_start_dateは
+// group_open_cycles_into_facility_panels()（includes/functions.php）が施設パネルの
+// 集荷曜日グループ化・受託開始日フィルタに使う。
 $openCyclesStmt = $pdo->query(
-    "SELECT cc.*, f.name AS facility_name
+    "SELECT cc.*, f.name AS facility_name, f.pickup_schedule AS facility_pickup_schedule,
+            f.onboarding_start_date AS facility_onboarding_start_date
      FROM collection_cycles cc
      INNER JOIN facilities f ON f.id = cc.facility_id
      WHERE cc.return_bag_count IS NULL AND cc.pickup_bag_count IS NOT NULL AND cc.deleted_at IS NULL
+           AND f.facility_type != 'クリーニング所'
      ORDER BY cc.pickup_date ASC, cc.id ASC
      LIMIT 200"
 );
 $openCycles = $openCyclesStmt->fetchAll();
+$openCycleFacilityPanelGroups = group_open_cycles_into_facility_panels($pdo, $openCycles);
+
+// ---- カード1件分の描画（施設パネル表示から呼ぶ） ----
+$renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
+    $cycleId = (int) $cycle['id'];
+    ?>
+    <article class="cycle-card">
+        <p class="cycle-card-title"><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?>　集荷日 <?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></p>
+
+        <div class="cycle-card-row">
+            <span class="label">集荷</span>
+            <span class="value done"><?= htmlspecialchars(format_pickup_summary_label($cycle), ENT_QUOTES, 'UTF-8') ?></span>
+        </div>
+
+        <div class="cycle-card-row">
+            <span class="label">到着</span>
+            <span class="value <?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
+                <?php if ($cycle['arrival_bag_count'] !== null): ?>
+                    <?= (int) $cycle['arrival_bag_count'] ?>袋・<?= $cycle['arrival_time'] !== null ? htmlspecialchars(substr($cycle['arrival_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '-' ?>
+                <?php else: ?>
+                    未到着（上部の「場所を選択」でクリーニング所を選んで登録してください）
+                <?php endif; ?>
+            </span>
+        </div>
+
+        <div class="cycle-card-row">
+            <span class="label">発送</span>
+            <span class="value <?= $cycle['dispatch_bag_count'] !== null ? 'done' : '' ?>">
+                <?php if ($cycle['dispatch_bag_count'] !== null): ?>
+                    <?= (int) $cycle['dispatch_bag_count'] ?>袋・<?= $cycle['dispatch_time'] !== null ? htmlspecialchars(substr($cycle['dispatch_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '-' ?>
+                <?php elseif ($cycle['arrival_bag_count'] === null): ?>
+                    （到着後に入力可）
+                <?php else: ?>
+                    未発送（上部の「場所を選択」でクリーニング所を選んで登録してください）
+                <?php endif; ?>
+            </span>
+        </div>
+
+        <div class="cycle-card-row">
+            <span class="label">返却</span>
+            <span class="value">
+                <?php if ($cycle['dispatch_bag_count'] === null): ?>
+                    （発送後に入力可）
+                <?php else: ?>
+                    <form method="post" action="/staff/collection_entry.php">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="action" value="register_return">
+                        <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
+                        <input type="number" name="return_bag_count" min="0" step="1" required placeholder="袋数" value="<?= $cycle['return_ready_bag_count'] !== null ? (int) $cycle['return_ready_bag_count'] : '' ?>">
+                        <button type="submit">返却登録</button>
+                    </form>
+                    <?php if ($cycle['return_ready_bag_count'] !== null): ?>
+                        <br><small>洗濯代行の登録数（<?= (int) $cycle['return_ready_bag_count'] ?>袋）を初期値にしています。</small>
+                    <?php endif; ?>
+                <?php endif; ?>
+            </span>
+        </div>
+    </article>
+    <?php
+};
 
 // ---- 直近の全サイクル状況（施設横断・自分以外の入力も含めて全体の進捗を確認できるようにする） ----
 $recentStmt = $pdo->query(
@@ -907,6 +973,20 @@ function format_stage_cell($bagCount, $time): string
         .cycle-card-row .value form { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
         .cycle-card-row .value input[type="number"] { width: 70px; }
         .cycle-card-row .value select { max-width: 100%; }
+
+        /* 施設パネル一覧（集荷曜日ごとにグループ化、nav-cardと同じ見た目。デフォルト展開で
+           幅に応じたレスポンシブグリッド表示。auto-fit+minmaxのみで列数を決めるため、
+           スマホ幅は自然に1列、タブレット〜PC幅で2〜3列になる（固定ブレークポイント不要）。 */
+        .facility-group { margin-bottom: 20px; }
+        .facility-group-title { font-size: 1.05em; margin: 0 0 10px; color: #333; }
+        .facility-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+        .facility-panel { min-width: 0; border: 1px solid #aeb6c1; border-radius: 14px; background: linear-gradient(145deg, #f4f6f8 0%, #d6dce3 100%); box-shadow: 0 7px 16px rgba(30, 55, 90, 0.13), 0 2px 4px rgba(30, 55, 90, 0.08), inset 0 1px 0 rgba(255,255,255,0.95); overflow: hidden; }
+        .facility-panel-summary { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 18px; cursor: pointer; list-style: none; font-weight: bold; color: #0b5ed7; }
+        .facility-panel-summary::-webkit-details-marker { display: none; }
+        .facility-panel-summary::after { content: '▲'; font-size: 0.7em; color: #0b5ed7; }
+        .facility-panel:not([open]) .facility-panel-summary::after { content: '▼'; }
+        .facility-panel-count { font-weight: normal; color: #555; font-size: 0.9em; }
+        .facility-panel-cycles { padding: 0 14px 14px; }
     </style>
 </head>
 <body>
@@ -1288,67 +1368,12 @@ function format_stage_cell($bagCount, $time): string
     <h2>集荷サイクル一覧（返却未完了）</h2>
     <p class="notice">この記録簿はチーム共有のため、記録した本人以外でも登録・修正・削除できます。</p>
 
-    <?php if (empty($openCycles)): ?>
-        <p class="notice">対応が必要な集荷サイクルはありません。</p>
-    <?php else: ?>
-        <div class="cycle-cards">
-            <?php foreach ($openCycles as $cycle): ?>
-                <?php $cycleId = (int) $cycle['id']; ?>
-                <article class="cycle-card">
-                    <p class="cycle-card-title"><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?>　集荷日 <?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></p>
-
-                    <div class="cycle-card-row">
-                        <span class="label">集荷</span>
-                        <span class="value done"><?= htmlspecialchars(format_pickup_summary_label($cycle), ENT_QUOTES, 'UTF-8') ?></span>
-                    </div>
-
-                    <div class="cycle-card-row">
-                        <span class="label">到着</span>
-                        <span class="value <?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
-                            <?php if ($cycle['arrival_bag_count'] !== null): ?>
-                                <?= (int) $cycle['arrival_bag_count'] ?>袋・<?= $cycle['arrival_time'] !== null ? htmlspecialchars(substr($cycle['arrival_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '-' ?>
-                            <?php else: ?>
-                                未到着（上部の「場所を選択」でクリーニング所を選んで登録してください）
-                            <?php endif; ?>
-                        </span>
-                    </div>
-
-                    <div class="cycle-card-row">
-                        <span class="label">発送</span>
-                        <span class="value <?= $cycle['dispatch_bag_count'] !== null ? 'done' : '' ?>">
-                            <?php if ($cycle['dispatch_bag_count'] !== null): ?>
-                                <?= (int) $cycle['dispatch_bag_count'] ?>袋・<?= $cycle['dispatch_time'] !== null ? htmlspecialchars(substr($cycle['dispatch_time'], 0, 5), ENT_QUOTES, 'UTF-8') : '-' ?>
-                            <?php elseif ($cycle['arrival_bag_count'] === null): ?>
-                                （到着後に入力可）
-                            <?php else: ?>
-                                未発送（上部の「場所を選択」でクリーニング所を選んで登録してください）
-                            <?php endif; ?>
-                        </span>
-                    </div>
-
-                    <div class="cycle-card-row">
-                        <span class="label">返却</span>
-                        <span class="value">
-                            <?php if ($cycle['dispatch_bag_count'] === null): ?>
-                                （発送後に入力可）
-                            <?php else: ?>
-                                <form method="post" action="/staff/collection_entry.php">
-                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                    <input type="hidden" name="action" value="register_return">
-                                    <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                    <input type="number" name="return_bag_count" min="0" step="1" required placeholder="袋数" value="<?= $cycle['return_ready_bag_count'] !== null ? (int) $cycle['return_ready_bag_count'] : '' ?>">
-                                    <button type="submit">返却登録</button>
-                                </form>
-                                <?php if ($cycle['return_ready_bag_count'] !== null): ?>
-                                    <br><small>洗濯代行の登録数（<?= (int) $cycle['return_ready_bag_count'] ?>袋）を初期値にしています。</small>
-                                <?php endif; ?>
-                            <?php endif; ?>
-                        </span>
-                    </div>
-                </article>
-            <?php endforeach; ?>
-        </div>
-    <?php endif; ?>
+    <?php
+    $facilityPanelGroups = $openCycleFacilityPanelGroups;
+    $renderCycleCard = $renderOpenCycleCard;
+    $emptyMessage = '対応が必要な集荷サイクルはありません。';
+    require __DIR__ . '/../includes/facility_panel_list.php';
+    ?>
 </section>
 
 <section class="record-list">

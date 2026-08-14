@@ -1960,6 +1960,73 @@ function get_facility_pickup_numbers(PDO $pdo): array
 }
 
 /**
+ * 未返却の集荷サイクル一覧（staff/collection_headcount.phpのfind_open_cycles()、
+ * staff/collection_entry.phpの介護施設向け一覧クエリ、いずれも対象）を、施設パネル表示用に
+ * 集荷曜日ごとグループ化する。両画面で同じグルーピング・並び順・除外ロジックを保証するため
+ * 共通化した（2026-08-14、施設パネル化を機に両画面の重複コードから切り出し）。
+ *
+ * $cycles の各行は facility_id, facility_name, facility_pickup_schedule,
+ * facility_onboarding_start_date を持っていること（find_open_cycles()等のJOIN済みクエリの
+ * 戻り値であること）。
+ *
+ * 戻り値は「集荷曜日コース名 => 施設パネルの配列（施設番号順）」。施設パネルは
+ * facility_id/facility_name/display_number（施設番号、未登録施設はnull）/cycles
+ * （その施設の未返却サイクル配列）を持つ。集荷曜日グループの順序は月・木→火・金→水・土→
+ * 集荷曜日未設定で固定、対象施設が1件もないグループはキー自体を含めない。
+ *
+ * 受託開始日から最初の集荷曜日がまだ来ていない施設は結果から除外する（通常、未返却サイクルが
+ * 存在する時点でその施設は既に集荷済みのはずだが、受託開始日が後から修正された場合等の
+ * 防御的なチェックとして残す）。
+ */
+function group_open_cycles_into_facility_panels(PDO $pdo, array $cycles): array
+{
+    $facilityNumbers = get_facility_pickup_numbers($pdo);
+    $todayStr = (new DateTime('today'))->format('Y-m-d');
+
+    $cyclesByFacility = [];
+    foreach ($cycles as $cycle) {
+        $cyclesByFacility[(int) $cycle['facility_id']][] = $cycle;
+    }
+
+    $scheduleGroupLabels = ['月・木' => '月・木コース', '火・金' => '火・金コース', '水・土' => '水・土コース'];
+    $groupedByScheduleLabel = [];
+    foreach ($cyclesByFacility as $facilityId => $cyclesForFacility) {
+        $firstCycle = $cyclesForFacility[0];
+        $schedule = $firstCycle['facility_pickup_schedule'];
+        $onboardingStartDate = $firstCycle['facility_onboarding_start_date'];
+
+        $firstPickupDate = $onboardingStartDate !== null
+            ? calc_first_pickup_date($onboardingStartDate, $schedule)
+            : null;
+        if ($firstPickupDate !== null && $firstPickupDate > $todayStr) {
+            continue;
+        }
+
+        $groupLabel = $scheduleGroupLabels[$schedule] ?? '集荷曜日未設定';
+        $groupedByScheduleLabel[$groupLabel][] = [
+            'facility_id' => $facilityId,
+            'facility_name' => $firstCycle['facility_name'],
+            'display_number' => $facilityNumbers[$facilityId] ?? null,
+            'cycles' => $cyclesForFacility,
+        ];
+    }
+
+    $facilityPanelGroups = [];
+    foreach (['月・木コース', '火・金コース', '水・土コース', '集荷曜日未設定'] as $label) {
+        if (!isset($groupedByScheduleLabel[$label])) {
+            continue;
+        }
+        usort($groupedByScheduleLabel[$label], static function (array $a, array $b): int {
+            $numA = $a['display_number'] ?? PHP_INT_MAX;
+            $numB = $b['display_number'] ?? PHP_INT_MAX;
+            return $numA <=> $numB ?: $a['facility_id'] <=> $b['facility_id'];
+        });
+        $facilityPanelGroups[$label] = $groupedByScheduleLabel[$label];
+    }
+    return $facilityPanelGroups;
+}
+
+/**
  * 集荷ドライバーの出発前チェックリスト（staff/jiro_dashboard.phpの一覧、staff/dashboard.phpの
  * サマリー表示）用のデータを組み立てる。
  *

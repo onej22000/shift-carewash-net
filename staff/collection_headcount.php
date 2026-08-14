@@ -912,56 +912,10 @@ if (!empty($wsrIds)) {
 }
 
 // ---- 施設パネル用グループ化（返却未完了一覧のみ。履歴表示では使わない） ----
-// 集荷曜日（月・木／火・金／水・土）ごとにグループ化し、各グループ内は施設番号
-// （get_facility_pickup_numbers()、admin/facilities.phpのdisplay_numberと同じ基準）順。
-// 受託開始日から最初の集荷曜日がまだ来ていない施設は、パネル自体を表示しない
-// （通常、未返却サイクルが存在する時点でその施設は既に集荷済みのはずだが、
-// 受託開始日が後から修正された場合等の防御的なチェックとして残す）。
-$facilityPanelGroups = [];
-if (!$showHistory) {
-    $facilityNumbers = get_facility_pickup_numbers($pdo);
-    $todayStrForPanels = (new DateTime('today'))->format('Y-m-d');
-
-    $cyclesByFacility = [];
-    foreach ($cardCycles as $cycle) {
-        $cyclesByFacility[(int) $cycle['facility_id']][] = $cycle;
-    }
-
-    $scheduleGroupLabels = ['月・木' => '月・木コース', '火・金' => '火・金コース', '水・土' => '水・土コース'];
-    $groupedByScheduleLabel = [];
-    foreach ($cyclesByFacility as $facilityId => $cyclesForFacility) {
-        $firstCycle = $cyclesForFacility[0];
-        $schedule = $firstCycle['facility_pickup_schedule'];
-        $onboardingStartDate = $firstCycle['facility_onboarding_start_date'];
-
-        $firstPickupDate = $onboardingStartDate !== null
-            ? calc_first_pickup_date($onboardingStartDate, $schedule)
-            : null;
-        if ($firstPickupDate !== null && $firstPickupDate > $todayStrForPanels) {
-            continue;
-        }
-
-        $groupLabel = $scheduleGroupLabels[$schedule] ?? '集荷曜日未設定';
-        $groupedByScheduleLabel[$groupLabel][] = [
-            'facility_id' => $facilityId,
-            'facility_name' => $firstCycle['facility_name'],
-            'display_number' => $facilityNumbers[$facilityId] ?? null,
-            'cycles' => $cyclesForFacility,
-        ];
-    }
-
-    foreach (['月・木コース', '火・金コース', '水・土コース', '集荷曜日未設定'] as $label) {
-        if (!isset($groupedByScheduleLabel[$label])) {
-            continue;
-        }
-        usort($groupedByScheduleLabel[$label], static function (array $a, array $b): int {
-            $numA = $a['display_number'] ?? PHP_INT_MAX;
-            $numB = $b['display_number'] ?? PHP_INT_MAX;
-            return $numA <=> $numB ?: $a['facility_id'] <=> $b['facility_id'];
-        });
-        $facilityPanelGroups[$label] = $groupedByScheduleLabel[$label];
-    }
-}
+// グルーピング・並び順・除外ロジックはgroup_open_cycles_into_facility_panels()
+// （includes/functions.php）に共通化済み。staff/collection_entry.phpの介護施設向け
+// 一覧とロジックを共有する。
+$facilityPanelGroups = $showHistory ? [] : group_open_cycles_into_facility_panels($pdo, $cardCycles);
 
 // ---- カード1件分の描画（履歴表示・施設パネル表示の両方から呼ぶ、二重管理を避けるため共通化） ----
 $renderCycleCard = function (array $cycle) use ($collectionHeadcountPath, $csrfToken, $participantsByWsrId, $isSharedAccount, $isAdminView, $employees, $staff): void {
@@ -1128,21 +1082,19 @@ $renderCycleCard = function (array $cycle) use ($collectionHeadcountPath, $csrfT
         .cycle-card-detail-body dt { color: #666; margin-top: 6px; }
         .cycle-card-detail-body dd { margin: 0 0 2px; }
 
-        /* 施設パネル一覧（集荷曜日ごとにグループ化、nav-cardと同じ見た目のパネルをタップで展開） */
+        /* 施設パネル一覧（集荷曜日ごとにグループ化、nav-cardと同じ見た目。デフォルト展開で
+           幅に応じたレスポンシブグリッド表示。auto-fit+minmaxのみで列数を決めるため、
+           スマホ幅は自然に1列、タブレット〜PC幅で2〜3列になる（固定ブレークポイント不要）。 */
         .facility-group { margin-bottom: 20px; }
         .facility-group-title { font-size: 1.05em; margin: 0 0 10px; color: #333; }
-        .facility-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
-        .facility-panel { border: 1px solid #aeb6c1; border-radius: 14px; background: linear-gradient(145deg, #f4f6f8 0%, #d6dce3 100%); box-shadow: 0 7px 16px rgba(30, 55, 90, 0.13), 0 2px 4px rgba(30, 55, 90, 0.08), inset 0 1px 0 rgba(255,255,255,0.95); overflow: hidden; }
-        .facility-panel[open] { grid-column: 1 / -1; }
+        .facility-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+        .facility-panel { min-width: 0; border: 1px solid #aeb6c1; border-radius: 14px; background: linear-gradient(145deg, #f4f6f8 0%, #d6dce3 100%); box-shadow: 0 7px 16px rgba(30, 55, 90, 0.13), 0 2px 4px rgba(30, 55, 90, 0.08), inset 0 1px 0 rgba(255,255,255,0.95); overflow: hidden; }
         .facility-panel-summary { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 18px; cursor: pointer; list-style: none; font-weight: bold; color: #0b5ed7; }
         .facility-panel-summary::-webkit-details-marker { display: none; }
-        .facility-panel-summary::after { content: '▼'; font-size: 0.7em; color: #0b5ed7; }
-        .facility-panel[open] .facility-panel-summary::after { content: '▲'; }
+        .facility-panel-summary::after { content: '▲'; font-size: 0.7em; color: #0b5ed7; }
+        .facility-panel:not([open]) .facility-panel-summary::after { content: '▼'; }
         .facility-panel-count { font-weight: normal; color: #555; font-size: 0.9em; }
         .facility-panel-cycles { padding: 0 14px 14px; }
-        @media (max-width: 900px) {
-            .facility-panels { grid-template-columns: minmax(0, 1fr); }
-        }
     </style>
 </head>
 <body>
@@ -1278,30 +1230,10 @@ $renderCycleCard = function (array $cycle) use ($collectionHeadcountPath, $csrfT
             </div>
         <?php endif; ?>
     <?php else: ?>
-        <?php if (empty($facilityPanelGroups)): ?>
-            <p class="notice">対応が必要な集荷サイクルはありません。</p>
-        <?php else: ?>
-            <?php foreach ($facilityPanelGroups as $groupLabel => $facilityPanels): ?>
-                <div class="facility-group">
-                    <h3 class="facility-group-title"><?= htmlspecialchars($groupLabel, ENT_QUOTES, 'UTF-8') ?></h3>
-                    <div class="facility-panels">
-                        <?php foreach ($facilityPanels as $panel): ?>
-                            <details class="facility-panel">
-                                <summary class="facility-panel-summary">
-                                    <span class="facility-panel-name"><?= htmlspecialchars($panel['facility_name'], ENT_QUOTES, 'UTF-8') ?></span>
-                                    <span class="facility-panel-count"><?= count($panel['cycles']) ?>件</span>
-                                </summary>
-                                <div class="cycle-cards facility-panel-cycles">
-                                    <?php foreach ($panel['cycles'] as $cycle): ?>
-                                        <?php $renderCycleCard($cycle); ?>
-                                    <?php endforeach; ?>
-                                </div>
-                            </details>
-                        <?php endforeach; ?>
-                    </div>
-                </div>
-            <?php endforeach; ?>
-        <?php endif; ?>
+        <?php
+        $emptyMessage = '対応が必要な集荷サイクルはありません。';
+        require __DIR__ . '/../includes/facility_panel_list.php';
+        ?>
     <?php endif; ?>
 </section>
 
