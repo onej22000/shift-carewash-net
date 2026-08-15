@@ -8,6 +8,7 @@ $pdo = getPdo();
 $vehicleAlerts = calc_vehicle_alerts($pdo, (new DateTime())->format('Y-m-d'));
 $laundryNeededAlerts = calc_laundry_needed_alerts($pdo);
 $returnNeededAlerts = calc_return_needed_alerts($pdo, (new DateTime())->format('Y-m-d'));
+$pickupNeededAlerts = calc_pickup_needed_alerts($pdo, new DateTime());
 
 $flash = pop_flash();
 $csrfToken = csrf_token();
@@ -46,6 +47,10 @@ $csrfToken = csrf_token();
         .laundry-status-panel > ul > li { margin-bottom: 4px; }
         .laundry-status-panel h3 { margin: 12px 0 6px; font-size: 0.95em; color: #1687c8; }
         .laundry-status-panel h3:first-of-type { margin-top: 0; }
+        .pickup-status-panel { padding: 12px 16px; background: linear-gradient(145deg, #fff9e8 0%, #ffedb0 100%); border: 1px solid #e2bd52; border-radius: 6px; color: #7a5b00; margin-bottom: 16px; }
+        .pickup-status-panel h2 { margin: 0 0 8px; font-size: 1.05em; color: #d89b00; }
+        .pickup-status-panel ul { margin: 0; padding-left: 20px; }
+        .pickup-status-panel li { margin-bottom: 4px; }
         .message { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; }
         .message.success { background: #e6f4ea; color: #1e7e34; }
         .message.error { background: #fdecea; color: #b3261e; }
@@ -94,6 +99,17 @@ $csrfToken = csrf_token();
                 <?php endforeach; ?>
             </ul>
         <?php endif; ?>
+    </div>
+<?php endif; ?>
+
+<?php if (!empty($pickupNeededAlerts)): ?>
+    <div class="pickup-status-panel">
+        <h2>未集荷</h2>
+        <ul>
+            <?php foreach ($pickupNeededAlerts as $alert): ?>
+                <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?></li>
+            <?php endforeach; ?>
+        </ul>
     </div>
 <?php endif; ?>
 

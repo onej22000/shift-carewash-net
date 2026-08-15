@@ -2157,6 +2157,39 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
         'totals' => $totals,
     ];
 }
+
+/**
+ * 本日が集荷曜日の施設（build_jiro_checklist_data()と同じ判定）のうち、
+ * まだ本日分の集荷サイクル（pickup_date=今日のcollection_cyclesレコード）が
+ * 作成されていない施設を検知する。
+ */
+function calc_pickup_needed_alerts(PDO $pdo, DateTime $today): array
+{
+    $checklist = build_jiro_checklist_data($pdo, $today);
+    if (empty($checklist['today_rows'])) {
+        return [];
+    }
+
+    $registeredStmt = $pdo->prepare(
+        'SELECT DISTINCT facility_id FROM collection_cycles WHERE pickup_date = :pickup_date AND deleted_at IS NULL'
+    );
+    $registeredStmt->execute([':pickup_date' => $checklist['target_date']]);
+    $registeredFacilityIds = array_flip(array_map('intval', array_column($registeredStmt->fetchAll(), 'facility_id')));
+
+    $alerts = [];
+    foreach ($checklist['today_rows'] as $row) {
+        if (isset($registeredFacilityIds[$row['facility_id']])) {
+            continue;
+        }
+        $alerts[] = [
+            'facility_id' => $row['facility_id'],
+            'facility_name' => $row['facility_name'],
+        ];
+    }
+
+    return $alerts;
+}
+
 /**
  * 共用アカウント画面に表示する、本日勤務中のスタッフを取得する。
  *

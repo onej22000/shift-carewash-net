@@ -33,6 +33,7 @@ $vehicleAlerts = array_values(array_filter(
 // admin側と同じ全件をフィルタなしで表示する（共用アカウントでも非表示にしない）。
 $laundryNeededAlerts = calc_laundry_needed_alerts($pdo);
 $returnNeededAlerts = calc_return_needed_alerts($pdo, $today);
+$pickupNeededAlerts = calc_pickup_needed_alerts($pdo, new DateTime($today));
 
 const MISSED_CLOCK_DISPLAY_LIMIT = 5;
 $missedClockDates = find_missed_clock_dates($pdo, (int) $staff['id'], $today);
@@ -172,6 +173,10 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
         .laundry-status-panel > ul > li { margin-bottom: 4px; }
         .laundry-status-panel h3 { margin: 12px 0 6px; font-size: 0.95em; color: #1687c8; }
         .laundry-status-panel h3:first-of-type { margin-top: 0; }
+        .pickup-status-panel { padding: 12px 16px; background: linear-gradient(145deg, #fff9e8 0%, #ffedb0 100%); border: 1px solid #e2bd52; border-radius: 6px; color: #7a5b00; margin-bottom: 16px; }
+        .pickup-status-panel h2 { margin: 0 0 8px; font-size: 1.05em; color: #d89b00; }
+        .pickup-status-panel ul { margin: 0; padding-left: 20px; }
+        .pickup-status-panel li { margin-bottom: 4px; }
         .estimate-cards { display: flex; gap: 12px; flex-wrap: wrap; }
         .estimate-card { flex: 1; min-width: 220px; border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; }
         .estimate-card h3 { margin: 0 0 8px; font-size: 1em; }
@@ -274,6 +279,17 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
                 <?php endforeach; ?>
             </ul>
         <?php endif; ?>
+    </div>
+<?php endif; ?>
+
+<?php if (!empty($pickupNeededAlerts)): ?>
+    <div class="pickup-status-panel">
+        <h2>未集荷</h2>
+        <ul>
+            <?php foreach ($pickupNeededAlerts as $alert): ?>
+                <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?></li>
+            <?php endforeach; ?>
+        </ul>
     </div>
 <?php endif; ?>
 
