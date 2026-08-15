@@ -5,10 +5,13 @@ require_once __DIR__ . '/../includes/functions.php';
 $admin = require_login('admin');
 $pdo = getPdo();
 
-$vehicleAlerts = calc_vehicle_alerts($pdo, (new DateTime())->format('Y-m-d'));
+$now = new DateTime();
+$vehicleAlerts = calc_vehicle_alerts($pdo, $now->format('Y-m-d'));
 $laundryNeededAlerts = calc_laundry_needed_alerts($pdo);
-$returnNeededAlerts = calc_return_needed_alerts($pdo, (new DateTime())->format('Y-m-d'));
-$pickupNeededAlerts = calc_pickup_needed_alerts($pdo, new DateTime());
+$returnNeededAlerts = calc_return_needed_alerts($pdo, $now->format('Y-m-d'));
+$pickupNeededAlerts = calc_pickup_needed_alerts($pdo, $now);
+$clockInNeededAlerts = calc_clock_in_needed_alerts($pdo, $now);
+$clockOutNeededAlerts = calc_clock_out_needed_alerts($pdo, $now);
 
 $flash = pop_flash();
 $csrfToken = csrf_token();
@@ -51,6 +54,12 @@ $csrfToken = csrf_token();
         .pickup-status-panel h2 { margin: 0 0 8px; font-size: 1.05em; color: #d89b00; }
         .pickup-status-panel ul { margin: 0; padding-left: 20px; }
         .pickup-status-panel li { margin-bottom: 4px; }
+        .clock-status-panel { padding: 12px 16px; background: linear-gradient(145deg, #eceeff 0%, #d4d9ff 100%); border: 1px solid #8b93d6; border-radius: 6px; color: #33366e; margin-bottom: 16px; }
+        .clock-status-panel h2 { margin: 0 0 8px; font-size: 1.05em; color: #4a4fb0; }
+        .clock-status-panel > ul { margin: 0; padding-left: 20px; }
+        .clock-status-panel > ul > li { margin-bottom: 4px; }
+        .clock-status-panel h3 { margin: 12px 0 6px; font-size: 0.95em; color: #4a4fb0; }
+        .clock-status-panel h3:first-of-type { margin-top: 0; }
         .message { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; }
         .message.success { background: #e6f4ea; color: #1e7e34; }
         .message.error { background: #fdecea; color: #b3261e; }
@@ -110,6 +119,28 @@ $csrfToken = csrf_token();
                 <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷予定日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?></li>
             <?php endforeach; ?>
         </ul>
+    </div>
+<?php endif; ?>
+
+<?php if (!empty($clockInNeededAlerts) || !empty($clockOutNeededAlerts)): ?>
+    <div class="clock-status-panel">
+        <h2>打刻の注意喚起</h2>
+        <?php if (!empty($clockInNeededAlerts)): ?>
+            <h3>出勤忘れ</h3>
+            <ul>
+                <?php foreach ($clockInNeededAlerts as $alert): ?>
+                    <li><?= htmlspecialchars($alert['employee_name'], ENT_QUOTES, 'UTF-8') ?>：<?= htmlspecialchars($alert['work_date'], ENT_QUOTES, 'UTF-8') ?>（シフト開始 <?= htmlspecialchars($alert['shift_start_time'], ENT_QUOTES, 'UTF-8') ?>）</li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
+        <?php if (!empty($clockOutNeededAlerts)): ?>
+            <h3>退勤忘れ</h3>
+            <ul>
+                <?php foreach ($clockOutNeededAlerts as $alert): ?>
+                    <li><?= htmlspecialchars($alert['employee_name'], ENT_QUOTES, 'UTF-8') ?>：<?= htmlspecialchars($alert['work_date'], ENT_QUOTES, 'UTF-8') ?>（シフト終了 <?= htmlspecialchars($alert['shift_end_time'], ENT_QUOTES, 'UTF-8') ?>）</li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
     </div>
 <?php endif; ?>
 

@@ -14,9 +14,10 @@ $isSharedAccount = (int) ($staff['is_shared_account'] ?? 0) === 1;
 
 $flash = pop_flash();
 
-$today = (new DateTime())->format('Y-m-d');
+$now = new DateTime();
+$today = $now->format('Y-m-d');
 
-$jiroChecklist = build_jiro_checklist_data($pdo, new DateTime());
+$jiroChecklist = build_jiro_checklist_data($pdo, $now);
 $jiroTodayFacilityCount = count($jiroChecklist['today_rows']);
 $jiroTodayBagTotal = array_sum(array_column($jiroChecklist['today_rows'], 'row_total'));
 
@@ -33,7 +34,11 @@ $vehicleAlerts = array_values(array_filter(
 // admin側と同じ全件をフィルタなしで表示する（共用アカウントでも非表示にしない）。
 $laundryNeededAlerts = calc_laundry_needed_alerts($pdo);
 $returnNeededAlerts = calc_return_needed_alerts($pdo, $today);
-$pickupNeededAlerts = calc_pickup_needed_alerts($pdo, new DateTime($today));
+$pickupNeededAlerts = calc_pickup_needed_alerts($pdo, $now);
+
+// 出勤忘れ・退勤忘れも全施設アラートと同様、全スタッフに全員分を表示する（自分以外の未打刻も分かるように）。
+$clockInNeededAlerts = calc_clock_in_needed_alerts($pdo, $now);
+$clockOutNeededAlerts = calc_clock_out_needed_alerts($pdo, $now);
 
 const MISSED_CLOCK_DISPLAY_LIMIT = 5;
 $missedClockDates = find_missed_clock_dates($pdo, (int) $staff['id'], $today);
@@ -177,6 +182,12 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
         .pickup-status-panel h2 { margin: 0 0 8px; font-size: 1.05em; color: #d89b00; }
         .pickup-status-panel ul { margin: 0; padding-left: 20px; }
         .pickup-status-panel li { margin-bottom: 4px; }
+        .clock-status-panel { padding: 12px 16px; background: linear-gradient(145deg, #eceeff 0%, #d4d9ff 100%); border: 1px solid #8b93d6; border-radius: 6px; color: #33366e; margin-bottom: 16px; }
+        .clock-status-panel h2 { margin: 0 0 8px; font-size: 1.05em; color: #4a4fb0; }
+        .clock-status-panel > ul { margin: 0; padding-left: 20px; }
+        .clock-status-panel > ul > li { margin-bottom: 4px; }
+        .clock-status-panel h3 { margin: 12px 0 6px; font-size: 0.95em; color: #4a4fb0; }
+        .clock-status-panel h3:first-of-type { margin-top: 0; }
         .estimate-cards { display: flex; gap: 12px; flex-wrap: wrap; }
         .estimate-card { flex: 1; min-width: 220px; border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; }
         .estimate-card h3 { margin: 0 0 8px; font-size: 1em; }
@@ -290,6 +301,28 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
                 <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷予定日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?></li>
             <?php endforeach; ?>
         </ul>
+    </div>
+<?php endif; ?>
+
+<?php if (!empty($clockInNeededAlerts) || !empty($clockOutNeededAlerts)): ?>
+    <div class="clock-status-panel">
+        <h2>打刻の注意喚起</h2>
+        <?php if (!empty($clockInNeededAlerts)): ?>
+            <h3>出勤忘れ</h3>
+            <ul>
+                <?php foreach ($clockInNeededAlerts as $alert): ?>
+                    <li><?= htmlspecialchars($alert['employee_name'], ENT_QUOTES, 'UTF-8') ?>：<?= htmlspecialchars($alert['work_date'], ENT_QUOTES, 'UTF-8') ?>（シフト開始 <?= htmlspecialchars($alert['shift_start_time'], ENT_QUOTES, 'UTF-8') ?>）</li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
+        <?php if (!empty($clockOutNeededAlerts)): ?>
+            <h3>退勤忘れ</h3>
+            <ul>
+                <?php foreach ($clockOutNeededAlerts as $alert): ?>
+                    <li><?= htmlspecialchars($alert['employee_name'], ENT_QUOTES, 'UTF-8') ?>：<?= htmlspecialchars($alert['work_date'], ENT_QUOTES, 'UTF-8') ?>（シフト終了 <?= htmlspecialchars($alert['shift_end_time'], ENT_QUOTES, 'UTF-8') ?>）</li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
     </div>
 <?php endif; ?>
 

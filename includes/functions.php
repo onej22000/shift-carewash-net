@@ -2217,6 +2217,97 @@ function calc_pickup_needed_alerts(PDO $pdo, DateTime $today): array
 }
 
 /**
+ * シフトが組まれている日（過去分含む）で、シフト開始時刻を過ぎても出勤打刻
+ * （attendanceレコード）が一件も無い従業員を検知する（出勤忘れ）。
+ * MISSED_CLOCK_TRACKING_START_DATE以降のみ対象（find_missed_clock_dates()と同じ、
+ * 打刻管理運用開始前のデータで警告が溢れるのを防ぐため）。
+ */
+function calc_clock_in_needed_alerts(PDO $pdo, DateTime $now): array
+{
+    $today = $now->format('Y-m-d');
+
+    $stmt = $pdo->prepare(
+        'SELECT s.employee_id, e.name AS employee_name, s.work_date, MIN(s.start_time) AS first_start_time
+         FROM shifts s
+         INNER JOIN employees e ON e.id = s.employee_id
+         WHERE s.work_date >= :cutoff AND s.work_date <= :today
+           AND COALESCE(e.is_shared_account, 0) = 0
+           AND NOT EXISTS (
+               SELECT 1 FROM attendance a
+               WHERE a.employee_id = s.employee_id
+                 AND a.deleted_at IS NULL
+                 AND DATE(a.clock_in_at) = s.work_date
+           )
+         GROUP BY s.employee_id, e.name, s.work_date'
+    );
+    $stmt->execute([':cutoff' => MISSED_CLOCK_TRACKING_START_DATE, ':today' => $today]);
+
+    $alerts = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $shiftStart = new DateTime($row['work_date'] . ' ' . $row['first_start_time']);
+        if ($shiftStart > $now) {
+            continue; // まだ出勤予定時刻を迎えていない
+        }
+        $alerts[] = [
+            'employee_id' => (int) $row['employee_id'],
+            'employee_name' => $row['employee_name'],
+            'work_date' => $row['work_date'],
+            'shift_start_time' => substr($row['first_start_time'], 0, 5),
+        ];
+    }
+
+    usort(
+        $alerts,
+        static fn (array $a, array $b): int => [$a['work_date'], $a['employee_name']] <=> [$b['work_date'], $b['employee_name']]
+    );
+
+    return $alerts;
+}
+
+/**
+ * 出勤はしているが（attendance.status='working'）、シフト終了時刻を過ぎても
+ * 退勤打刻（clock_out_at）が無い従業員を検知する（退勤忘れ）。
+ */
+function calc_clock_out_needed_alerts(PDO $pdo, DateTime $now): array
+{
+    $today = $now->format('Y-m-d');
+
+    $stmt = $pdo->prepare(
+        'SELECT a.employee_id, e.name AS employee_name, DATE(a.clock_in_at) AS work_date,
+                MAX(s.end_time) AS last_end_time
+         FROM attendance a
+         INNER JOIN employees e ON e.id = a.employee_id
+         INNER JOIN shifts s ON s.employee_id = a.employee_id AND s.work_date = DATE(a.clock_in_at)
+         WHERE a.status = \'working\' AND a.deleted_at IS NULL
+           AND DATE(a.clock_in_at) >= :cutoff AND DATE(a.clock_in_at) <= :today
+           AND COALESCE(e.is_shared_account, 0) = 0
+         GROUP BY a.employee_id, e.name, DATE(a.clock_in_at)'
+    );
+    $stmt->execute([':cutoff' => MISSED_CLOCK_TRACKING_START_DATE, ':today' => $today]);
+
+    $alerts = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $shiftEnd = new DateTime($row['work_date'] . ' ' . $row['last_end_time']);
+        if ($shiftEnd > $now) {
+            continue; // まだ退勤予定時刻を迎えていない
+        }
+        $alerts[] = [
+            'employee_id' => (int) $row['employee_id'],
+            'employee_name' => $row['employee_name'],
+            'work_date' => $row['work_date'],
+            'shift_end_time' => substr($row['last_end_time'], 0, 5),
+        ];
+    }
+
+    usort(
+        $alerts,
+        static fn (array $a, array $b): int => [$a['work_date'], $a['employee_name']] <=> [$b['work_date'], $b['employee_name']]
+    );
+
+    return $alerts;
+}
+
+/**
  * 共用アカウント画面に表示する、本日勤務中のスタッフを取得する。
  *
  * @return array<int,array<string,mixed>>
