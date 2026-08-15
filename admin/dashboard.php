@@ -6,7 +6,8 @@ $admin = require_login('admin');
 $pdo = getPdo();
 
 $vehicleAlerts = calc_vehicle_alerts($pdo, (new DateTime())->format('Y-m-d'));
-$collectionStallAlerts = calc_collection_stall_alerts($pdo, (new DateTime())->format('Y-m-d'));
+$laundryNeededAlerts = calc_laundry_needed_alerts($pdo);
+$returnNeededAlerts = calc_return_needed_alerts($pdo, (new DateTime())->format('Y-m-d'));
 
 $flash = pop_flash();
 $csrfToken = csrf_token();
@@ -39,6 +40,12 @@ $csrfToken = csrf_token();
         .vehicle-alert-banner h2 { margin: 0 0 8px; font-size: 1.05em; color: #b3261e; }
         .vehicle-alert-banner ul { margin: 0; padding-left: 20px; }
         .vehicle-alert-banner li { margin-bottom: 4px; }
+        .laundry-status-panel { padding: 12px 16px; background: linear-gradient(145deg, #f2faff 0%, #d8efff 100%); border: 1px solid #78bde8; border-radius: 6px; color: #0b4a6f; margin-bottom: 16px; }
+        .laundry-status-panel h2 { margin: 0 0 8px; font-size: 1.05em; color: #1687c8; }
+        .laundry-status-panel > ul { margin: 0; padding-left: 20px; }
+        .laundry-status-panel > ul > li { margin-bottom: 4px; }
+        .laundry-status-panel h3 { margin: 12px 0 6px; font-size: 0.95em; color: #1687c8; }
+        .laundry-status-panel h3:first-of-type { margin-top: 0; }
         .message { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; }
         .message.success { background: #e6f4ea; color: #1e7e34; }
         .message.error { background: #fdecea; color: #b3261e; }
@@ -68,14 +75,25 @@ $csrfToken = csrf_token();
     </div>
 <?php endif; ?>
 
-<?php if (!empty($collectionStallAlerts)): ?>
-    <div class="vehicle-alert-banner">
-        <h2>⚠ 未発送のまま滞留している集荷サイクルの警告</h2>
-        <ul>
-            <?php foreach ($collectionStallAlerts as $alert): ?>
-                <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?>（<?= (int) $alert['elapsed_days'] ?>日経過）</li>
-            <?php endforeach; ?>
-        </ul>
+<?php if (!empty($laundryNeededAlerts) || !empty($returnNeededAlerts)): ?>
+    <div class="laundry-status-panel">
+        <h2>集荷サイクルの状況</h2>
+        <?php if (!empty($laundryNeededAlerts)): ?>
+            <h3>要洗濯</h3>
+            <ul>
+                <?php foreach ($laundryNeededAlerts as $alert): ?>
+                    <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?></li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
+        <?php if (!empty($returnNeededAlerts)): ?>
+            <h3>要返却</h3>
+            <ul>
+                <?php foreach ($returnNeededAlerts as $alert): ?>
+                    <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?>（返却予定日 <?= htmlspecialchars($alert['expected_return_date'], ENT_QUOTES, 'UTF-8') ?>）</li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
     </div>
 <?php endif; ?>
 

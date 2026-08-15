@@ -29,9 +29,10 @@ $vehicleAlerts = array_values(array_filter(
     static fn (array $alert): bool => in_array($alert['vehicle_id'], $myVehicleIds, true)
 ));
 
-// 施設とスタッフの間に担当紐付けが無く、全スタッフに全施設の滞留状況を知ってほしいため、
+// 施設とスタッフの間に担当紐付けが無く、全スタッフに全施設の状況を知ってほしいため、
 // admin側と同じ全件をフィルタなしで表示する（共用アカウントでも非表示にしない）。
-$collectionStallAlerts = calc_collection_stall_alerts($pdo, $today);
+$laundryNeededAlerts = calc_laundry_needed_alerts($pdo);
+$returnNeededAlerts = calc_return_needed_alerts($pdo, $today);
 
 const MISSED_CLOCK_DISPLAY_LIMIT = 5;
 $missedClockDates = find_missed_clock_dates($pdo, (int) $staff['id'], $today);
@@ -165,6 +166,12 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
         .vehicle-alert-banner h2 { margin: 0 0 8px; font-size: 1.05em; color: #b3261e; }
         .vehicle-alert-banner ul { margin: 0; padding-left: 20px; }
         .vehicle-alert-banner li { margin-bottom: 4px; }
+        .laundry-status-panel { padding: 12px 16px; background: linear-gradient(145deg, #f2faff 0%, #d8efff 100%); border: 1px solid #78bde8; border-radius: 6px; color: #0b4a6f; margin-bottom: 16px; }
+        .laundry-status-panel h2 { margin: 0 0 8px; font-size: 1.05em; color: #1687c8; }
+        .laundry-status-panel > ul { margin: 0; padding-left: 20px; }
+        .laundry-status-panel > ul > li { margin-bottom: 4px; }
+        .laundry-status-panel h3 { margin: 12px 0 6px; font-size: 0.95em; color: #1687c8; }
+        .laundry-status-panel h3:first-of-type { margin-top: 0; }
         .estimate-cards { display: flex; gap: 12px; flex-wrap: wrap; }
         .estimate-card { flex: 1; min-width: 220px; border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; }
         .estimate-card h3 { margin: 0 0 8px; font-size: 1em; }
@@ -248,14 +255,25 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
     </div>
 <?php endif; ?>
 
-<?php if (!empty($collectionStallAlerts)): ?>
-    <div class="vehicle-alert-banner">
-        <h2>⚠ 未発送のまま滞留している集荷サイクルの警告</h2>
-        <ul>
-            <?php foreach ($collectionStallAlerts as $alert): ?>
-                <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?>（<?= (int) $alert['elapsed_days'] ?>日経過）</li>
-            <?php endforeach; ?>
-        </ul>
+<?php if (!empty($laundryNeededAlerts) || !empty($returnNeededAlerts)): ?>
+    <div class="laundry-status-panel">
+        <h2>集荷サイクルの状況</h2>
+        <?php if (!empty($laundryNeededAlerts)): ?>
+            <h3>要洗濯</h3>
+            <ul>
+                <?php foreach ($laundryNeededAlerts as $alert): ?>
+                    <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?></li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
+        <?php if (!empty($returnNeededAlerts)): ?>
+            <h3>要返却</h3>
+            <ul>
+                <?php foreach ($returnNeededAlerts as $alert): ?>
+                    <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?>（返却予定日 <?= htmlspecialchars($alert['expected_return_date'], ENT_QUOTES, 'UTF-8') ?>）</li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
     </div>
 <?php endif; ?>
 
