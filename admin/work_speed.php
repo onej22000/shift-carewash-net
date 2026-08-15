@@ -10,7 +10,7 @@ $isStaffView = defined('WORK_SPEED_STAFF_VIEW') && WORK_SPEED_STAFF_VIEW;
 $admin = require_login($isStaffView ? 'staff' : 'admin');
 $dashboardPath = $isStaffView ? '/staff/dashboard.php' : '/admin/dashboard.php';
 $logoutPath = $isStaffView ? '/staff/logout.php' : '/admin/logout.php';
-$pageTitle = $isStaffView ? '日別サイクル明細' : '作業速度分析';
+$pageTitle = '作業速度分析';
 $pdo = getPdo();
 
 $periodLabels = [
