@@ -2159,33 +2159,59 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
 }
 
 /**
- * 本日が集荷曜日の施設（build_jiro_checklist_data()と同じ判定）のうち、
- * まだ本日分の集荷サイクル（pickup_date=今日のcollection_cyclesレコード）が
- * 作成されていない施設を検知する。
+ * 施設の集荷曜日設定に基づき、受託開始日から本日までの間で本来集荷予定日だったのに
+ * collection_cyclesレコード（pickup_date=その日）が作成されていない日を、施設ごとに検知する。
+ * 「本日が集荷曜日」だけに限定していた旧仕様（build_jiro_checklist_data()の再利用）だと
+ * 日付が変わった瞬間に過去の集荷忘れがアラートから消えてしまうため、受託開始日を下限に
+ * 過去分もすべて対象にする（calc_first_pickup_date()/calc_expected_return_date()を
+ * 交互に呼んで集荷予定日を列挙し、曜日マップの重複実装を避ける）。
  */
 function calc_pickup_needed_alerts(PDO $pdo, DateTime $today): array
 {
-    $checklist = build_jiro_checklist_data($pdo, $today);
-    if (empty($checklist['today_rows'])) {
-        return [];
-    }
+    $todayStr = $today->format('Y-m-d');
+
+    $facilitiesStmt = $pdo->query(
+        "SELECT id, name, pickup_schedule, onboarding_start_date
+         FROM facilities
+         WHERE facility_type = '介護施設' AND is_active = 1 AND pickup_schedule IS NOT NULL"
+    );
+    $facilities = $facilitiesStmt->fetchAll();
 
     $registeredStmt = $pdo->prepare(
-        'SELECT DISTINCT facility_id FROM collection_cycles WHERE pickup_date = :pickup_date AND deleted_at IS NULL'
+        'SELECT pickup_date FROM collection_cycles WHERE facility_id = :facility_id AND deleted_at IS NULL'
     );
-    $registeredStmt->execute([':pickup_date' => $checklist['target_date']]);
-    $registeredFacilityIds = array_flip(array_map('intval', array_column($registeredStmt->fetchAll(), 'facility_id')));
 
     $alerts = [];
-    foreach ($checklist['today_rows'] as $row) {
-        if (isset($registeredFacilityIds[$row['facility_id']])) {
+    foreach ($facilities as $facility) {
+        $schedule = $facility['pickup_schedule'];
+
+        // 受託開始日が無い施設は遡る下限が定まらないため、本日のみ確認する（従来動作を維持）。
+        $scheduledDate = $facility['onboarding_start_date'] !== null
+            ? calc_first_pickup_date($facility['onboarding_start_date'], $schedule)
+            : $todayStr;
+        if ($scheduledDate === null || $scheduledDate > $todayStr) {
             continue;
         }
-        $alerts[] = [
-            'facility_id' => $row['facility_id'],
-            'facility_name' => $row['facility_name'],
-        ];
+
+        $registeredStmt->execute([':facility_id' => $facility['id']]);
+        $registeredDates = array_flip(array_column($registeredStmt->fetchAll(), 'pickup_date'));
+
+        while ($scheduledDate !== null && $scheduledDate <= $todayStr) {
+            if (!isset($registeredDates[$scheduledDate])) {
+                $alerts[] = [
+                    'facility_id' => (int) $facility['id'],
+                    'facility_name' => $facility['name'],
+                    'pickup_date' => $scheduledDate,
+                ];
+            }
+            $scheduledDate = calc_expected_return_date($scheduledDate, $schedule);
+        }
     }
+
+    usort(
+        $alerts,
+        static fn (array $a, array $b): int => [$a['pickup_date'], $a['facility_name']] <=> [$b['pickup_date'], $b['facility_name']]
+    );
 
     return $alerts;
 }

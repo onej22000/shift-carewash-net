@@ -107,7 +107,7 @@ $csrfToken = csrf_token();
         <h2>未集荷</h2>
         <ul>
             <?php foreach ($pickupNeededAlerts as $alert): ?>
-                <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?></li>
+                <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷予定日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?></li>
             <?php endforeach; ?>
         </ul>
     </div>
