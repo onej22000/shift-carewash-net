@@ -1855,15 +1855,15 @@ function calc_expected_return_date(string $pickupDate, ?string $pickupSchedule):
 }
 
 /**
- * 受託開始日と集荷曜日設定から、最初の集荷予定日（受託開始日当日を含む）を返す。
- * calc_expected_return_date()は「pickupDateより後で直近の該当曜日」（当日は含めない＝
- * 次回集荷用の計算）だが、受託開始日の前日を渡して呼べば、そのまま「受託開始日を含めて
- * 最初に該当する日」になる（同じ曜日計算ロジックを重複させず流用する）。
+ * 受託開始日と集荷曜日設定から、最初の集荷予定日を返す。受託開始日当日は集荷が発生しない
+ * （空袋・空ネットの納品のみ）という業務ルールのため、受託開始日当日は含めない＝
+ * 受託開始日の次の集荷曜日を返す。calc_expected_return_date()自体が「pickupDateより後で
+ * 直近の該当曜日」（当日は含めない）という同じ意味を持つため、そのまま呼ぶだけでよい
+ * （同じ曜日計算ロジックを重複させず流用する）。
  */
 function calc_first_pickup_date(string $onboardingStartDate, ?string $pickupSchedule): ?string
 {
-    $dayBeforeOnboarding = (new DateTime($onboardingStartDate))->modify('-1 day')->format('Y-m-d');
-    return calc_expected_return_date($dayBeforeOnboarding, $pickupSchedule);
+    return calc_expected_return_date($onboardingStartDate, $pickupSchedule);
 }
 
 /**
