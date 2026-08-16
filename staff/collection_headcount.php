@@ -475,7 +475,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ]);
 
                     $pdo->commit();
-                    set_flash('success', htmlspecialchars($targetCycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $targetCycle['pickup_date'] . '集荷分）の作業登録（' . $personCount . '名）を行いました。');
+                    set_flash('success', htmlspecialchars($targetCycle['facility_name'], ENT_QUOTES, 'UTF-8') . '（' . $targetCycle['pickup_date'] . '集荷分）の作業登録（洗濯完了ネット数' . $personCount . '枚）を行いました。');
                     header('Location: ' . $collectionHeadcountPath);
                     exit;
                 } catch (\Throwable $e) {
