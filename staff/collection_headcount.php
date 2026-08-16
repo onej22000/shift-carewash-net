@@ -161,6 +161,35 @@ function find_returned_cycles(PDO $pdo): array
     return $pdo->query($sql)->fetchAll();
 }
 
+/**
+ * 施設・集荷日を指定して集荷サイクルを1件特定する（カード一覧に依存しない常設フォーム用）。
+ * find_open_cycles()と同じJOIN構造で、$renderCycleCardにそのまま渡せる形の行を返す。
+ */
+function find_cycle_by_facility_and_date(PDO $pdo, int $facilityId, string $pickupDate): ?array
+{
+    $stmt = $pdo->prepare(
+        "SELECT cc.*, f.name AS facility_name, f.pickup_schedule AS facility_pickup_schedule,
+                f.onboarding_start_date AS facility_onboarding_start_date,
+                f.issued_linen_bag_orange AS facility_issued_bag_orange,
+                f.issued_linen_bag_yellow AS facility_issued_bag_yellow,
+                wsr.id AS wsr_id, wsr.person_count AS wsr_person_count,
+                wsr.record_date AS wsr_record_date, wsr.record_time AS wsr_record_time,
+                wsr.completed_at AS wsr_completed_at,
+                rre.name AS return_ready_employee_name
+         FROM collection_cycles cc
+         INNER JOIN facilities f ON f.id = cc.facility_id
+         LEFT JOIN work_stage_records wsr
+                ON wsr.collection_cycle_id = cc.id AND wsr.deleted_at IS NULL
+         LEFT JOIN employees rre ON rre.id = cc.return_ready_employee_id
+         WHERE cc.facility_id = :facility_id AND cc.pickup_date = :pickup_date
+               AND cc.deleted_at IS NULL AND f.facility_type != 'クリーニング所'
+         ORDER BY cc.id DESC LIMIT 1"
+    );
+    $stmt->execute([':facility_id' => $facilityId, ':pickup_date' => $pickupDate]);
+    $row = $stmt->fetch();
+    return $row !== false ? $row : null;
+}
+
 function parse_return_bag_count($raw): ?int
 {
     $raw = trim((string) $raw);
@@ -1120,6 +1149,23 @@ $cardCycles = $showHistory ? find_returned_cycles($pdo) : find_open_cycles($pdo)
 // 一覧とロジックを共有する。
 $facilityPanelGroups = $showHistory ? [] : group_open_cycles_into_facility_panels($pdo, $cardCycles);
 
+// ---- 常設フォーム: 施設・集荷日からの直接指定（カード一覧に依存しない単独操作用） ----
+// register_net_count/complete_work/register_return（変更なし）は登録後、素の
+// collectionHeadcountPathへリダイレクトするため、選択状態はクエリパラメータではなく
+// セッションに保持し、1段階ごとの登録を挟んでも選択が維持されるようにする。
+start_session_once();
+if (isset($_GET['target_facility_id'], $_GET['target_pickup_date'])) {
+    $_SESSION['ch_target_facility_id'] = (int) $_GET['target_facility_id'];
+    $_SESSION['ch_target_pickup_date'] = (string) $_GET['target_pickup_date'];
+} elseif (isset($_GET['target_clear'])) {
+    unset($_SESSION['ch_target_facility_id'], $_SESSION['ch_target_pickup_date']);
+}
+$targetFacilityId = (int) ($_SESSION['ch_target_facility_id'] ?? 0);
+$targetPickupDate = (string) ($_SESSION['ch_target_pickup_date'] ?? '');
+$targetCycleForLookup = ($targetFacilityId > 0 && $targetPickupDate !== '')
+    ? find_cycle_by_facility_and_date($pdo, $targetFacilityId, $targetPickupDate)
+    : null;
+
 // ---- カード1件分の描画（履歴表示・施設パネル表示の両方から呼ぶ、二重管理を避けるため共通化） ----
 // $includeFacilityName: 施設パネル表示ではパネル見出しに施設名が既に出ているため、
 // カード見出し側は集荷日のみにして重複を避ける（改善1）。履歴表示（?history=1）は
@@ -1409,6 +1455,39 @@ if ($isAdminView) {
 <?php if ($errorMessage !== ''): ?>
     <p class="message error"><?= htmlspecialchars($errorMessage, ENT_QUOTES, 'UTF-8') ?></p>
 <?php endif; ?>
+
+<section class="cycle-lookup">
+    <h2>洗濯ネット数・洗濯完了ネット数・返却リネン袋数の登録（施設・集荷日から直接指定）</h2>
+    <form method="get" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="cycle-lookup-form">
+        <div class="form-row">
+            <label for="target_facility_id">施設</label>
+            <select id="target_facility_id" name="target_facility_id" required>
+                <option value="">選択してください</option>
+                <?php foreach ($manualFacilities as $facility): ?>
+                    <option value="<?= (int) $facility['id'] ?>" <?= $targetFacilityId === (int) $facility['id'] ? 'selected' : '' ?>><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="target_pickup_date">集荷日</label>
+            <input type="date" id="target_pickup_date" name="target_pickup_date" value="<?= htmlspecialchars($targetPickupDate, ENT_QUOTES, 'UTF-8') ?>" required>
+        </div>
+        <button type="submit">表示</button>
+        <?php if ($targetFacilityId > 0 && $targetPickupDate !== ''): ?>
+            <a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?target_clear=1">選択解除</a>
+        <?php endif; ?>
+    </form>
+
+    <?php if ($targetFacilityId > 0 && $targetPickupDate !== ''): ?>
+        <?php if ($targetCycleForLookup === null): ?>
+            <p class="notice">該当する集荷サイクルが見つかりません。集荷記録簿（<a href="<?= htmlspecialchars($isAdminView ? '/admin/collection_records.php' : '/staff/collection_entry.php', ENT_QUOTES, 'UTF-8') ?>">こちら</a>）で先に集荷・到着の登録を行ってください。</p>
+        <?php else: ?>
+            <div class="cycle-cards">
+                <?php $renderCycleCard($targetCycleForLookup, true); ?>
+            </div>
+        <?php endif; ?>
+    <?php endif; ?>
+</section>
 
 <?php if ($editFormValues !== null): ?>
 <section class="edit-form">
