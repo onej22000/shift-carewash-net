@@ -16,7 +16,8 @@ $isSharedAccount = !$isAdminView && (int) ($staff['is_shared_account'] ?? 0) ===
 // （$recordのカラム値と比較する処理）とは別に個別でログを記録する。
 const WORK_LOG_FIELDS = ['category', 'facility_id', 'collection_cycle_id', 'stage', 'person_count', 'record_date', 'record_time', 'completed_at'];
 // 修正時にユーザーが変更できるのはこの項目のみ（施設・工程・紐づくサイクルは作業登録の性質上変えない）。
-// person_count・completed_atは参加者選択（employee_ids、別ロジックで扱う）から自動で算出・更新する。
+// person_count（洗濯完了ネット数＝枚数）はフォームで独立入力する。employee_ids（参加者）は
+// person_countとは無関係な別ロジックで扱う。completed_atはrecord_date・record_timeから算出する。
 const WORK_EDITABLE_FIELDS = ['person_count', 'record_date', 'record_time', 'completed_at'];
 
 // 洗濯ネット数（到着したリネン袋内の枚数確認）・作業登録（洗濯した人数の記録）・返却リネン袋（青）数
@@ -222,7 +223,7 @@ function parse_work_edit_input(array $post, array $validEmployeeIds): array
         }
     }
     $employeeIds = array_values(array_unique($employeeIds));
-    $personCount = count($employeeIds);
+    $personCount = parse_laundry_net_count($post['net_count'] ?? '');
 
     $recordDateRaw = trim((string) ($post['record_date'] ?? ''));
     $recordDate = null;
@@ -238,6 +239,9 @@ function parse_work_edit_input(array $post, array $validEmployeeIds): array
     }
 
     $errors = [];
+    if ($personCount === null) {
+        $errors[] = '洗濯完了ネット数は0以上の整数を入力してください。';
+    }
     if ($recordDate === false || $recordDate === null) {
         $errors[] = '確認日の形式が正しくありません。';
     }
@@ -396,7 +400,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!$isSharedAccount && !$isAdminView && in_array((int) $staff['id'], $validEmployeeIds, true)) {
                 $employeeIds = [(int) $staff['id']];
             }
-            $personCount = count($employeeIds);
+            $personCount = parse_laundry_net_count($_POST['net_count'] ?? '');
 
             // 再表示までの間に他のスタッフが登録済みにした可能性があるため、直前に候補を再取得して検証する。
             $openCycles = find_open_cycles($pdo);
@@ -412,6 +416,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errorMessage = '対象のサイクルは既に作業登録済みです。もう一度やり直してください。';
             } elseif (empty($employeeIds)) {
                 $errorMessage = '作業した従業員を1人以上選択してください。';
+            } elseif ($personCount === null) {
+                $errorMessage = '洗濯完了ネット数は0以上の整数を入力してください。';
             } else {
                 $now = new DateTime();
 
@@ -1052,6 +1058,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($
     $editFormValues = [
         'id' => (int) ($_POST['id'] ?? 0),
         'employee_ids' => array_map('intval', (array) ($_POST['employee_ids'] ?? [])),
+        'net_count' => (string) ($_POST['net_count'] ?? ''),
         'record_date' => (string) ($_POST['record_date'] ?? ''),
         'record_time' => (string) ($_POST['record_time'] ?? ''),
         'facility_name' => $editingRecord['facility_name'] ?? '',
@@ -1061,6 +1068,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($
     $editFormValues = [
         'id' => (int) $editingRecord['id'],
         'employee_ids' => $editingRecordEmployeeIds,
+        'net_count' => (string) $editingRecord['person_count'],
         'record_date' => $editingRecord['record_date'],
         'record_time' => $editingRecord['record_time'] !== null ? substr($editingRecord['record_time'], 0, 5) : '',
         'facility_name' => $editingRecord['facility_name'],
@@ -1202,6 +1210,7 @@ $renderCycleCard = function (array $cycle, bool $includeFacilityName = false) us
                                 <?php else: ?>
                                     <input type="hidden" name="employee_ids[]" value="<?= (int) $staff['id'] ?>">
                                 <?php endif; ?>
+                                <input type="number" name="net_count" min="0" step="1" required placeholder="枚数">
                                 <button type="submit">完了</button>
                             </form>
                         <?php endif; ?>
@@ -1419,6 +1428,10 @@ if ($isAdminView) {
                 </select>
             </div>
             <div class="form-row">
+                <label for="e_net_count">洗濯完了ネット数</label>
+                <input type="number" id="e_net_count" name="net_count" min="0" step="1" value="<?= htmlspecialchars($editFormValues['net_count'], ENT_QUOTES, 'UTF-8') ?>" required>
+            </div>
+            <div class="form-row">
                 <label for="e_record_date">作業日</label>
                 <input type="date" id="e_record_date" name="record_date" value="<?= htmlspecialchars($editFormValues['record_date'], ENT_QUOTES, 'UTF-8') ?>" required>
             </div>
@@ -1592,7 +1605,12 @@ if ($isAdminView) {
                         <td><?= !empty($standaloneParticipantsByRecordId[(int) $record['id']]) ? htmlspecialchars(implode('・', $standaloneParticipantsByRecordId[(int) $record['id']]), ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(WSR_STANDALONE_STAGE_LABEL, ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= (int) $record['person_count'] ?>枚</td>
+                        <td>
+                            <?= (int) $record['person_count'] ?>枚
+                            <?php if ($record['record_time'] === null): ?>
+                                <br><small>※退勤時記録（人数）</small>
+                            <?php endif; ?>
+                        </td>
                         <td><?= htmlspecialchars($record['created_at'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td>
                             <a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?period=<?= htmlspecialchars($wsrPeriod, ENT_QUOTES, 'UTF-8') ?>&wsr_edit=<?= (int) $record['id'] ?>">編集</a>

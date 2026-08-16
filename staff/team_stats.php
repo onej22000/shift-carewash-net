@@ -27,7 +27,7 @@ if ($period !== 'all') {
     $start = (new DateTime())->modify('-' . ((int) $period - 1) . ' days')->format('Y-m-d');
     $attendanceDateCondition = 'AND DATE(clock_in_at) BETWEEN :start AND :end';
     $attendanceParams = [':start' => $start, ':end' => $end];
-    $stageDateCondition = 'AND record_date BETWEEN :start AND :end';
+    $stageDateCondition = 'AND wsr.record_date BETWEEN :start AND :end';
     $stageParams = [':start' => $start, ':end' => $end];
 }
 
@@ -49,11 +49,14 @@ foreach ($attendanceStmt->fetchAll() as $row) {
 
 // ---- 効率算出用：従業員別・日次の洗濯代行人数 ----
 // 洗濯・乾燥・畳みは2026-08-06に「洗濯」1工程へ統合したため、stage='wash'のみで洗濯代行の全実績を表す。
+// person_count（洗濯完了ネット数＝枚数）は人数を表さないため、実際に参加した従業員一覧
+// （work_stage_record_employees）の件数を真の人数として集計する。
 $stagePeopleStmt = $pdo->prepare(
-    "SELECT employee_id, record_date, SUM(person_count) AS day_people
-     FROM work_stage_records
-     WHERE stage = 'wash' AND deleted_at IS NULL $stageDateCondition
-     GROUP BY employee_id, record_date"
+    "SELECT wse.employee_id, wsr.record_date, COUNT(*) AS day_people
+     FROM work_stage_record_employees wse
+     INNER JOIN work_stage_records wsr ON wsr.id = wse.work_stage_record_id
+     WHERE wsr.stage = 'wash' AND wsr.deleted_at IS NULL $stageDateCondition
+     GROUP BY wse.employee_id, wsr.record_date"
 );
 $stagePeopleStmt->execute($stageParams);
 $peopleByEmployeeDay = [];
@@ -63,10 +66,11 @@ foreach ($stagePeopleStmt->fetchAll() as $row) {
 
 // ---- 従業員別: 洗濯代行合計人数 ----
 $laundryStmt = $pdo->prepare(
-    "SELECT employee_id, SUM(person_count) AS total
-     FROM work_stage_records
-     WHERE stage = 'wash' AND deleted_at IS NULL $stageDateCondition
-     GROUP BY employee_id"
+    "SELECT wse.employee_id, COUNT(*) AS total
+     FROM work_stage_record_employees wse
+     INNER JOIN work_stage_records wsr ON wsr.id = wse.work_stage_record_id
+     WHERE wsr.stage = 'wash' AND wsr.deleted_at IS NULL $stageDateCondition
+     GROUP BY wse.employee_id"
 );
 $laundryStmt->execute($stageParams);
 $laundryTotalByEmployee = [];
