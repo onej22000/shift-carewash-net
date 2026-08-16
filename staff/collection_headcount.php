@@ -1498,9 +1498,14 @@ if ($isAdminView) {
         <?php endif; ?>
     <?php else: ?>
         <?php
-        $emptyMessage = '対応が必要な集荷サイクルはありません。';
+        $emptyMessage = '現在、対応が必要な集荷サイクルはありません。';
         require __DIR__ . '/../includes/facility_panel_list.php';
         ?>
+        <?php if (empty($facilityPanelGroups)): ?>
+            <p class="notice">
+                新しい集荷を登録するには、集荷記録簿（<a href="<?= htmlspecialchars($isAdminView ? '/admin/collection_records.php' : '/staff/collection_entry.php', ENT_QUOTES, 'UTF-8') ?>">こちら</a>）から集荷・到着の登録を行ってください。
+            </p>
+        <?php endif; ?>
     <?php endif; ?>
 </section>
 
