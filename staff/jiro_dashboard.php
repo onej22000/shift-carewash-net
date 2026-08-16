@@ -51,8 +51,7 @@ $checklist = build_jiro_checklist_data($pdo, $viewDate);
 
 <?php if ($isSharedAccount): ?>
     <section class="shared-actions">
-        <a class="shared-action" href="/staff/collection_headcount.php">洗濯ネット・到着リネン袋数登録</a>
-        <a class="shared-action" href="/staff/work_records.php">作業実績登録</a>
+        <a class="shared-action" href="/staff/collection_headcount.php">作業登録</a>
     </section>
 <?php endif; ?>
 
