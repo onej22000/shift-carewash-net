@@ -1456,39 +1456,6 @@ if ($isAdminView) {
     <p class="message error"><?= htmlspecialchars($errorMessage, ENT_QUOTES, 'UTF-8') ?></p>
 <?php endif; ?>
 
-<section class="cycle-lookup">
-    <h2>洗濯ネット数・洗濯完了ネット数・返却リネン袋数の登録（施設・集荷日から直接指定）</h2>
-    <form method="get" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="cycle-lookup-form">
-        <div class="form-row">
-            <label for="target_facility_id">施設</label>
-            <select id="target_facility_id" name="target_facility_id" required>
-                <option value="">選択してください</option>
-                <?php foreach ($manualFacilities as $facility): ?>
-                    <option value="<?= (int) $facility['id'] ?>" <?= $targetFacilityId === (int) $facility['id'] ? 'selected' : '' ?>><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
-                <?php endforeach; ?>
-            </select>
-        </div>
-        <div class="form-row">
-            <label for="target_pickup_date">集荷日</label>
-            <input type="date" id="target_pickup_date" name="target_pickup_date" value="<?= htmlspecialchars($targetPickupDate, ENT_QUOTES, 'UTF-8') ?>" required>
-        </div>
-        <button type="submit">表示</button>
-        <?php if ($targetFacilityId > 0 && $targetPickupDate !== ''): ?>
-            <a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?target_clear=1">選択解除</a>
-        <?php endif; ?>
-    </form>
-
-    <?php if ($targetFacilityId > 0 && $targetPickupDate !== ''): ?>
-        <?php if ($targetCycleForLookup === null): ?>
-            <p class="notice">該当する集荷サイクルが見つかりません。集荷記録簿（<a href="<?= htmlspecialchars($isAdminView ? '/admin/collection_records.php' : '/staff/collection_entry.php', ENT_QUOTES, 'UTF-8') ?>">こちら</a>）で先に集荷・到着の登録を行ってください。</p>
-        <?php else: ?>
-            <div class="cycle-cards">
-                <?php $renderCycleCard($targetCycleForLookup, true); ?>
-            </div>
-        <?php endif; ?>
-    <?php endif; ?>
-</section>
-
 <?php if ($editFormValues !== null): ?>
 <section class="edit-form">
     <h2>作業登録の修正（<?= htmlspecialchars($editFormValues['facility_name'], ENT_QUOTES, 'UTF-8') ?>　<?= htmlspecialchars($editFormValues['pickup_date'], ENT_QUOTES, 'UTF-8') ?>集荷分）</h2>
@@ -1584,6 +1551,39 @@ if ($isAdminView) {
             <p class="notice">
                 新しい集荷を登録するには、集荷記録簿（<a href="<?= htmlspecialchars($isAdminView ? '/admin/collection_records.php' : '/staff/collection_entry.php', ENT_QUOTES, 'UTF-8') ?>">こちら</a>）から集荷・到着の登録を行ってください。
             </p>
+        <?php endif; ?>
+    <?php endif; ?>
+</section>
+
+<section class="cycle-lookup">
+    <h2>洗濯ネット数・洗濯完了ネット数・返却リネン袋数の登録（施設・集荷日から直接指定）</h2>
+    <form method="get" action="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>" class="cycle-lookup-form">
+        <div class="form-row">
+            <label for="target_facility_id">施設</label>
+            <select id="target_facility_id" name="target_facility_id" required>
+                <option value="">選択してください</option>
+                <?php foreach ($manualFacilities as $facility): ?>
+                    <option value="<?= (int) $facility['id'] ?>" <?= $targetFacilityId === (int) $facility['id'] ? 'selected' : '' ?>><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <div class="form-row">
+            <label for="target_pickup_date">集荷日</label>
+            <input type="date" id="target_pickup_date" name="target_pickup_date" value="<?= htmlspecialchars($targetPickupDate, ENT_QUOTES, 'UTF-8') ?>" required>
+        </div>
+        <button type="submit">表示</button>
+        <?php if ($targetFacilityId > 0 && $targetPickupDate !== ''): ?>
+            <a href="<?= htmlspecialchars($collectionHeadcountPath, ENT_QUOTES, 'UTF-8') ?>?target_clear=1">選択解除</a>
+        <?php endif; ?>
+    </form>
+
+    <?php if ($targetFacilityId > 0 && $targetPickupDate !== ''): ?>
+        <?php if ($targetCycleForLookup === null): ?>
+            <p class="notice">該当する集荷サイクルが見つかりません。集荷記録簿（<a href="<?= htmlspecialchars($isAdminView ? '/admin/collection_records.php' : '/staff/collection_entry.php', ENT_QUOTES, 'UTF-8') ?>">こちら</a>）で先に集荷・到着の登録を行ってください。</p>
+        <?php else: ?>
+            <div class="cycle-cards">
+                <?php $renderCycleCard($targetCycleForLookup, true); ?>
+            </div>
         <?php endif; ?>
     <?php endif; ?>
 </section>
