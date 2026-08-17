@@ -264,7 +264,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $deleteStmt = $pdo->prepare('UPDATE collection_cycles SET deleted_at = :deleted_at WHERE id = :id');
                     $deleteStmt->execute([':deleted_at' => (new DateTime())->format('Y-m-d H:i:s'), ':id' => $cycleId]);
 
-                    reverse_collection_cycle_facility_issuance($pdo, $cycleId);
                     cancel_collection_cycle_issuance_stock_transactions($pdo, $cycleId, $admin['id']);
 
                     $pdo->commit();
@@ -567,8 +566,12 @@ function cr_issued(array $record): string
 $openCyclesStmt = $pdo->query(
     "SELECT cc.*, f.name AS facility_name, f.pickup_schedule AS facility_pickup_schedule,
             f.onboarding_start_date AS facility_onboarding_start_date,
-            f.issued_linen_bag_orange AS facility_issued_bag_orange,
-            f.issued_linen_bag_yellow AS facility_issued_bag_yellow
+            (SELECT 1 FROM collection_cycles ibo
+             WHERE ibo.facility_id = f.id AND ibo.deleted_at IS NULL AND ibo.issued_bag_orange IS NOT NULL
+             LIMIT 1) AS facility_issued_bag_orange,
+            (SELECT 1 FROM collection_cycles iby
+             WHERE iby.facility_id = f.id AND iby.deleted_at IS NULL AND iby.issued_bag_yellow IS NOT NULL
+             LIMIT 1) AS facility_issued_bag_yellow
      FROM collection_cycles cc
      INNER JOIN facilities f ON f.id = cc.facility_id
      WHERE cc.return_bag_count IS NULL AND cc.pickup_bag_count IS NOT NULL AND cc.deleted_at IS NULL

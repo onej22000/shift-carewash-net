@@ -6,15 +6,6 @@ const BOARD_TYPES = [
     'laundry' => '洗濯スタッフ連絡掲示板',
 ];
 
-// consumable_stock_transactions.item_type → facilities側の交付累計カラム名。
-// linen_bag_blueはfacilitiesに対応カラムが無いため意図的に含めない。
-const ITEM_TYPE_TO_FACILITY_ISSUED_COLUMN = [
-    'linen_bag_orange' => 'issued_linen_bag_orange',
-    'linen_bag_yellow' => 'issued_linen_bag_yellow',
-    'linen_bag_blue' => 'issued_linen_bag_blue',
-    'laundry_net' => 'issued_laundry_net_count',
-];
-
 const SHIFT_CATEGORIES = ['店舗', '洗濯代行', '集荷']; // 優先順位順（業務種別按分で使用）
 const CATEGORY_COLORS = [
     '店舗' => '#0b5ed7',
@@ -1430,8 +1421,8 @@ function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, arr
  * 交付数を訂正して増やした場合は、その増加分だけ追加で減産する。減らした場合は
  * 何もしないため、必要なら消耗品在庫管理画面から手動で調整する。
  *
- * 同じ増加分だけ、施設マスタ（facilities）側の交付累計カラムにも加算する
- * （自社在庫は減、施設側在庫は増）。
+ * facilities.issued_*（施設マスタの基準交付数）へは連動しない —— 施設マスタは
+ * admin/facilities.phpからの直接編集のみで変化する（2026-08-17仕様変更）。
  */
 function record_collection_cycle_issuance_stock_adjustment(
     PDO $pdo,
@@ -1475,50 +1466,6 @@ function record_collection_cycle_issuance_stock_adjustment(
             ':note' => $note,
             ':created_by' => $createdBy,
         ]);
-
-        $facilityColumn = ITEM_TYPE_TO_FACILITY_ISSUED_COLUMN[$itemType] ?? null;
-        if ($facilityColumn !== null) {
-            $facilityStmt = $pdo->prepare(
-                "UPDATE facilities SET {$facilityColumn} = COALESCE({$facilityColumn}, 0) + :increase WHERE id = :facility_id"
-            );
-            $facilityStmt->execute([':increase' => $increase, ':facility_id' => $facilityId]);
-        }
-    }
-}
-
-/**
- * 集荷・配送記録（collection_cycles）が削除された際、その記録がfacilities.issued_*に
- * 加算した分を差し引く。consumable_stock_transactions側の「まだ取り消されていない
- * この記録由来の交付取引」を(item_type, facility_id)単位で合算して使うため、
- * facility_idが編集で変更されていた場合でも当時加算した施設に対して正しく戻せる。
- * 呼び出しは必ずcancel_collection_cycle_issuance_stock_transactions()より前に行うこと
- * （取消後はcanceled_at IS NOT NULLとなり合計から漏れるため）。
- */
-function reverse_collection_cycle_facility_issuance(PDO $pdo, int $collectionCycleId): void
-{
-    $sumStmt = $pdo->prepare(
-        "SELECT item_type, facility_id, SUM(quantity) AS total_quantity
-         FROM consumable_stock_transactions
-         WHERE collection_cycle_id = :collection_cycle_id AND reason = 'issuance_to_facility' AND canceled_at IS NULL
-         GROUP BY item_type, facility_id"
-    );
-    $sumStmt->execute([':collection_cycle_id' => $collectionCycleId]);
-
-    foreach ($sumStmt->fetchAll() as $row) {
-        $facilityColumn = ITEM_TYPE_TO_FACILITY_ISSUED_COLUMN[$row['item_type']] ?? null;
-        if ($facilityColumn === null) {
-            continue;
-        }
-        // quantityは交付分がマイナスで記録されているため、符号反転すると加算した増加分になる。
-        $increaseToReverse = -(int) $row['total_quantity'];
-        if ($increaseToReverse <= 0) {
-            continue;
-        }
-
-        $updateStmt = $pdo->prepare(
-            "UPDATE facilities SET {$facilityColumn} = GREATEST(0, COALESCE({$facilityColumn}, 0) - :decrease) WHERE id = :facility_id"
-        );
-        $updateStmt->execute([':decrease' => $increaseToReverse, ':facility_id' => (int) $row['facility_id']]);
     }
 }
 
@@ -1663,6 +1610,12 @@ function calc_vehicle_alerts(PDO $pdo, string $today): array
  * 到着済み（arrival_bag_count確定）だが洗濯代行の作業が完了していない
  * （return_ready_bag_count未確定）集荷サイクルを検知する。期間による絞り込みはしない
  * （到着していて未洗濯なら常に対象）。
+ *
+ * pickup_bag_count IS NOT NULLは、空袋・空ネットの納品のみ（実際の集荷が発生していない
+ * サイクル）を除外するための条件。collection_headcount.phpのfind_open_cycles()・
+ * collection_entry.phpの未返却カード一覧と同じ考え方（2026-08-17追加、それまで
+ * この除外条件が漏れておりアルク枚方長尾の空袋納品のみサイクルが誤って要洗濯扱いに
+ * なっていた）。
  */
 function calc_laundry_needed_alerts(PDO $pdo): array
 {
@@ -1672,6 +1625,7 @@ function calc_laundry_needed_alerts(PDO $pdo): array
          INNER JOIN facilities f ON f.id = cc.facility_id
          WHERE cc.arrival_bag_count IS NOT NULL
            AND cc.return_ready_bag_count IS NULL
+           AND cc.pickup_bag_count IS NOT NULL
            AND cc.deleted_at IS NULL
          ORDER BY cc.pickup_date ASC, f.name'
     );
@@ -1694,6 +1648,10 @@ function calc_laundry_needed_alerts(PDO $pdo): array
  * 返却予定日（calc_expected_return_date、pickup_dateと施設の集荷曜日設定から算出）を
  * 迎えている、または過ぎているのに、まだ発送登録（dispatch_bag_count）されていない
  * 集荷サイクルを検知する。到着自体がまだの重大遅延は対象外（発送しようがないため）。
+ *
+ * pickup_bag_count IS NOT NULLは、空袋・空ネットの納品のみ（実際の集荷が発生していない
+ * サイクル）を除外するための条件。calc_laundry_needed_alerts()と同じ理由・同じタイミング
+ * （2026-08-17）で追加。
  */
 function calc_return_needed_alerts(PDO $pdo, string $today): array
 {
@@ -1704,6 +1662,7 @@ function calc_return_needed_alerts(PDO $pdo, string $today): array
          INNER JOIN facilities f ON f.id = cc.facility_id
          WHERE cc.arrival_bag_count IS NOT NULL
            AND cc.dispatch_bag_count IS NULL
+           AND cc.pickup_bag_count IS NOT NULL
            AND cc.deleted_at IS NULL
          ORDER BY cc.pickup_date ASC, f.name'
     );
@@ -1995,15 +1954,30 @@ function issued_bag_color_row_class(array $cycle): string
  * ドライバー未確定の施設（集荷が予定通りに進まなかった積み残しや変則訪問）を下部に分けて返す。
  * 積み残し分を取りこぼさないよう、下部は施設のis_active状態に関わらず対象にする。
  *
- * 前回集荷袋数の色（オレンジ/黄）はfacilities.issued_linen_bag_orange/issued_linen_bag_yellowの
- * うちどちらが設定されているかで判定する（施設ごとに1色運用のため）。返却は常に青袋。
+ * 前回集荷袋数の色（オレンジ/黄）は、その施設のcollection_cycles履歴上で
+ * issued_bag_orange/issued_bag_yellowのいずれかが一度でも入力されたことがあるかどうかで
+ * 判定する（施設ごとに1色運用のため）。返却は常に青袋。
+ *
+ * 2026-08-17: facilities.issued_linen_bag_orange/yellow（施設マスタの基準交付数、
+ * 消耗品在庫の減算元）を判定に使うのをやめ、collection_cycles側のEXISTS判定に切り替えた
+ * ——施設マスタは在庫連動のためadmin/facilities.phpからの直接編集のみで変化する運用になり、
+ * 現場でissued_bag_orange等を入力しただけでは変化しなくなったため、色分けの判定元を
+ * 分離する必要があった。過去に一度でも入力があれば以後もずっと色がつく累積判定にしているのは、
+ * 直近1件だけを見ると大半のサイクルが空欄で常に無色になってしまう問題（2026-08-14）を
+ * 再発させないため。
  */
 function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
 {
     $todayScheduleLabel = todays_pickup_schedule_label($today);
 
     $facilitiesStmt = $pdo->query(
-        "SELECT id, name, is_active, issued_linen_bag_orange, issued_linen_bag_yellow
+        "SELECT id, name, is_active,
+                (SELECT 1 FROM collection_cycles cc
+                 WHERE cc.facility_id = facilities.id AND cc.deleted_at IS NULL AND cc.issued_bag_orange IS NOT NULL
+                 LIMIT 1) AS issued_linen_bag_orange,
+                (SELECT 1 FROM collection_cycles cc
+                 WHERE cc.facility_id = facilities.id AND cc.deleted_at IS NULL AND cc.issued_bag_yellow IS NOT NULL
+                 LIMIT 1) AS issued_linen_bag_yellow
          FROM facilities
          WHERE facility_type = '介護施設'"
     );
