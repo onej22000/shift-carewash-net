@@ -154,26 +154,29 @@ if (!empty($wsrIds)) {
     }
 }
 
-// ---- 日別サイクル明細一覧（1日1行、全施設集約）----
-// 施設数・集荷リネン袋数合計・洗濯ネット数合計は collection_cycles を pickup_date で
-// GROUP BYするだけで求まる（work_stage_recordsの有無を問わない）。
+// ---- 日別サイクル明細一覧（1作業日1行、全施設集約）----
+// 集荷日の翌日以降に洗濯する場合があるため、collection_cycles.pickup_dateではなく、
+// 洗濯ネット数・返却リネン袋数と同じ画面で作業登録した日
+// （work_stage_records.record_date）を集計日として使用する。
 // 2026-08-14修正: 交付のみ（空袋・空ネット納品のみで、pickup_bag_count・arrival_bag_countが
 // どちらもNULL＝物理的に何も動いていない）のサイクルは「実務が発生した日」に含めない。
 // 集荷リネン袋数（合計）は、manual_register経由（collection_headcount.php上部フォーム）で
 // 作成された一部のレコードがpickup_bag_countを持たずarrival_bag_countのみに値が入るため、
 // COALESCE(pickup_bag_count, arrival_bag_count)の合計に変更。
 $dailyTotalsStmt = $pdo->prepare(
-    "SELECT cc.pickup_date,
+    "SELECT wsr.record_date AS work_date,
             COUNT(DISTINCT cc.facility_id) AS facility_count,
             SUM(COALESCE(cc.pickup_bag_count, cc.arrival_bag_count)) AS pickup_bag_total,
             SUM(cc.return_ready_laundry_net_count) AS net_total
-     FROM collection_cycles cc
+     FROM work_stage_records wsr
+     INNER JOIN collection_cycles cc ON cc.id = wsr.collection_cycle_id
      INNER JOIN facilities f ON f.id = cc.facility_id
-     WHERE cc.deleted_at IS NULL AND f.facility_type != 'クリーニング所'
-           AND cc.pickup_date BETWEEN :start AND :end
+     WHERE wsr.deleted_at IS NULL AND wsr.stage = 'wash'
+           AND cc.deleted_at IS NULL AND f.facility_type != 'クリーニング所'
+           AND wsr.record_date BETWEEN :start AND :end
            AND (cc.pickup_bag_count IS NOT NULL OR cc.arrival_bag_count IS NOT NULL)
-     GROUP BY cc.pickup_date
-     ORDER BY cc.pickup_date"
+     GROUP BY wsr.record_date
+     ORDER BY wsr.record_date"
 );
 $dailyTotalsStmt->execute([':start' => $start, ':end' => $end]);
 $dailyTotalsRows = $dailyTotalsStmt->fetchAll();
@@ -349,7 +352,7 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
     <h2>日別サイクル明細</h2>
     <?php if ($showByDayNotice): ?>
     <p class="notice">
-        日付（collection_cycles.pickup_date）ごとに、その日の全施設・全サイクル（交付のみ＝
+        作業登録日（work_stage_records.record_date）ごとに、その日に作業登録した全施設・全サイクル（交付のみ＝
         pickup_bag_count・arrival_bag_countが両方NULLのサイクルを除く）を集約した1行です。
         作業時間は、その日の「洗濯代行」区分の出退勤打刻（attendance）のうち最も早い出勤時刻〜
         最も遅い退勤時刻という、その日全体の稼働の幅を示します（work_stage_records側の登録間隔では
@@ -375,16 +378,16 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
             <tbody>
                 <?php foreach ($dailyTotalsRows as $row): ?>
                     <?php
-                    $dayStats = $dailyWorkStatsByDate[$row['pickup_date']] ?? null;
+                    $dayStats = $dailyWorkStatsByDate[$row['work_date']] ?? null;
                     $dayNames = $dayStats !== null ? array_keys($dayStats['names']) : [];
                     sort($dayNames);
-                    $dayAttendanceSpan = $dailyAttendanceSpanByDate[$row['pickup_date']] ?? null;
+                    $dayAttendanceSpan = $dailyAttendanceSpanByDate[$row['work_date']] ?? null;
                     $daySpanMinutes = $dayAttendanceSpan !== null
                         ? intdiv(strtotime($dayAttendanceSpan['latest_clock_out']) - strtotime($dayAttendanceSpan['earliest_clock_in']), 60)
                         : null;
                     ?>
                     <tr>
-                        <td><?= htmlspecialchars($row['pickup_date'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars($row['work_date'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= (int) $row['facility_count'] ?></td>
                         <td><?= $row['pickup_bag_total'] !== null ? (int) $row['pickup_bag_total'] . '袋' : '-' ?></td>
                         <td><?= $row['net_total'] !== null ? (int) $row['net_total'] . '枚' : '-' ?></td>
