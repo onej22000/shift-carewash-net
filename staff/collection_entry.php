@@ -24,14 +24,21 @@ function find_candidate_cycles(PDO $pdo, string $stage, ?int $facilityId = null)
 {
     switch ($stage) {
         case 'arrival':
+            // 交付のみ（pickup_bag_countがNULL）のサイクルは実際の集荷物がないため、
+            // 到着・発送工程の候補に含めない。
             $sql = 'SELECT * FROM collection_cycles
-                    WHERE arrival_bag_count IS NULL AND deleted_at IS NULL
+                    WHERE pickup_bag_count IS NOT NULL
+                      AND arrival_bag_count IS NULL
+                      AND deleted_at IS NULL
                     ORDER BY pickup_date ASC, id ASC';
             $stmt = $pdo->query($sql);
             return $stmt->fetchAll();
         case 'dispatch':
             $sql = 'SELECT * FROM collection_cycles
-                    WHERE arrival_bag_count IS NOT NULL AND dispatch_bag_count IS NULL AND deleted_at IS NULL
+                    WHERE pickup_bag_count IS NOT NULL
+                      AND arrival_bag_count IS NOT NULL
+                      AND dispatch_bag_count IS NULL
+                      AND deleted_at IS NULL
                     ORDER BY pickup_date ASC, id ASC';
             $stmt = $pdo->query($sql);
             return $stmt->fetchAll();
@@ -55,17 +62,22 @@ function find_candidate_cycles(PDO $pdo, string $stage, ?int $facilityId = null)
  * この関数は新規サイクルのINSERT前に呼ぶ前提のため、除外条件なしで「facility_idの
  * 既存サイクルの最新1件」を取れば、それがそのまま「前回サイクル」になる。
  */
-function find_previous_cycle_for_facility(PDO $pdo, int $facilityId): ?array
+function find_pending_return_cycles_for_facility(PDO $pdo, int $facilityId): array
 {
+    // 「返却未確定（return_bag_count IS NULL）」かつ「洗濯代行側の返却数が確定済み
+    // （return_ready_bag_count IS NOT NULL）」のサイクルを、溜まっている分も含めて
+    // 全件取得する。以前は直近1件だけを見ていたため、間に交付のみ等の記録が挟まると
+    // 本来対象にすべきサイクルが永久に取りこぼされるバグがあった。
     $stmt = $pdo->prepare(
         'SELECT * FROM collection_cycles
-         WHERE facility_id = :facility_id AND deleted_at IS NULL
-         ORDER BY pickup_date DESC, id DESC
-         LIMIT 1'
+         WHERE facility_id = :facility_id
+           AND deleted_at IS NULL
+           AND return_ready_bag_count IS NOT NULL
+           AND return_bag_count IS NULL
+         ORDER BY pickup_date ASC, id ASC'
     );
     $stmt->execute([':facility_id' => $facilityId]);
-    $row = $stmt->fetch();
-    return $row !== false ? $row : null;
+    return $stmt->fetchAll();
 }
 
 function format_cycle_candidate_label(array $cycle, array $facilityNamesById = []): string
@@ -562,10 +574,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     } elseif ($pickupDate === false || $pickupTime === false || $pickupEmployeeId === false) {
                         $errorMessage = '集荷の日付・時間・担当者の入力内容が正しくありません。';
                     } else {
-                        // 新規サイクルのINSERT前に取得する＝この時点でfacility_idに存在する最新サイクルが
-                        // そのまま「前回サイクル」になる（find_previous_cycle_for_facility()のdocblock参照）。
-                        $previousCycle = find_previous_cycle_for_facility($pdo, $facilityId);
-                        $autoConfirmedReturnBagCount = null;
+                        // 新規サイクルのINSERT前に取得する＝この時点で洗濯代行側の返却数が確定済みなのに
+                        // まだ返却未確定になっている全サイクルが対象（find_pending_return_cycles_for_facility()
+                        // のdocblock参照）。
+                        $pendingReturnCycles = find_pending_return_cycles_for_facility($pdo, $facilityId);
+                        $autoConfirmedCycles = [];
 
                         $pdo->beginTransaction();
                         try {
@@ -580,20 +593,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 'issued_laundry_net_count' => $issuedLaundryNetCount,
                             ], $facilityId, $facilityName, $newCycleId, $staff['id']);
 
-                            // 前回サイクルの「返却」自動確定：洗濯代行が返却リネン袋（青）数
-                            // （return_ready_bag_count）を確定済みで、ドライバーの最終返却確定
-                            // （return_bag_count）がまだの場合、今回の集荷登録（＝次回訪問時に
-                            // 前回分を返却したこと）をもって自動でそのまま確定する。これにより
-                            // 独立した「返却登録」操作は不要になる（collection_headcount.phpの
-                            // register_returnは手動での例外対応用に残す）。
-                            if ($previousCycle !== null
-                                && $previousCycle['return_ready_bag_count'] !== null
-                                && $previousCycle['return_bag_count'] === null) {
-                                $autoConfirmedReturnBagCount = (int) $previousCycle['return_ready_bag_count'];
+                            // 未確定の返却を自動確定：洗濯代行が返却リネン袋数（return_ready_bag_count）
+                            // を確定済みで、ドライバーの最終返却確定（return_bag_count）がまだのサイクルは、
+                            // 今回の集荷登録（＝次回訪問時に前回分を返却したこと）をもって自動でそのまま
+                            // 確定する。溜まっている分があれば全件確定する（交付のみの記録等が間に挟まって
+                            // 一部が取りこぼされないようにするため）。これにより独立した「返却登録」操作は
+                            // 不要になる（collection_headcount.phpのregister_returnは手動での例外対応用に残す）。
+                            foreach ($pendingReturnCycles as $pendingCycle) {
+                                $confirmedBagCount = (int) $pendingCycle['return_ready_bag_count'];
                                 update_return(
-                                    $pdo, (int) $previousCycle['id'], $autoConfirmedReturnBagCount,
+                                    $pdo, (int) $pendingCycle['id'], $confirmedBagCount,
                                     $pickupDate, $pickupTime, $pickupEmployeeId
                                 );
+                                $autoConfirmedCycles[] = [
+                                    'id' => (int) $pendingCycle['id'],
+                                    'bag_count' => $confirmedBagCount,
+                                ];
                             }
 
                             $pdo->commit();
@@ -602,8 +617,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             throw $e;
                         }
                         $flashMessage = ($pickupBagCount !== null ? '集荷（' . $pickupBagCount . '袋）' : '集荷（交付のみ）') . 'を記録しました（' . $facilityName . '）。';
-                        if ($autoConfirmedReturnBagCount !== null) {
-                            $flashMessage .= '　前回サイクルの返却（' . $autoConfirmedReturnBagCount . '袋）も自動確定しました。';
+                        if (!empty($autoConfirmedCycles)) {
+                            $totalConfirmedBagCount = array_sum(array_column($autoConfirmedCycles, 'bag_count'));
+                            if (count($autoConfirmedCycles) === 1) {
+                                $flashMessage .= '　前回サイクルの返却（' . $totalConfirmedBagCount . '袋）も自動確定しました。';
+                            } else {
+                                $flashMessage .= '　未確定だった返却' . count($autoConfirmedCycles) . '件（計' . $totalConfirmedBagCount . '袋）も自動確定しました。';
+                            }
                         }
                         set_flash('success', $flashMessage);
                         header('Location: /staff/collection_entry.php');
@@ -858,26 +878,26 @@ $renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
             </thead>
             <tbody>
                 <tr>
-                    <th>集荷<?php if ($cycle['pickup_time'] !== null): ?>・<?= htmlspecialchars(substr($cycle['pickup_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
+                    <th>集荷<?php if ($cycle['pickup_time'] !== null): ?>・<?= htmlspecialchars(date('n/j', strtotime($cycle['pickup_date'])), ENT_QUOTES, 'UTF-8') ?> <?= htmlspecialchars(substr($cycle['pickup_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
                     <td class="done"><?= (int) $cycle['pickup_bag_count'] ?></td>
                 </tr>
                 <tr class="<?= $issuedBagRowClass ?>">
-                    <th>到着<?php if ($cycle['arrival_bag_count'] !== null && $cycle['arrival_time'] !== null): ?>・<?= htmlspecialchars(substr($cycle['arrival_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
+                    <th>到着<?php if ($cycle['arrival_bag_count'] !== null && $cycle['arrival_time'] !== null): ?>・<?= htmlspecialchars(date('n/j', strtotime($cycle['arrival_date'])), ENT_QUOTES, 'UTF-8') ?> <?= htmlspecialchars(substr($cycle['arrival_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
                     <td class="<?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
                         <?php if ($cycle['arrival_bag_count'] !== null): ?>
                             <?= (int) $cycle['arrival_bag_count'] ?>
                         <?php else: ?>
-                            未到着（上部の「場所を選択」でクリーニング所を選んで登録してください）
+                            未到着
                         <?php endif; ?>
                     </td>
                 </tr>
                 <tr>
-                    <th>発送<?php if ($cycle['dispatch_bag_count'] !== null && $cycle['dispatch_time'] !== null): ?>・<?= htmlspecialchars(substr($cycle['dispatch_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
+                    <th>発送<?php if ($cycle['dispatch_bag_count'] !== null && $cycle['dispatch_time'] !== null): ?>・<?= htmlspecialchars(date('n/j', strtotime($cycle['dispatch_date'])), ENT_QUOTES, 'UTF-8') ?> <?= htmlspecialchars(substr($cycle['dispatch_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
                     <td class="<?= $cycle['dispatch_bag_count'] !== null ? 'done' : '' ?>">
                         <?php if ($cycle['dispatch_bag_count'] !== null): ?>
                             <?= (int) $cycle['dispatch_bag_count'] ?>
                         <?php elseif ($cycle['arrival_bag_count'] === null): ?>
-                            （到着後に入力可）
+                            未登録
                         <?php else: ?>
                             未発送
                         <?php endif; ?>
@@ -904,13 +924,19 @@ $recentStmt = $pdo->query(
 );
 $recentCycles = $recentStmt->fetchAll();
 
-function format_stage_cell($bagCount, $time): string
+function format_stage_cell($bagCount, $date, $time): string
 {
     if ($bagCount === null) {
         return '未';
     }
     $label = (int) $bagCount . '袋';
-    if ($time !== null) {
+    if ($date !== null) {
+        $label .= '（' . date('n/j', strtotime($date));
+        if ($time !== null) {
+            $label .= ' ' . substr($time, 0, 5);
+        }
+        $label .= '）';
+    } elseif ($time !== null) {
         $label .= '（' . substr($time, 0, 5) . '）';
     }
     return $label;
@@ -1411,16 +1437,16 @@ function format_stage_cell($bagCount, $time): string
                     <tr>
                         <td><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td class="done"><?= htmlspecialchars(format_stage_cell($cycle['pickup_bag_count'], $cycle['pickup_time']), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td class="done"><?= htmlspecialchars(format_stage_cell($cycle['pickup_bag_count'], $cycle['pickup_date'], $cycle['pickup_time']), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($issuedLabel, ENT_QUOTES, 'UTF-8') ?></td>
                         <td class="<?= $cycle['arrival_bag_count'] !== null ? 'done' : 'pending' ?>">
-                            <?= htmlspecialchars(format_stage_cell($cycle['arrival_bag_count'], $cycle['arrival_time']), ENT_QUOTES, 'UTF-8') ?>
+                            <?= htmlspecialchars(format_stage_cell($cycle['arrival_bag_count'], $cycle['arrival_date'], $cycle['arrival_time']), ENT_QUOTES, 'UTF-8') ?>
                         </td>
                         <td class="<?= $cycle['dispatch_bag_count'] !== null ? 'done' : 'pending' ?>">
-                            <?= htmlspecialchars(format_stage_cell($cycle['dispatch_bag_count'], $cycle['dispatch_time']), ENT_QUOTES, 'UTF-8') ?>
+                            <?= htmlspecialchars(format_stage_cell($cycle['dispatch_bag_count'], $cycle['dispatch_date'], $cycle['dispatch_time']), ENT_QUOTES, 'UTF-8') ?>
                         </td>
                         <td class="<?= $cycle['return_bag_count'] !== null ? 'done' : 'pending' ?>">
-                            <?= htmlspecialchars(format_stage_cell($cycle['return_bag_count'], $cycle['return_time']), ENT_QUOTES, 'UTF-8') ?>
+                            <?= htmlspecialchars(format_stage_cell($cycle['return_bag_count'], $cycle['return_date'], $cycle['return_time']), ENT_QUOTES, 'UTF-8') ?>
                         </td>
                         <td>
                             <a href="/staff/collection_entry.php?edit=<?= (int) $cycle['id'] ?>">編集</a>
