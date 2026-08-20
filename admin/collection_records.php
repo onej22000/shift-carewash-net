@@ -525,7 +525,7 @@ $recordsStmt = $pdo->prepare(
          LEFT JOIN facilities af ON af.id = cc.arrival_facility_id
          LEFT JOIN facilities df ON df.id = cc.dispatch_facility_id
          WHERE ' . $recordWhere . '
-         ORDER BY cc.pickup_date ASC, cc.id ASC'
+         ORDER BY cc.pickup_date DESC, cc.id DESC'
 );
 $recordsStmt->execute($recordParams);
 $records = $recordsStmt->fetchAll();

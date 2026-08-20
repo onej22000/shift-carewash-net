@@ -915,14 +915,37 @@ $renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
 
 // ---- 直近の全サイクル状況（施設横断・自分以外の入力も含めて全体の進捗を確認できるようにする） ----
 $recentStmt = $pdo->query(
-    "SELECT cc.*, f.name AS facility_name
+    "SELECT cc.*,
+            f.name AS facility_name,
+            pe.name AS pickup_employee_name,
+            ae.name AS arrival_employee_name,
+            de.name AS dispatch_employee_name,
+            re.name AS return_employee_name,
+            af.name AS arrival_facility_name,
+            df.name AS dispatch_facility_name
      FROM collection_cycles cc
      INNER JOIN facilities f ON f.id = cc.facility_id
+     LEFT JOIN employees pe ON pe.id = cc.pickup_employee_id
+     LEFT JOIN employees ae ON ae.id = cc.arrival_employee_id
+     LEFT JOIN employees de ON de.id = cc.dispatch_employee_id
+     LEFT JOIN employees re ON re.id = cc.return_employee_id
+     LEFT JOIN facilities af ON af.id = cc.arrival_facility_id
+     LEFT JOIN facilities df ON df.id = cc.dispatch_facility_id
      WHERE cc.pickup_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND cc.deleted_at IS NULL
      ORDER BY cc.pickup_date DESC, cc.id DESC
      LIMIT 100"
 );
 $recentCycles = $recentStmt->fetchAll();
+
+function cr_bag($count)
+{
+    return $count === null ? '-' : (int) $count . '袋';
+}
+
+function cr_time($time)
+{
+    return $time === null ? '-' : substr($time, 0, 5);
+}
 
 function format_stage_cell($bagCount, $date, $time): string
 {
@@ -973,6 +996,9 @@ function format_stage_cell($bagCount, $date, $time): string
         table.records { border-collapse: collapse; width: 100%; }
         table.records th, table.records td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; font-size: 0.85em; }
         table.records th { background: #f5f5f5; }
+        table.record-table { border-collapse: collapse; width: 100%; font-size: 0.8em; }
+        table.record-table th, table.record-table td { border: 1px solid #ccc; padding: 4px 6px; text-align: center; }
+        table.record-table th { background: #f5f5f5; }
         .done { color: #1e7e34; }
         .pending { color: #999; }
 
@@ -1403,17 +1429,23 @@ function format_stage_cell($bagCount, $date, $time): string
     <?php if (empty($recentCycles)): ?>
         <p class="notice">直近30日間の記録はありません。</p>
     <?php else: ?>
-        <table class="records">
+        <table class="record-table">
             <thead>
                 <tr>
-                    <th>施設</th>
-                    <th>集荷日</th>
-                    <th>集荷</th>
-                    <th>交付袋・ネット</th>
-                    <th>到着</th>
-                    <th>発送</th>
-                    <th>返却</th>
-                    <th>操作</th>
+                    <th rowspan="2">施設</th>
+                    <th rowspan="2">集荷日</th>
+                    <th colspan="4">集荷</th>
+                    <th colspan="4">クリーニング所到着</th>
+                    <th colspan="4">クリーニング所発送</th>
+                    <th colspan="3">返却</th>
+                    <th rowspan="2">備考</th>
+                    <th rowspan="2">操作</th>
+                </tr>
+                <tr>
+                    <th>リネン袋数</th><th>時間</th><th>担当者</th><th>交付袋・ネット</th>
+                    <th>リネン袋数</th><th>到着日</th><th>時間</th><th>担当者・クリーニング所</th>
+                    <th>リネン袋数</th><th>発送日</th><th>時間</th><th>担当者・クリーニング所</th>
+                    <th>リネン袋数</th><th>返却日</th><th>時間</th>
                 </tr>
             </thead>
             <tbody>
@@ -1437,17 +1469,22 @@ function format_stage_cell($bagCount, $date, $time): string
                     <tr>
                         <td><?= htmlspecialchars($cycle['facility_name'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($cycle['pickup_date'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td class="done"><?= htmlspecialchars(format_stage_cell($cycle['pickup_bag_count'], $cycle['pickup_date'], $cycle['pickup_time']), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= cr_bag($cycle['pickup_bag_count']) ?></td>
+                        <td><?= cr_time($cycle['pickup_time']) ?></td>
+                        <td><?= htmlspecialchars($cycle['pickup_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($issuedLabel, ENT_QUOTES, 'UTF-8') ?></td>
-                        <td class="<?= $cycle['arrival_bag_count'] !== null ? 'done' : 'pending' ?>">
-                            <?= htmlspecialchars(format_stage_cell($cycle['arrival_bag_count'], $cycle['arrival_date'], $cycle['arrival_time']), ENT_QUOTES, 'UTF-8') ?>
-                        </td>
-                        <td class="<?= $cycle['dispatch_bag_count'] !== null ? 'done' : 'pending' ?>">
-                            <?= htmlspecialchars(format_stage_cell($cycle['dispatch_bag_count'], $cycle['dispatch_date'], $cycle['dispatch_time']), ENT_QUOTES, 'UTF-8') ?>
-                        </td>
-                        <td class="<?= $cycle['return_bag_count'] !== null ? 'done' : 'pending' ?>">
-                            <?= htmlspecialchars(format_stage_cell($cycle['return_bag_count'], $cycle['return_date'], $cycle['return_time']), ENT_QUOTES, 'UTF-8') ?>
-                        </td>
+                        <td><?= cr_bag($cycle['arrival_bag_count']) ?></td>
+                        <td><?= htmlspecialchars($cycle['arrival_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= cr_time($cycle['arrival_time']) ?></td>
+                        <td><?= htmlspecialchars($cycle['arrival_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?><?= $cycle['arrival_facility_name'] !== null ? '（' . htmlspecialchars($cycle['arrival_facility_name'], ENT_QUOTES, 'UTF-8') . '）' : '' ?></td>
+                        <td><?= cr_bag($cycle['dispatch_bag_count']) ?></td>
+                        <td><?= htmlspecialchars($cycle['dispatch_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= cr_time($cycle['dispatch_time']) ?></td>
+                        <td><?= htmlspecialchars($cycle['dispatch_employee_name'] ?? '-', ENT_QUOTES, 'UTF-8') ?><?= $cycle['dispatch_facility_name'] !== null ? '（' . htmlspecialchars($cycle['dispatch_facility_name'], ENT_QUOTES, 'UTF-8') . '）' : '' ?></td>
+                        <td><?= cr_bag($cycle['return_bag_count']) ?></td>
+                        <td><?= htmlspecialchars($cycle['return_date'] ?? '-', ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= cr_time($cycle['return_time']) ?></td>
+                        <td><?= htmlspecialchars($cycle['remarks'] ?? '', ENT_QUOTES, 'UTF-8') ?></td>
                         <td>
                             <a href="/staff/collection_entry.php?edit=<?= (int) $cycle['id'] ?>">編集</a>
                             <form method="post" action="/staff/collection_entry.php" class="inline-form" onsubmit="return confirm('この集荷・配送記録を削除しますか？');">
