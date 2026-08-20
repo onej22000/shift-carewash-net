@@ -121,6 +121,7 @@ $cycleDetailStmt = $pdo->prepare(
      LEFT JOIN work_stage_records wsr ON wsr.collection_cycle_id = cc.id AND wsr.deleted_at IS NULL
      WHERE cc.deleted_at IS NULL AND f.facility_type != 'クリーニング所'
            AND cc.pickup_date BETWEEN :start AND :end
+           AND (f.onboarding_start_date IS NULL OR cc.pickup_date >= f.onboarding_start_date)
      ORDER BY f.name, cc.pickup_date"
 );
 $cycleDetailStmt->execute([':start' => $start, ':end' => $end]);
@@ -175,6 +176,7 @@ $dailyTotalsStmt = $pdo->prepare(
            AND cc.deleted_at IS NULL AND f.facility_type != 'クリーニング所'
            AND wsr.record_date BETWEEN :start AND :end
            AND (cc.pickup_bag_count IS NOT NULL OR cc.arrival_bag_count IS NOT NULL)
+           AND (f.onboarding_start_date IS NULL OR cc.pickup_date >= f.onboarding_start_date)
      GROUP BY wsr.record_date
      ORDER BY wsr.record_date"
 );

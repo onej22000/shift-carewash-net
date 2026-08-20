@@ -37,6 +37,7 @@ $rows = $pdo->query(
        AND cc.deleted_at IS NULL
        AND cc.arrival_date IS NOT NULL
        AND cc.arrival_date >= f.onboarding_start_date
+       AND cc.pickup_date >= f.onboarding_start_date
        AND (
            cc.arrival_bag_count IS NOT NULL
            OR cc.return_ready_laundry_net_count IS NOT NULL
