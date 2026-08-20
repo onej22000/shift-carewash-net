@@ -302,20 +302,51 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
     $issuedBagYellow = cc_parse_bag_count($post['issued_bag_yellow'] ?? '');
     $issuedBagBlue = cc_parse_bag_count($post['issued_bag_blue'] ?? '');
     $issuedLaundryNetCount = cc_parse_bag_count($post['issued_laundry_net_count'] ?? '');
-    $arrivalBagCount = cc_parse_bag_count($post['arrival_bag_count'] ?? '');
-    $arrivalDate = cc_parse_date($post['arrival_date'] ?? '');
-    $arrivalTime = cc_parse_time($post['arrival_time'] ?? '');
-    $arrivalEmployeeId = cc_parse_employee_id($post['arrival_employee_id'] ?? '', $validEmployeeIds);
-    $arrivalFacilityId = cc_parse_facility_id($post['arrival_facility_id'] ?? '', $validCleaningFacilityIds);
-    $dispatchBagCount = cc_parse_bag_count($post['dispatch_bag_count'] ?? '');
-    $dispatchDate = cc_parse_date($post['dispatch_date'] ?? '');
-    $dispatchTime = cc_parse_time($post['dispatch_time'] ?? '');
-    $dispatchEmployeeId = cc_parse_employee_id($post['dispatch_employee_id'] ?? '', $validEmployeeIds);
-    $dispatchFacilityId = cc_parse_facility_id($post['dispatch_facility_id'] ?? '', $validCleaningFacilityIds);
-    $returnBagCount = cc_parse_bag_count($post['return_bag_count'] ?? '');
-    $returnDate = cc_parse_date($post['return_date'] ?? '');
-    $returnTime = cc_parse_time($post['return_time'] ?? '');
-    $returnEmployeeId = cc_parse_employee_id($post['return_employee_id'] ?? '', $validEmployeeIds);
+    // 日付が空欄の場合はそのステージ全体を未登録(NULL)状態に戻す。
+    // 日付だけ空にして時刻・袋数・担当者IDが残る「中途半端な状態」を防ぐため
+    // （サイクル113で実際に発生した事故と同じパターン）。
+    $arrivalDateRaw = trim((string) ($post['arrival_date'] ?? ''));
+    if ($arrivalDateRaw === '') {
+        $arrivalBagCount = null;
+        $arrivalDate = null;
+        $arrivalTime = null;
+        $arrivalEmployeeId = null;
+        $arrivalFacilityId = null;
+    } else {
+        $arrivalBagCount = cc_parse_bag_count($post['arrival_bag_count'] ?? '');
+        $arrivalDate = cc_parse_date($post['arrival_date'] ?? '');
+        $arrivalTime = cc_parse_time($post['arrival_time'] ?? '');
+        $arrivalEmployeeId = cc_parse_employee_id($post['arrival_employee_id'] ?? '', $validEmployeeIds);
+        $arrivalFacilityId = cc_parse_facility_id($post['arrival_facility_id'] ?? '', $validCleaningFacilityIds);
+    }
+
+    $dispatchDateRaw = trim((string) ($post['dispatch_date'] ?? ''));
+    if ($dispatchDateRaw === '') {
+        $dispatchBagCount = null;
+        $dispatchDate = null;
+        $dispatchTime = null;
+        $dispatchEmployeeId = null;
+        $dispatchFacilityId = null;
+    } else {
+        $dispatchBagCount = cc_parse_bag_count($post['dispatch_bag_count'] ?? '');
+        $dispatchDate = cc_parse_date($post['dispatch_date'] ?? '');
+        $dispatchTime = cc_parse_time($post['dispatch_time'] ?? '');
+        $dispatchEmployeeId = cc_parse_employee_id($post['dispatch_employee_id'] ?? '', $validEmployeeIds);
+        $dispatchFacilityId = cc_parse_facility_id($post['dispatch_facility_id'] ?? '', $validCleaningFacilityIds);
+    }
+
+    $returnDateRaw = trim((string) ($post['return_date'] ?? ''));
+    if ($returnDateRaw === '') {
+        $returnBagCount = null;
+        $returnDate = null;
+        $returnTime = null;
+        $returnEmployeeId = null;
+    } else {
+        $returnBagCount = cc_parse_bag_count($post['return_bag_count'] ?? '');
+        $returnDate = cc_parse_date($post['return_date'] ?? '');
+        $returnTime = cc_parse_time($post['return_time'] ?? '');
+        $returnEmployeeId = cc_parse_employee_id($post['return_employee_id'] ?? '', $validEmployeeIds);
+    }
     $remarksRaw = trim((string) ($post['remarks'] ?? ''));
     $remarks = $remarksRaw === '' ? null : mb_substr($remarksRaw, 0, 255);
 
