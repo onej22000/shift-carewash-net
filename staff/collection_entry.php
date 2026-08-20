@@ -885,20 +885,7 @@ $renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
                 </tr>
                 <tr class="row-return">
                     <th>返却リネン袋数</th>
-                    <td>
-                        <?php if ($cycle['dispatch_bag_count'] === null): ?>
-                            未返却
-                        <?php else: ?>
-                            <form method="post" action="/staff/collection_entry.php">
-                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-                                <input type="hidden" name="action" value="register_return">
-                                <input type="hidden" name="cycle_id" value="<?= $cycleId ?>">
-                                <input type="number" name="return_bag_count" min="0" step="1" required placeholder="袋数" value="<?= $cycle['return_ready_bag_count'] !== null ? (int) $cycle['return_ready_bag_count'] : '' ?>">
-                                <button type="submit">返却登録</button>
-                            </form>
-                            <br><small>通常は次回集荷時に自動登録されます（上記は例外対応用の手動登録です）。<?php if ($cycle['return_ready_bag_count'] !== null): ?>洗濯代行の登録数（<?= (int) $cycle['return_ready_bag_count'] ?>袋）を初期値にしています。<?php endif; ?></small>
-                        <?php endif; ?>
-                    </td>
+                    <td>未返却</td>
                 </tr>
             </tbody>
         </table>
