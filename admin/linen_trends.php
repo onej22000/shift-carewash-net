@@ -160,16 +160,24 @@ function linePath(points, key, sx, sy) {
 }
 
 function aggregateAll() {
-    const byDay = new Map();
+    const byDate = new Map();
     for (const facility of facilities) {
         for (const point of facility.points) {
-            const current = byDay.get(point.days) || {date:'',days:point.days,bags:null,nets:null};
+            if (!point.date) continue;
+            const current = byDate.get(point.date) || {date:point.date,bags:null,nets:null};
             if (point.bags !== null) current.bags = (current.bags ?? 0) + point.bags;
             if (point.nets !== null) current.nets = (current.nets ?? 0) + point.nets;
-            byDay.set(point.days, current);
+            byDate.set(point.date, current);
         }
     }
-    return {id:'all',name:'全施設合計',startDate:'施設ごとの受託開始日を基準',points:[...byDay.values()].sort((a,b)=>a.days-b.days)};
+    const sortedDates = [...byDate.keys()].sort();
+    const baseTime = sortedDates.length ? new Date(sortedDates[0]).getTime() : 0;
+    const points = sortedDates.map(date => {
+        const entry = byDate.get(date);
+        const days = Math.round((new Date(date).getTime() - baseTime) / 86400000);
+        return {date, days, bags: entry.bags, nets: entry.nets};
+    });
+    return {id:'all',name:'全施設合計',startDate:'最も古い到着日を基準',points};
 }
 
 function forecast(points, key, horizon) {
@@ -186,7 +194,7 @@ function forecast(points, key, horizon) {
     return {start:last, end:{days:targetDays,[key]:Math.max(0,last[key]+slope*(targetDays-last.days))}, slope};
 }
 
-function chartSvg(points, horizon) {
+function chartSvg(points, horizon, xAxisLabel) {
     const width=980, height=440, left=70, right=25, top=24, bottom=62;
     const normalized=points;
     const forecasts={bags:forecast(normalized,'bags',horizon),nets:forecast(normalized,'nets',horizon)};
@@ -216,7 +224,7 @@ function chartSvg(points, horizon) {
       <path d="${linePath(normalized,'nets',sx,sy)}" fill="none" stroke="#f28e2b" stroke-width="3"/>
       ${dots('bags','#247ba0')}${dots('nets','#f28e2b')}
       ${forecastLine('bags','#247ba0')}${forecastLine('nets','#f28e2b')}
-      <text x="${(left+width-right)/2}" y="${height-12}" text-anchor="middle" fill="#495867" font-size="13">受託開始からの経過日数（日）</text>
+      <text x="${(left+width-right)/2}" y="${height-12}" text-anchor="middle" fill="#495867" font-size="13">${xAxisLabel}</text>
       <text x="18" y="${(top+height-bottom)/2}" text-anchor="middle" fill="#495867" font-size="13" transform="rotate(-90 18 ${(top+height-bottom)/2})">数量</text>
     </svg>`;
 }
@@ -229,11 +237,13 @@ function render() {
     const registeredNets=facility.points.filter(p=>p.nets!==null);
     const totalNets=registeredNets.reduce((sum,p)=>sum+p.nets,0);
     const horizon=Number(forecastDaysSelect.value);
+    const isAggregate=facility.id==='all';
+    const xAxisLabel=isAggregate ? '合算後の到着日からの経過日数（日）' : '受託開始からの経過日数（日）';
     const rows=facility.points.map(p=>`<tr><td>${escapeHtml(p.date||'—')}</td><td>${p.days}</td><td>${p.bags??'—'}</td><td>${p.nets??'—'}</td></tr>`).join('');
     content.innerHTML=`
       <h2>${escapeHtml(facility.name)}</h2>
-      <div class="meta"><div><span>受託開始日</span><strong>${escapeHtml(facility.startDate)}</strong></div><div><span>記録日数</span><strong>${facility.points.length}日</strong></div><div><span>到着リネン袋 合計</span><strong>${totalBags}</strong></div><div><span>洗濯ネット 合計</span><strong>${registeredNets.length?totalNets:'—'}</strong></div></div>
-      <div class="chart-wrap">${chartSvg(facility.points,horizon)}</div>
+      <div class="meta"><div><span>${isAggregate ? '集計基準' : '受託開始日'}</span><strong>${escapeHtml(facility.startDate)}</strong></div><div><span>記録日数</span><strong>${facility.points.length}日</strong></div><div><span>到着リネン袋 合計</span><strong>${totalBags}</strong></div><div><span>洗濯ネット 合計</span><strong>${registeredNets.length?totalNets:'—'}</strong></div></div>
+      <div class="chart-wrap">${chartSvg(facility.points,horizon,xAxisLabel)}</div>
       <div class="legend"><span><i class="swatch" style="background:#247ba0"></i>到着リネン袋数</span><span><i class="swatch" style="background:#f28e2b"></i>洗濯ネット数</span><span>破線＝増加予想</span></div>
       <table><thead><tr><th>到着日</th><th>経過日数</th><th>到着リネン袋数</th><th>洗濯ネット数</th></tr></thead><tbody>${rows}</tbody></table>
       <p class="note">同日の複数記録は合計しています。未登録値は「—」で表示します。予想は過去実績の直線傾向を使い、減少傾向は横ばいとして試算した参考値です。実績が少ない場合は精度が低くなります。ページを開くたびに最新のデータベースから再集計されます。</p>`;
