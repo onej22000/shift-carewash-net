@@ -878,11 +878,11 @@ $renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
             </thead>
             <tbody>
                 <tr>
-                    <th>集荷<?php if ($cycle['pickup_time'] !== null): ?>・<?= htmlspecialchars(date('n/j', strtotime($cycle['pickup_date'])), ENT_QUOTES, 'UTF-8') ?> <?= htmlspecialchars(substr($cycle['pickup_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
+                    <th>集荷<?php if ($cycle['pickup_date'] !== null && $cycle['pickup_time'] !== null): ?>・<?= htmlspecialchars(date('n/j', strtotime($cycle['pickup_date'])), ENT_QUOTES, 'UTF-8') ?> <?= htmlspecialchars(substr($cycle['pickup_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
                     <td class="done"><?= (int) $cycle['pickup_bag_count'] ?></td>
                 </tr>
                 <tr class="<?= $issuedBagRowClass ?>">
-                    <th>到着<?php if ($cycle['arrival_bag_count'] !== null && $cycle['arrival_time'] !== null): ?>・<?= htmlspecialchars(date('n/j', strtotime($cycle['arrival_date'])), ENT_QUOTES, 'UTF-8') ?> <?= htmlspecialchars(substr($cycle['arrival_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
+                    <th>到着<?php if ($cycle['arrival_bag_count'] !== null && $cycle['arrival_date'] !== null && $cycle['arrival_time'] !== null): ?>・<?= htmlspecialchars(date('n/j', strtotime($cycle['arrival_date'])), ENT_QUOTES, 'UTF-8') ?> <?= htmlspecialchars(substr($cycle['arrival_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
                     <td class="<?= $cycle['arrival_bag_count'] !== null ? 'done' : '' ?>">
                         <?php if ($cycle['arrival_bag_count'] !== null): ?>
                             <?= (int) $cycle['arrival_bag_count'] ?>
@@ -892,7 +892,7 @@ $renderOpenCycleCard = function (array $cycle) use ($csrfToken): void {
                     </td>
                 </tr>
                 <tr>
-                    <th>発送<?php if ($cycle['dispatch_bag_count'] !== null && $cycle['dispatch_time'] !== null): ?>・<?= htmlspecialchars(date('n/j', strtotime($cycle['dispatch_date'])), ENT_QUOTES, 'UTF-8') ?> <?= htmlspecialchars(substr($cycle['dispatch_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
+                    <th>発送<?php if ($cycle['dispatch_bag_count'] !== null && $cycle['dispatch_date'] !== null && $cycle['dispatch_time'] !== null): ?>・<?= htmlspecialchars(date('n/j', strtotime($cycle['dispatch_date'])), ENT_QUOTES, 'UTF-8') ?> <?= htmlspecialchars(substr($cycle['dispatch_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?><?php endif; ?></th>
                     <td class="<?= $cycle['dispatch_bag_count'] !== null ? 'done' : '' ?>">
                         <?php if ($cycle['dispatch_bag_count'] !== null): ?>
                             <?= (int) $cycle['dispatch_bag_count'] ?>
