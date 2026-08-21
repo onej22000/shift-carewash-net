@@ -126,6 +126,26 @@ foreach ($latestActualRecords as $record) {
 $avgUpcomingBagCount = $latestBagCounts ? array_sum($latestBagCounts) / count($latestBagCounts) : null;
 $avgUpcomingNetCount = $latestNetCounts ? array_sum($latestNetCounts) / count($latestNetCounts) : null;
 
+/**
+ * 数値配列の中央値を返す（要素数が偶数の場合は中央2件の平均）。
+ */
+function calc_median(array $values): ?float
+{
+    if (!$values) {
+        return null;
+    }
+    sort($values);
+    $count = count($values);
+    $middle = intdiv($count, 2);
+    if ($count % 2 === 0) {
+        return ($values[$middle - 1] + $values[$middle]) / 2;
+    }
+    return (float) $values[$middle];
+}
+
+$medianUpcomingBagCount = calc_median($latestBagCounts);
+$medianUpcomingNetCount = calc_median($latestNetCounts);
+
 // pickup_schedule → DateTime::format('N')の曜日番号（月=1…土=6）の組
 $pickupWeekdayMap = [
     '月・木' => [1, 4],
@@ -163,7 +183,7 @@ function facility_upcoming_pickup_dates(string $onboardingStartDate, array $week
     return $dates;
 }
 
-$upcomingHorizonEnd = (new DateTime('today'))->modify('+90 days');
+$upcomingHorizonEnd = (new DateTime('today'))->modify('+365 days');
 $upcomingByDate = [];
 foreach ($upcomingFacilities as $facility) {
     $weekdays = $pickupWeekdayMap[$facility['pickup_schedule']] ?? null;
@@ -173,6 +193,8 @@ foreach ($upcomingFacilities as $facility) {
 
     $facilityBagEstimate = $avgUpcomingBagCount;
     $facilityNetEstimate = $avgUpcomingNetCount;
+    $facilityBagMedianEstimate = $medianUpcomingBagCount;
+    $facilityNetMedianEstimate = $medianUpcomingNetCount;
     if ($facility['room_count'] !== null) {
         if ($facilityBagEstimate !== null) {
             $facilityBagEstimate = min($facilityBagEstimate, (float) $facility['room_count']);
@@ -180,11 +202,20 @@ foreach ($upcomingFacilities as $facility) {
         if ($facilityNetEstimate !== null) {
             $facilityNetEstimate = min($facilityNetEstimate, (float) $facility['room_count']);
         }
+        if ($facilityBagMedianEstimate !== null) {
+            $facilityBagMedianEstimate = min($facilityBagMedianEstimate, (float) $facility['room_count']);
+        }
+        if ($facilityNetMedianEstimate !== null) {
+            $facilityNetMedianEstimate = min($facilityNetMedianEstimate, (float) $facility['room_count']);
+        }
     }
 
     foreach (facility_upcoming_pickup_dates($facility['onboarding_start_date'], $weekdays, $upcomingHorizonEnd) as $date) {
         if (!isset($upcomingByDate[$date])) {
-            $upcomingByDate[$date] = ['bags' => 0.0, 'nets' => 0.0, 'hasBags' => false, 'hasNets' => false];
+            $upcomingByDate[$date] = [
+                'bags' => 0.0, 'nets' => 0.0, 'hasBags' => false, 'hasNets' => false,
+                'bagsMedian' => 0.0, 'netsMedian' => 0.0, 'hasBagsMedian' => false, 'hasNetsMedian' => false,
+            ];
         }
         if ($facilityBagEstimate !== null) {
             $upcomingByDate[$date]['bags'] += $facilityBagEstimate;
@@ -193,6 +224,14 @@ foreach ($upcomingFacilities as $facility) {
         if ($facilityNetEstimate !== null) {
             $upcomingByDate[$date]['nets'] += $facilityNetEstimate;
             $upcomingByDate[$date]['hasNets'] = true;
+        }
+        if ($facilityBagMedianEstimate !== null) {
+            $upcomingByDate[$date]['bagsMedian'] += $facilityBagMedianEstimate;
+            $upcomingByDate[$date]['hasBagsMedian'] = true;
+        }
+        if ($facilityNetMedianEstimate !== null) {
+            $upcomingByDate[$date]['netsMedian'] += $facilityNetMedianEstimate;
+            $upcomingByDate[$date]['hasNetsMedian'] = true;
         }
     }
 }
@@ -204,6 +243,8 @@ foreach ($upcomingByDate as $date => $values) {
         'date' => $date,
         'bags' => $values['hasBags'] ? round($values['bags'], 1) : null,
         'nets' => $values['hasNets'] ? round($values['nets'], 1) : null,
+        'bagsMedian' => $values['hasBagsMedian'] ? round($values['bagsMedian'], 1) : null,
+        'netsMedian' => $values['hasNetsMedian'] ? round($values['netsMedian'], 1) : null,
     ];
 }
 ?>
@@ -212,7 +253,7 @@ foreach ($upcomingByDate as $date => $values) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>リネン袋・洗濯ネット推移</title>
+    <title>洗濯ネット推移予測</title>
     <style>
         :root { --navy:#183b56; --blue:#247ba0; --orange:#f28e2b; --ink:#243447; --muted:#667085; --line:#d9e2e8; --bg:#f4f7f9; }
         * { box-sizing: border-box; }
@@ -246,7 +287,7 @@ foreach ($upcomingByDate as $date => $values) {
 </head>
 <body>
 <header>
-    <h1>リネン袋・洗濯ネット推移</h1>
+    <h1>洗濯ネット推移予測</h1>
     <nav>ログイン中: <?= htmlspecialchars((string) $employee['name'], ENT_QUOTES, 'UTF-8') ?>さん | <a href="<?= htmlspecialchars($dashboardPath, ENT_QUOTES, 'UTF-8') ?>">ダッシュボード</a> | <a href="<?= htmlspecialchars($logoutPath, ENT_QUOTES, 'UTF-8') ?>">ログアウト</a></nav>
 </header>
 <main>
@@ -261,6 +302,10 @@ foreach ($upcomingByDate as $date => $values) {
                 <option value="30">30日先</option>
                 <option value="60">60日先</option>
                 <option value="90">90日先</option>
+                <option value="120">120日先</option>
+                <option value="150">150日先</option>
+                <option value="180">180日先</option>
+                <option value="365">365日先</option>
             </select>
         </div>
         <div class="updated">表示時点: <?= htmlspecialchars(date('Y-m-d H:i'), ENT_QUOTES, 'UTF-8') ?></div>
@@ -320,6 +365,7 @@ function aggregateAll() {
         days: Math.round((new Date(point.date).getTime() - baseTime) / 86400000),
         bags: point.bags,
         nets: point.nets,
+        netsMedian: point.netsMedian,
     }));
     return {id:'all',name:'全施設合計',startDate:'最も古い到着日を基準',points,upcomingPoints};
 }
@@ -342,11 +388,13 @@ function chartSvg(points, horizon, xAxisLabel, upcomingPoints) {
     upcomingPoints = upcomingPoints || [];
     const width=980, height=440, left=70, right=25, top=24, bottom=62;
     const normalized=points;
-    const forecasts={bags:forecast(normalized,'bags',horizon),nets:forecast(normalized,'nets',horizon)};
+    const forecasts={nets:forecast(normalized,'nets',horizon)};
+    const upcomingCutoffDays=Math.max(...normalized.map(p=>p.days))+horizon;
+    upcomingPoints=upcomingPoints.filter(p=>p.days<=upcomingCutoffDays);
     const maxX=Math.max(1,...normalized.map(p=>p.days),...upcomingPoints.map(p=>p.days),...Object.values(forecasts).filter(Boolean).map(f=>f.end.days));
-    const values=normalized.flatMap(p=>[p.bags,p.nets]).filter(v=>v!==null);
-    for(const f of Object.values(forecasts)){ if(f) values.push(f.end.bags??f.end.nets); }
-    for(const p of upcomingPoints){ if(p.bags!==null) values.push(p.bags); if(p.nets!==null) values.push(p.nets); }
+    const values=normalized.map(p=>p.nets).filter(v=>v!==null);
+    if(forecasts.nets) values.push(forecasts.nets.end.nets);
+    for(const p of upcomingPoints){ if(p.nets!==null) values.push(p.nets); if(p.netsMedian!==null) values.push(p.netsMedian); }
     const maxY=Math.max(1,...values);
     const ceiling=Math.max(1,Math.ceil(maxY/2)*2);
     const sx=x=>left+(x/maxX)*(width-left-right);
@@ -362,18 +410,19 @@ function chartSvg(points, horizon, xAxisLabel, upcomingPoints) {
     for(const tick of ticks){ const x=sx(tick); xLabels+=`<line x1="${x}" y1="${height-bottom}" x2="${x}" y2="${height-bottom+5}" stroke="#8796a5"/><text x="${x}" y="${height-bottom+23}" text-anchor="middle" fill="#667085" font-size="12">${tick}</text>`; }
     const dots=(key,color)=>normalized.filter(p=>p[key]!==null).map(p=>`<circle cx="${sx(p.days)}" cy="${sy(p[key])}" r="4" fill="${color}"><title>${p.date||p.days+'日目'}: ${p[key]}</title></circle>`).join('');
     const forecastLine=(key,color)=>{const f=forecasts[key];return f?`<path d="M ${sx(f.start.days)} ${sy(f.start[key])} L ${sx(f.end.days)} ${sy(f.end[key])}" fill="none" stroke="${color}" stroke-width="3" stroke-dasharray="9 7"/><circle cx="${sx(f.end.days)}" cy="${sy(f.end[key])}" r="5" fill="#fff" stroke="${color}" stroke-width="3"><title>${f.end.days}日目予想: ${f.end[key].toFixed(1)}</title></circle>`:''};
-    const upcomingLine=(key,color)=>upcomingPoints.length?`<path d="${linePath(upcomingPoints,key,sx,sy)}" fill="none" stroke="${color}" stroke-width="2.5" stroke-dasharray="2 5"/>`:'';
+    const upcomingLine=(key,color,dash)=>upcomingPoints.length?`<path d="${linePath(upcomingPoints,key,sx,sy)}" fill="none" stroke="${color}" stroke-width="2.5" stroke-dasharray="${dash||'2 5'}"/>`:'';
     const upcomingDots=(key,color)=>upcomingPoints.filter(p=>p[key]!==null).map(p=>`<circle cx="${sx(p.days)}" cy="${sy(p[key])}" r="3" fill="${color}"><title>${p.date}（実績のない施設の想定値）: ${p[key]}</title></circle>`).join('');
-    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="到着リネン袋数と洗濯ネット数の推移グラフ">
+    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="洗濯ネット数の推移グラフ">
       ${grid}${xLabels}
       <line x1="${left}" y1="${top}" x2="${left}" y2="${height-bottom}" stroke="#8796a5"/>
       <line x1="${left}" y1="${height-bottom}" x2="${width-right}" y2="${height-bottom}" stroke="#8796a5"/>
-      <path d="${linePath(normalized,'bags',sx,sy)}" fill="none" stroke="#247ba0" stroke-width="3"/>
       <path d="${linePath(normalized,'nets',sx,sy)}" fill="none" stroke="#f28e2b" stroke-width="3"/>
-      ${dots('bags','#247ba0')}${dots('nets','#f28e2b')}
-      ${forecastLine('bags','#247ba0')}${forecastLine('nets','#f28e2b')}
-      ${upcomingLine('bags','#7c3aed')}${upcomingLine('nets','#c084fc')}
-      ${upcomingDots('bags','#7c3aed')}${upcomingDots('nets','#c084fc')}
+      ${dots('nets','#f28e2b')}
+      ${forecastLine('nets','#f28e2b')}
+      ${upcomingLine('nets','#c084fc')}
+      ${upcomingLine('netsMedian','#0d9488','6 3')}
+      ${upcomingDots('nets','#c084fc')}
+      ${upcomingDots('netsMedian','#0d9488')}
       <text x="${(left+width-right)/2}" y="${height-12}" text-anchor="middle" fill="#495867" font-size="13">${xAxisLabel}</text>
       <text x="18" y="${(top+height-bottom)/2}" text-anchor="middle" fill="#495867" font-size="13" transform="rotate(-90 18 ${(top+height-bottom)/2})">数量</text>
     </svg>`;
@@ -383,22 +432,21 @@ function render() {
     const facility=select.value==='all' ? aggregateAll() : (facilities.find(f=>String(f.id)===select.value) || facilities[0]);
     if(!facility){ content.innerHTML='<div class="empty">受託開始日が登録された施設はありません。</div>'; return; }
     if(!facility.points.length){ content.innerHTML=`<h2>${escapeHtml(facility.name)}</h2><div class="empty">到着実績はまだありません。</div>`; return; }
-    const totalBags=facility.points.reduce((sum,p)=>sum+(p.bags??0),0);
     const registeredNets=facility.points.filter(p=>p.nets!==null);
     const totalNets=registeredNets.reduce((sum,p)=>sum+p.nets,0);
     const horizon=Number(forecastDaysSelect.value);
     const isAggregate=facility.id==='all';
     const upcomingPoints=isAggregate ? (facility.upcomingPoints||[]) : [];
     const xAxisLabel=isAggregate ? '合算後の到着日からの経過日数（日）' : '受託開始からの経過日数（日）';
-    const rows=facility.points.map(p=>`<tr><td>${escapeHtml(p.date||'—')}</td><td>${p.days}</td><td>${p.bags??'—'}</td><td>${p.nets??'—'}</td></tr>`).join('');
-    const upcomingLegend=upcomingPoints.length?`<span><i class="swatch" style="background:#7c3aed"></i>新施設見込み分・袋（想定値・平均ベース）</span><span><i class="swatch" style="background:#c084fc"></i>新施設見込み分・ネット（想定値・平均ベース）</span>`:'';
-    const upcomingNote=upcomingPoints.length?' 紫の点線は、まだ到着実績のない施設（今後始まる施設）について、稼働中施設の直近実績の平均値を集荷予定日ごとに一律で当てはめた想定値です。':'';
+    const rows=facility.points.map(p=>`<tr><td>${escapeHtml(p.date||'—')}</td><td>${p.days}</td><td>${p.nets??'—'}</td></tr>`).join('');
+    const upcomingLegend=upcomingPoints.length?`<span><i class="swatch" style="background:#c084fc"></i>新施設見込み分（想定値・平均ベース）</span><span><i class="swatch" style="background:#0d9488"></i>新施設見込み分（中央値ベース）</span>`:'';
+    const upcomingNote=upcomingPoints.length?' まだ到着実績のない施設（今後始まる施設）について、稼働中施設の直近実績を集荷予定日ごとに一律で当てはめた想定値です。紫の点線は平均値、ティールの点線は中央値を基準にしています。':'';
     content.innerHTML=`
       <h2>${escapeHtml(facility.name)}</h2>
-      <div class="meta"><div><span>${isAggregate ? '集計基準' : '受託開始日'}</span><strong>${escapeHtml(facility.startDate)}</strong></div><div><span>記録日数</span><strong>${facility.points.length}日</strong></div><div><span>到着リネン袋 合計</span><strong>${totalBags}</strong></div><div><span>洗濯ネット 合計</span><strong>${registeredNets.length?totalNets:'—'}</strong></div></div>
+      <div class="meta"><div><span>${isAggregate ? '集計基準' : '受託開始日'}</span><strong>${escapeHtml(facility.startDate)}</strong></div><div><span>記録日数</span><strong>${facility.points.length}日</strong></div><div><span>洗濯ネット 合計</span><strong>${registeredNets.length?totalNets:'—'}</strong></div></div>
       <div class="chart-wrap">${chartSvg(facility.points,horizon,xAxisLabel,upcomingPoints)}</div>
-      <div class="legend"><span><i class="swatch" style="background:#247ba0"></i>到着リネン袋数</span><span><i class="swatch" style="background:#f28e2b"></i>洗濯ネット数</span><span>破線＝増加予想</span>${upcomingLegend}</div>
-      <table><thead><tr><th>到着日</th><th>経過日数</th><th>到着リネン袋数</th><th>洗濯ネット数</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="legend"><span><i class="swatch" style="background:#f28e2b"></i>洗濯ネット数</span><span>破線＝増加予想</span>${upcomingLegend}</div>
+      <table><thead><tr><th>到着日</th><th>経過日数</th><th>洗濯ネット数</th></tr></thead><tbody>${rows}</tbody></table>
       <p class="note">同日の複数記録は合計しています。未登録値は「—」で表示します。予想は過去実績の直線傾向を使い、減少傾向は横ばいとして試算した参考値です。実績が少ない場合は精度が低くなります。ページを開くたびに最新のデータベースから再集計されます。${upcomingNote}</p>`;
 }
 
