@@ -475,7 +475,7 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
                 <h3>作業登録</h3>
             </a>
             <a class="nav-card" href="/admin/linen_trends.php">
-                <h3>リネン袋・洗濯ネット推移</h3>
+                <h3>洗濯ネット推移予測</h3>
             </a>
         </div>
     </div>

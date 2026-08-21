@@ -163,7 +163,7 @@ $csrfToken = csrf_token();
     <div class="nav-cards">
         <a class="nav-card" href="/admin/work_speed.php"><h2>作業速度分析</h2></a>
         <a class="nav-card" href="/admin/collection_headcount.php"><h2>作業登録</h2></a>
-        <a class="nav-card" href="/admin/linen_trends.php"><h2>リネン袋・洗濯ネット推移</h2></a>
+        <a class="nav-card" href="/admin/linen_trends.php"><h2>洗濯ネット推移予測</h2></a>
         <a class="nav-card" href="/admin/consumable_stock.php"><h2>消耗品在庫管理</h2></a>
     </div>
 </section>
