@@ -375,6 +375,12 @@ $records = $listStmt->fetchAll();
         table.stock-table th { background: #f5f5f5; }
         .stock-value { font-size: 1.15em; font-weight: bold; }
         .stock-value.negative { color: #b3261e; }
+        .stock-display { white-space: nowrap; }
+        .stock-edit-button { margin-left: 8px; font-size: 0.75em; font-weight: normal; }
+        .stock-edit-form { display: none; align-items: center; justify-content: flex-end; gap: 4px; }
+        .stock-edit-form input[type="number"] { width: 75px; padding: 4px; text-align: right; }
+        .stock-editing .stock-display { display: none; }
+        .stock-editing .stock-edit-form { display: inline-flex; }
         table.records { border-collapse: collapse; width: 100%; }
         table.records th, table.records td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; font-size: 0.9em; }
         table.records th { background: #f5f5f5; }
@@ -416,49 +422,25 @@ $records = $listStmt->fetchAll();
             ?>
             <tr>
                 <td><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></td>
-                <td class="stock-value <?= $warehouseStock < 0 ? 'negative' : '' ?>"><?= (int) $warehouseStock ?>枚</td>
-                <td class="stock-value <?= $jiroStock < 0 ? 'negative' : '' ?>"><?= (int) $jiroStock ?>枚</td>
+                <?php foreach (['warehouse' => $warehouseStock, 'jiro' => $jiroStock] as $locationKey => $locationStock): ?>
+                    <td class="stock-value <?= $locationStock < 0 ? 'negative' : '' ?>">
+                        <span class="stock-display"><?= (int) $locationStock ?>枚 <button type="button" class="stock-edit-button" onclick="toggleStockEdit(this, true)">編集</button></span>
+                        <form method="post" action="/admin/consumable_stock.php" class="stock-edit-form">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                            <input type="hidden" name="action" value="adjust_stock">
+                            <input type="hidden" name="stock_location" value="<?= htmlspecialchars($locationKey, ENT_QUOTES, 'UTF-8') ?>">
+                            <input type="hidden" name="item_type" value="<?= htmlspecialchars($itemType, ENT_QUOTES, 'UTF-8') ?>">
+                            <input type="hidden" name="note" value="現在庫表から修正">
+                            <input type="number" name="actual_quantity" min="0" step="1" value="<?= (int) $locationStock ?>" required aria-label="<?= htmlspecialchars($label . '・' . CONSUMABLE_STOCK_LOCATION_LABELS[$locationKey] . 'の実数', ENT_QUOTES, 'UTF-8') ?>">
+                            <span>枚</span><button type="submit">保存</button><button type="button" onclick="toggleStockEdit(this, false)">取消</button>
+                        </form>
+                    </td>
+                <?php endforeach; ?>
                 <td class="stock-value <?= $combinedStock < 0 ? 'negative' : '' ?>"><?= (int) $combinedStock ?>枚</td>
             </tr>
         <?php endforeach; ?>
         </tbody>
     </table>
-</section>
-
-<section class="stock-adjustment">
-    <h2>実在庫に合わせて補正</h2>
-    <p>現物を数えた結果を入力してください。現在庫との差分だけが補正履歴として記録され、自動増減の履歴は残ります。</p>
-    <fieldset>
-        <form method="post" action="/admin/consumable_stock.php">
-            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-            <input type="hidden" name="action" value="adjust_stock">
-            <div class="form-row">
-                <label for="adjust_stock_location">在庫場所</label>
-                <select id="adjust_stock_location" name="stock_location" required>
-                    <?php foreach (CONSUMABLE_STOCK_LOCATION_LABELS as $locationKey => $locationLabel): ?>
-                        <option value="<?= htmlspecialchars($locationKey, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($locationLabel, ENT_QUOTES, 'UTF-8') ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="form-row">
-                <label for="adjust_item_type">品目</label>
-                <select id="adjust_item_type" name="item_type" required>
-                    <?php foreach (CONSUMABLE_ITEM_LABELS as $itemType => $label): ?>
-                        <option value="<?= htmlspecialchars($itemType, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="form-row">
-                <label for="actual_quantity">現在の実数</label>
-                <input type="number" id="actual_quantity" name="actual_quantity" min="0" step="1" required> 枚
-            </div>
-            <div class="form-row">
-                <label for="adjust_note">備考</label>
-                <input type="text" id="adjust_note" name="note" maxlength="180" placeholder="棚卸し、破損確認など">
-            </div>
-            <button type="submit">実在庫に補正する</button>
-        </form>
-    </fieldset>
 </section>
 
 <section class="stock-form">
@@ -619,5 +601,12 @@ $records = $listStmt->fetchAll();
         </table>
     <?php endif; ?>
 </section>
+<script>
+function toggleStockEdit(button, editing) {
+    const cell = button.closest('td');
+    cell.classList.toggle('stock-editing', editing);
+    if (editing) cell.querySelector('input[name="actual_quantity"]').select();
+}
+</script>
 </body>
 </html>
