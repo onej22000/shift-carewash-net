@@ -17,12 +17,18 @@ const CONSUMABLE_ITEM_LABELS = [
     'laundry_net' => '洗濯ネット',
 ];
 
+const CONSUMABLE_STOCK_LOCATION_LABELS = [
+    'warehouse' => '倉庫',
+    'jiro' => 'フトン巻きのジロー',
+];
+
 const CONSUMABLE_REASON_LABELS = [
     'purchase' => '購入',
     'return_from_facility' => '施設等からの返却',
     'disposal' => '廃棄',
     'loss' => '紛失',
     'issuance_to_facility' => '施設等への交付',
+    'stock_adjustment' => '実在庫への補正',
 ];
 
 // この理由の場合のみ対象施設等の選択を必須にする（購入・廃棄・紛失は施設に紐づかない）
@@ -41,14 +47,15 @@ const CONSUMABLE_REASON_SIGN = [
 function parse_consumable_stock_input(array $post, array $validFacilityIds): array
 {
     $itemType = (string) ($post['item_type'] ?? '');
+    $stockLocation = (string) ($post['stock_location'] ?? 'warehouse');
 
-    // 在庫は倉庫在庫の概念のため、入力は常に正数（増減の大きさ）のみを受け付け、
+    // 選択した場所の在庫について、入力は常に正数（増減の大きさ）のみを受け付け、
     // 実際の符号（＋／－）は増減理由から自動的に決定する（下記 CONSUMABLE_REASON_SIGN 参照）。
     $quantityRaw = trim((string) ($post['quantity'] ?? ''));
     $quantityMagnitude = $quantityRaw === '' || !preg_match('/^\d+$/', $quantityRaw) ? null : (int) $quantityRaw;
 
     $reason = (string) ($post['reason'] ?? '');
-    $reason = array_key_exists($reason, CONSUMABLE_REASON_LABELS) ? $reason : null;
+    $reason = array_key_exists($reason, CONSUMABLE_REASON_SIGN) ? $reason : null;
 
     $facilityIdRaw = trim((string) ($post['facility_id'] ?? ''));
     $facilityId = $facilityIdRaw === '' ? null : (int) $facilityIdRaw;
@@ -69,6 +76,9 @@ function parse_consumable_stock_input(array $post, array $validFacilityIds): arr
     $errors = [];
     if (!array_key_exists($itemType, CONSUMABLE_ITEM_LABELS)) {
         $errors[] = '品目を選択してください。';
+    }
+    if (!array_key_exists($stockLocation, CONSUMABLE_STOCK_LOCATION_LABELS)) {
+        $errors[] = '在庫場所を選択してください。';
     }
     if ($quantityMagnitude === null || $quantityMagnitude === 0) {
         $errors[] = '増減数は1以上の整数を正の数で入力してください。';
@@ -99,6 +109,7 @@ function parse_consumable_stock_input(array $post, array $validFacilityIds): arr
     return [
         [
             'item_type' => $itemType,
+            'stock_location' => $stockLocation,
             'quantity' => $quantity,
             'reason' => $reason,
             'facility_id' => $facilityId === false ? null : $facilityId,
@@ -117,18 +128,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         $action = (string) ($_POST['action'] ?? '');
 
-        if ($action === 'create' || $action === 'update') {
+        if ($action === 'adjust_stock') {
+            $itemType = (string) ($_POST['item_type'] ?? '');
+            $stockLocation = (string) ($_POST['stock_location'] ?? '');
+            $actualQuantityRaw = trim((string) ($_POST['actual_quantity'] ?? ''));
+            $actualQuantity = preg_match('/^\d+$/', $actualQuantityRaw) ? (int) $actualQuantityRaw : null;
+            $adjustmentNote = trim((string) ($_POST['note'] ?? ''));
+
+            if (!array_key_exists($itemType, CONSUMABLE_ITEM_LABELS)
+                || !array_key_exists($stockLocation, CONSUMABLE_STOCK_LOCATION_LABELS)
+                || $actualQuantity === null) {
+                $errorMessage = '在庫場所・品目・現在の実数を正しく入力してください。';
+            } else {
+                $currentStmt = $pdo->prepare(
+                    'SELECT COALESCE(SUM(quantity), 0)
+                     FROM consumable_stock_transactions
+                     WHERE stock_location = :stock_location AND item_type = :item_type AND canceled_at IS NULL'
+                );
+                $currentStmt->execute([':stock_location' => $stockLocation, ':item_type' => $itemType]);
+                $currentQuantity = (int) $currentStmt->fetchColumn();
+                $delta = $actualQuantity - $currentQuantity;
+
+                if ($delta !== 0) {
+                    $note = '実在庫への補正（' . $currentQuantity . '枚 → ' . $actualQuantity . '枚）';
+                    if ($adjustmentNote !== '') {
+                        $note .= '：' . $adjustmentNote;
+                    }
+                    $stmt = $pdo->prepare(
+                        "INSERT INTO consumable_stock_transactions
+                            (item_type, stock_location, quantity, reason, transaction_date, note, created_by)
+                         VALUES
+                            (:item_type, :stock_location, :quantity, 'stock_adjustment', :transaction_date, :note, :created_by)"
+                    );
+                    $stmt->execute([
+                        ':item_type' => $itemType,
+                        ':stock_location' => $stockLocation,
+                        ':quantity' => $delta,
+                        ':transaction_date' => (new DateTime())->format('Y-m-d'),
+                        ':note' => $note,
+                        ':created_by' => $admin['id'],
+                    ]);
+                    set_flash('success', CONSUMABLE_STOCK_LOCATION_LABELS[$stockLocation] . 'の実在庫に補正しました。');
+                } else {
+                    set_flash('success', '入力された実数は現在庫と同じため、変更はありません。');
+                }
+                header('Location: /admin/consumable_stock.php');
+                exit;
+            }
+        } elseif ($action === 'create' || $action === 'update') {
             [$values, $parseErrors] = parse_consumable_stock_input($_POST, $validFacilityIds);
 
             if (!empty($parseErrors)) {
                 $errorMessage = implode(' ', $parseErrors);
             } elseif ($action === 'create') {
                 $stmt = $pdo->prepare(
-                    'INSERT INTO consumable_stock_transactions (item_type, quantity, reason, facility_id, transaction_date, note, created_by)
-                     VALUES (:item_type, :quantity, :reason, :facility_id, :transaction_date, :note, :created_by)'
+                    'INSERT INTO consumable_stock_transactions (item_type, stock_location, quantity, reason, facility_id, transaction_date, note, created_by)
+                     VALUES (:item_type, :stock_location, :quantity, :reason, :facility_id, :transaction_date, :note, :created_by)'
                 );
                 $stmt->execute([
                     ':item_type' => $values['item_type'],
+                    ':stock_location' => $values['stock_location'],
                     ':quantity' => $values['quantity'],
                     ':reason' => $values['reason'],
                     ':facility_id' => $values['facility_id'],
@@ -150,12 +209,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } else {
                     $updateStmt = $pdo->prepare(
                         'UPDATE consumable_stock_transactions
-                         SET item_type = :item_type, quantity = :quantity, reason = :reason, facility_id = :facility_id,
+                         SET item_type = :item_type, stock_location = :stock_location, quantity = :quantity, reason = :reason, facility_id = :facility_id,
                              transaction_date = :transaction_date, note = :note
                          WHERE id = :id'
                     );
                     $updateStmt->execute([
                         ':item_type' => $values['item_type'],
+                        ':stock_location' => $values['stock_location'],
                         ':quantity' => $values['quantity'],
                         ':reason' => $values['reason'],
                         ':facility_id' => $values['facility_id'],
@@ -198,15 +258,18 @@ $flash = pop_flash();
 $csrfToken = csrf_token();
 
 // ---- 現在庫の集計 ----
-$stockTotals = array_fill_keys(array_keys(CONSUMABLE_ITEM_LABELS), 0);
+$stockTotals = [];
+foreach (CONSUMABLE_STOCK_LOCATION_LABELS as $locationKey => $_locationLabel) {
+    $stockTotals[$locationKey] = array_fill_keys(array_keys(CONSUMABLE_ITEM_LABELS), 0);
+}
 $totalsStmt = $pdo->query(
-    'SELECT item_type, SUM(quantity) AS total
+    'SELECT stock_location, item_type, SUM(quantity) AS total
      FROM consumable_stock_transactions
      WHERE canceled_at IS NULL
-     GROUP BY item_type'
+     GROUP BY stock_location, item_type'
 );
 foreach ($totalsStmt->fetchAll() as $row) {
-    $stockTotals[$row['item_type']] = (int) $row['total'];
+    $stockTotals[$row['stock_location']][$row['item_type']] = (int) $row['total'];
 }
 
 // ---- 編集対象の読み込み ----
@@ -224,6 +287,7 @@ if (isset($_GET['edit'])) {
 $formAction = 'create';
 $formId = null;
 $formItemType = '';
+$formStockLocation = 'warehouse';
 $formQuantity = '';
 $formReason = '';
 $formFacilityId = '';
@@ -234,6 +298,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formAction = (string) ($_POST['action'] ?? 'create');
     $formId = $formAction === 'update' ? (int) ($_POST['id'] ?? 0) : null;
     $formItemType = (string) ($_POST['item_type'] ?? '');
+    $formStockLocation = (string) ($_POST['stock_location'] ?? 'warehouse');
     $formQuantity = (string) ($_POST['quantity'] ?? '');
     $formReason = (string) ($_POST['reason'] ?? '');
     $formFacilityId = (string) ($_POST['facility_id'] ?? '');
@@ -243,6 +308,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     $formAction = 'update';
     $formId = (int) $editingRecord['id'];
     $formItemType = $editingRecord['item_type'];
+    $formStockLocation = $editingRecord['stock_location'];
     // DB上は符号付きで保存されているが、入力欄は常に正数（大きさ）のみを表示する
     $formQuantity = (string) abs((int) $editingRecord['quantity']);
     $formReason = $editingRecord['reason'];
@@ -253,7 +319,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
 
 // ---- 一覧の取得 ----
 $listStmt = $pdo->query(
-    "SELECT t.id, t.item_type, t.quantity, t.reason, t.facility_id, t.transaction_date, t.note, t.canceled_at, t.created_at,
+    "SELECT t.id, t.item_type, t.stock_location, t.quantity, t.reason, t.facility_id, t.transaction_date, t.note, t.canceled_at, t.created_at,
             creator.name AS created_by_name, canceler.name AS canceled_by_name, f.name AS facility_name
      FROM consumable_stock_transactions t
      INNER JOIN employees creator ON creator.id = t.created_by
@@ -283,11 +349,12 @@ $records = $listStmt->fetchAll();
         .form-row { margin-bottom: 8px; }
         .form-row label { display: inline-block; width: 110px; vertical-align: top; }
         .form-row input[type="text"], .form-row input[type="date"], .form-row input[type="number"], .form-row select { width: 260px; }
-        .stock-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
-        .stock-card { border: 1px solid #ccc; border-radius: 8px; padding: 12px; background: #fff; }
-        .stock-card .label { font-size: 0.85em; color: #555; }
-        .stock-card .value { font-size: 1.6em; font-weight: bold; margin-top: 4px; }
-        .stock-card .value.negative { color: #b3261e; }
+        table.stock-table { border-collapse: collapse; width: 100%; max-width: 900px; }
+        table.stock-table th, table.stock-table td { border: 1px solid #ccc; padding: 8px 10px; text-align: right; }
+        table.stock-table th:first-child, table.stock-table td:first-child { text-align: left; }
+        table.stock-table th { background: #f5f5f5; }
+        .stock-value { font-size: 1.15em; font-weight: bold; }
+        .stock-value.negative { color: #b3261e; }
         table.records { border-collapse: collapse; width: 100%; }
         table.records th, table.records td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; font-size: 0.9em; }
         table.records th { background: #f5f5f5; }
@@ -316,14 +383,62 @@ $records = $listStmt->fetchAll();
 
 <section class="stock-overview">
     <h2>現在庫</h2>
-    <div class="stock-summary">
+    <table class="stock-table">
+        <thead>
+            <tr><th>品目</th><th>倉庫在庫</th><th>フトン巻きのジロー在庫</th><th>合計在庫</th></tr>
+        </thead>
+        <tbody>
         <?php foreach (CONSUMABLE_ITEM_LABELS as $itemType => $label): ?>
-            <div class="stock-card">
-                <div class="label"><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></div>
-                <div class="value <?= $stockTotals[$itemType] < 0 ? 'negative' : '' ?>"><?= (int) $stockTotals[$itemType] ?>枚</div>
-            </div>
+            <?php
+            $warehouseStock = $stockTotals['warehouse'][$itemType];
+            $jiroStock = $stockTotals['jiro'][$itemType];
+            $combinedStock = $warehouseStock + $jiroStock;
+            ?>
+            <tr>
+                <td><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></td>
+                <td class="stock-value <?= $warehouseStock < 0 ? 'negative' : '' ?>"><?= (int) $warehouseStock ?>枚</td>
+                <td class="stock-value <?= $jiroStock < 0 ? 'negative' : '' ?>"><?= (int) $jiroStock ?>枚</td>
+                <td class="stock-value <?= $combinedStock < 0 ? 'negative' : '' ?>"><?= (int) $combinedStock ?>枚</td>
+            </tr>
         <?php endforeach; ?>
-    </div>
+        </tbody>
+    </table>
+</section>
+
+<section class="stock-adjustment">
+    <h2>実在庫に合わせて補正</h2>
+    <p>現物を数えた結果を入力してください。現在庫との差分だけが補正履歴として記録され、自動増減の履歴は残ります。</p>
+    <fieldset>
+        <form method="post" action="/admin/consumable_stock.php">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+            <input type="hidden" name="action" value="adjust_stock">
+            <div class="form-row">
+                <label for="adjust_stock_location">在庫場所</label>
+                <select id="adjust_stock_location" name="stock_location" required>
+                    <?php foreach (CONSUMABLE_STOCK_LOCATION_LABELS as $locationKey => $locationLabel): ?>
+                        <option value="<?= htmlspecialchars($locationKey, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($locationLabel, ENT_QUOTES, 'UTF-8') ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="form-row">
+                <label for="adjust_item_type">品目</label>
+                <select id="adjust_item_type" name="item_type" required>
+                    <?php foreach (CONSUMABLE_ITEM_LABELS as $itemType => $label): ?>
+                        <option value="<?= htmlspecialchars($itemType, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="form-row">
+                <label for="actual_quantity">現在の実数</label>
+                <input type="number" id="actual_quantity" name="actual_quantity" min="0" step="1" required> 枚
+            </div>
+            <div class="form-row">
+                <label for="adjust_note">備考</label>
+                <input type="text" id="adjust_note" name="note" maxlength="180" placeholder="棚卸し、破損確認など">
+            </div>
+            <button type="submit">実在庫に補正する</button>
+        </form>
+    </fieldset>
 </section>
 
 <section class="stock-form">
@@ -349,6 +464,17 @@ $records = $listStmt->fetchAll();
             </div>
 
             <div class="form-row">
+                <label for="stock_location">在庫場所</label>
+                <select id="stock_location" name="stock_location" required>
+                    <?php foreach (CONSUMABLE_STOCK_LOCATION_LABELS as $locationKey => $locationLabel): ?>
+                        <option value="<?= htmlspecialchars($locationKey, ENT_QUOTES, 'UTF-8') ?>" <?= $formStockLocation === $locationKey ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($locationLabel, ENT_QUOTES, 'UTF-8') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div class="form-row">
                 <label for="quantity">増減数</label>
                 <input type="number" id="quantity" name="quantity" step="1" min="1" value="<?= htmlspecialchars($formQuantity, ENT_QUOTES, 'UTF-8') ?>" required>
                 <div style="font-size:0.8em;color:#777;">常に正の数（増減の大きさ）を入力してください。在庫が増えるか減るかは増減理由から自動判定されます：購入・施設等からの返却＝在庫＋／廃棄・紛失・施設等への交付＝在庫－。</div>
@@ -358,7 +484,8 @@ $records = $listStmt->fetchAll();
                 <label for="reason">増減理由</label>
                 <select id="reason" name="reason" required>
                     <option value="">選択してください</option>
-                    <?php foreach (CONSUMABLE_REASON_LABELS as $reasonKey => $reasonLabel): ?>
+                    <?php foreach (CONSUMABLE_REASON_SIGN as $reasonKey => $_reasonSign): ?>
+                        <?php $reasonLabel = CONSUMABLE_REASON_LABELS[$reasonKey]; ?>
                         <option value="<?= htmlspecialchars($reasonKey, ENT_QUOTES, 'UTF-8') ?>" <?= $formReason === $reasonKey ? 'selected' : '' ?>>
                             <?= htmlspecialchars($reasonLabel, ENT_QUOTES, 'UTF-8') ?>
                         </option>
@@ -406,6 +533,7 @@ $records = $listStmt->fetchAll();
             <thead>
                 <tr>
                     <th>発生日</th>
+                    <th>在庫場所</th>
                     <th>品目</th>
                     <th>増減数</th>
                     <th>理由</th>
@@ -421,6 +549,7 @@ $records = $listStmt->fetchAll();
                     <?php $isCanceled = $record['canceled_at'] !== null; ?>
                     <tr class="<?= $isCanceled ? 'canceled-row' : '' ?>">
                         <td><?= htmlspecialchars($record['transaction_date'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars(CONSUMABLE_STOCK_LOCATION_LABELS[$record['stock_location']] ?? $record['stock_location'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(CONSUMABLE_ITEM_LABELS[$record['item_type']] ?? $record['item_type'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td class="<?= (int) $record['quantity'] >= 0 ? 'qty-positive' : 'qty-negative' ?>">
                             <?= (int) $record['quantity'] >= 0 ? '+' : '' ?><?= (int) $record['quantity'] ?>
@@ -438,7 +567,9 @@ $records = $listStmt->fetchAll();
                         </td>
                         <td>
                             <?php if (!$isCanceled): ?>
-                                <a href="/admin/consumable_stock.php?edit=<?= (int) $record['id'] ?>">編集</a>
+                                <?php if ($record['reason'] !== 'stock_adjustment'): ?>
+                                    <a href="/admin/consumable_stock.php?edit=<?= (int) $record['id'] ?>">編集</a>
+                                <?php endif; ?>
                                 <form method="post" action="/admin/consumable_stock.php" class="inline-form" onsubmit="return confirm('この在庫記録を取り消しますか？');">
                                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
                                     <input type="hidden" name="action" value="cancel">

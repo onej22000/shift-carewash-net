@@ -276,8 +276,9 @@ CREATE TABLE collection_cycle_edit_logs (
 CREATE TABLE consumable_stock_transactions (
     id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     item_type           ENUM('linen_bag_orange','linen_bag_yellow','linen_bag_blue','laundry_net') NOT NULL COMMENT '品目種別',
+    stock_location      ENUM('warehouse','jiro') NOT NULL DEFAULT 'warehouse' COMMENT '在庫場所（倉庫／フトン巻きのジロー）',
     quantity            INT NOT NULL COMMENT '増減数（入庫等プラス、出庫・使用等マイナス）',
-    reason              ENUM('purchase','return_from_facility','disposal','loss','issuance_to_facility') NOT NULL COMMENT '増減理由（購入／施設等からの返却／廃棄／紛失／施設等への交付）',
+    reason              ENUM('purchase','return_from_facility','disposal','loss','issuance_to_facility','stock_adjustment') NOT NULL COMMENT '増減理由（購入／施設等からの返却／廃棄／紛失／施設等への交付／実在庫補正）',
     facility_id         INT UNSIGNED NULL COMMENT '対象施設等（施設等への交付／施設等からの返却の場合のみ）',
     collection_cycle_id INT UNSIGNED NULL COMMENT '発生源の集荷・配送記録（自動記録の場合のみ。この記録が削除された際、紐づく増減記録を取り消すために使用）',
     transaction_date    DATE NOT NULL COMMENT '発生日',
@@ -292,6 +293,7 @@ CREATE TABLE consumable_stock_transactions (
     CONSTRAINT fk_cst_facility         FOREIGN KEY (facility_id)         REFERENCES facilities(id),
     CONSTRAINT fk_cst_collection_cycle FOREIGN KEY (collection_cycle_id) REFERENCES collection_cycles(id),
     INDEX idx_cst_item_type (item_type),
+    INDEX idx_cst_location_item (stock_location, item_type),
     INDEX idx_cst_facility (facility_id),
     INDEX idx_cst_collection_cycle (collection_cycle_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消耗品（リネン袋・洗濯ネット）在庫増減履歴';
