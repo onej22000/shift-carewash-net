@@ -18,7 +18,7 @@ const CONSUMABLE_ITEM_LABELS = [
 ];
 
 const CONSUMABLE_STOCK_LOCATION_LABELS = [
-    'warehouse' => '倉庫',
+    'warehouse' => '倉庫＋車',
     'jiro' => 'フトン巻きのジロー',
 ];
 
@@ -411,7 +411,7 @@ $records = $listStmt->fetchAll();
     <h2>現在庫</h2>
     <table class="stock-table">
         <thead>
-            <tr><th>品目</th><th>倉庫在庫</th><th>フトン巻きのジロー在庫</th><th>合計在庫</th></tr>
+            <tr><th>品目</th><th>倉庫＋車在庫</th><th>フトン巻きのジロー在庫</th><th>合計在庫</th></tr>
         </thead>
         <tbody>
         <?php foreach (CONSUMABLE_ITEM_LABELS as $itemType => $label): ?>
@@ -555,8 +555,8 @@ $records = $listStmt->fetchAll();
                         $locationLabel = CONSUMABLE_STOCK_LOCATION_LABELS[$record['stock_location']] ?? $record['stock_location'];
                         if ($record['stock_location'] === 'warehouse' && $record['facility_name'] === JIRO_FACILITY_NAME) {
                             $locationLabel = $record['reason'] === 'issuance_to_facility'
-                                ? '倉庫 → フトン巻きのジロー'
-                                : ($record['reason'] === 'return_from_facility' ? 'フトン巻きのジロー → 倉庫' : $locationLabel);
+                                ? '倉庫＋車 → フトン巻きのジロー'
+                                : ($record['reason'] === 'return_from_facility' ? 'フトン巻きのジロー → 倉庫＋車' : $locationLabel);
                         }
                         ?>
                         <td><?= htmlspecialchars($locationLabel, ENT_QUOTES, 'UTF-8') ?></td>
