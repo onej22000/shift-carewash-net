@@ -17,6 +17,26 @@ const CONSUMABLE_STOCK_LOCATION_LABELS = [
     'jiro' => 'フトン巻きのジロー',
 ];
 
+const JIRO_FACILITY_NAME = 'フトン巻きのジロー';
+
+function get_effective_consumable_stock(PDO $pdo, string $stockLocation, string $itemType): int
+{
+    $stmt = $pdo->prepare(
+        "SELECT COALESCE(SUM(delta), 0) FROM (
+             SELECT quantity AS delta FROM consumable_stock_transactions
+             WHERE stock_location = ? AND item_type = ? AND canceled_at IS NULL
+             UNION ALL
+             SELECT -t.quantity AS delta FROM consumable_stock_transactions t
+             INNER JOIN facilities f ON f.id = t.facility_id
+             WHERE ? = 'jiro' AND t.stock_location = 'warehouse' AND t.item_type = ?
+               AND t.reason IN ('issuance_to_facility', 'return_from_facility')
+               AND f.name = ? AND t.canceled_at IS NULL
+         ) effective_stock"
+    );
+    $stmt->execute([$stockLocation, $itemType, $stockLocation, $itemType, JIRO_FACILITY_NAME]);
+    return (int) $stmt->fetchColumn();
+}
+
 const CONSUMABLE_REASON_LABELS = [
     'purchase' => '購入',
     'return_from_facility' => '施設等からの返却',
@@ -42,13 +62,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             || $actualQuantity === null) {
             $errorMessage = '在庫場所・品目・現在の実数を正しく入力してください。';
         } else {
-            $currentStmt = $pdo->prepare(
-                'SELECT COALESCE(SUM(quantity), 0)
-                 FROM consumable_stock_transactions
-                 WHERE stock_location = :stock_location AND item_type = :item_type AND canceled_at IS NULL'
-            );
-            $currentStmt->execute([':stock_location' => $stockLocation, ':item_type' => $itemType]);
-            $currentQuantity = (int) $currentStmt->fetchColumn();
+            $currentQuantity = get_effective_consumable_stock($pdo, $stockLocation, $itemType);
             $delta = $actualQuantity - $currentQuantity;
 
             if ($delta !== 0) {
@@ -88,12 +102,18 @@ $stockTotals = [];
 foreach (CONSUMABLE_STOCK_LOCATION_LABELS as $locationKey => $_locationLabel) {
     $stockTotals[$locationKey] = array_fill_keys(array_keys(CONSUMABLE_ITEM_LABELS), 0);
 }
-$totalsStmt = $pdo->query(
-    'SELECT stock_location, item_type, SUM(quantity) AS total
-     FROM consumable_stock_transactions
-     WHERE canceled_at IS NULL
-     GROUP BY stock_location, item_type'
+$totalsStmt = $pdo->prepare(
+    "SELECT stock_location, item_type, SUM(quantity) AS total FROM (
+         SELECT stock_location, item_type, quantity FROM consumable_stock_transactions WHERE canceled_at IS NULL
+         UNION ALL
+         SELECT 'jiro', t.item_type, -t.quantity FROM consumable_stock_transactions t
+         INNER JOIN facilities f ON f.id = t.facility_id
+         WHERE t.stock_location = 'warehouse'
+           AND t.reason IN ('issuance_to_facility', 'return_from_facility')
+           AND f.name = ? AND t.canceled_at IS NULL
+     ) effective_stock GROUP BY stock_location, item_type"
 );
+$totalsStmt->execute([JIRO_FACILITY_NAME]);
 foreach ($totalsStmt->fetchAll() as $row) {
     $stockTotals[$row['stock_location']][$row['item_type']] = (int) $row['total'];
 }
@@ -240,7 +260,15 @@ $records = $listStmt->fetchAll();
                 <?php foreach ($records as $record): ?>
                     <tr>
                         <td><?= htmlspecialchars($record['transaction_date'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= htmlspecialchars(CONSUMABLE_STOCK_LOCATION_LABELS[$record['stock_location']] ?? $record['stock_location'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <?php
+                        $locationLabel = CONSUMABLE_STOCK_LOCATION_LABELS[$record['stock_location']] ?? $record['stock_location'];
+                        if ($record['stock_location'] === 'warehouse' && $record['facility_name'] === JIRO_FACILITY_NAME) {
+                            $locationLabel = $record['reason'] === 'issuance_to_facility'
+                                ? '倉庫 → フトン巻きのジロー'
+                                : ($record['reason'] === 'return_from_facility' ? 'フトン巻きのジロー → 倉庫' : $locationLabel);
+                        }
+                        ?>
+                        <td><?= htmlspecialchars($locationLabel, ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(CONSUMABLE_ITEM_LABELS[$record['item_type']] ?? $record['item_type'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td class="<?= (int) $record['quantity'] >= 0 ? 'qty-positive' : 'qty-negative' ?>">
                             <?= (int) $record['quantity'] >= 0 ? '+' : '' ?><?= (int) $record['quantity'] ?>
