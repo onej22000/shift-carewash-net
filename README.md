@@ -8,6 +8,42 @@ The project started as an internal operations tool and is being opened so that s
 
 > Status: active development. Interfaces and database structures may still change.
 
+## Screenshots
+
+### Operations dashboard
+
+A single dashboard provides access to workforce, laundry operations, pickup/delivery, inventory, and vehicle-management functions.
+
+<img src="docs/images/dashboard.png" alt="Operations dashboard" width="100%">
+
+<table>
+<tr>
+<td width="50%">
+<strong>Laundry workflow tracking</strong><br>
+Track laundry processing by facility and pickup cycle, including wash progress and returned laundry nets.<br><br>
+<img src="docs/images/laundry-workflow.png" alt="Laundry workflow tracking">
+</td>
+<td width="50%">
+<strong>Pickup & delivery log</strong><br>
+Track each service cycle from pickup through cleaning-site arrival, dispatch, and return.<br><br>
+<img src="docs/images/Pickup-Log.png" alt="Pickup and delivery log">
+</td>
+</tr>
+
+<tr>
+<td width="50%">
+<strong>Shift management</strong><br>
+Manage staff schedules across multiple work categories with monthly calendar views.<br><br>
+<img src="docs/images/shifts.png" alt="Shift management">
+</td>
+<td width="50%">
+<strong>Consumables inventory</strong><br>
+Manage linen bags, laundry nets, stock locations, and inventory transaction history.<br><br>
+<img src="docs/images/inventory.png" alt="Consumables inventory management">
+</td>
+</tr>
+</table>
+
 ## Why this project exists
 
 Small service businesses often run several operational processes at once:
