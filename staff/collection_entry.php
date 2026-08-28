@@ -1,1 +1,0 @@
-@staff/collection_entry.php
