@@ -5,12 +5,11 @@ require_once __DIR__ . '/../includes/functions.php';
 $staff = require_login('staff');
 $pdo = getPdo();
 
-const CONSUMABLE_ITEM_LABELS = [
-    'linen_bag_orange' => 'リネン袋（オレンジ／集荷用）',
-    'linen_bag_yellow' => 'リネン袋（黄／集荷用）',
-    'linen_bag_blue' => 'リネン袋（青／返却用）',
-    'laundry_net' => '洗濯ネット',
-];
+// 消耗品品目マスタ（consumable_items、管理者の /admin/consumable_items.php で管理）から取得する。
+// $itemLabels は無効化された品目も含む全品目（履歴表示用）、$activeItemLabels は有効な品目のみ
+// （現在庫の集計・実在庫補正フォームの対象用）。
+$itemLabels = get_consumable_item_labels($pdo);
+$activeItemLabels = get_consumable_item_labels($pdo, true);
 
 const CONSUMABLE_STOCK_LOCATION_LABELS = [
     'warehouse' => '倉庫＋車',
@@ -46,6 +45,18 @@ const CONSUMABLE_REASON_LABELS = [
     'stock_adjustment' => '実在庫への補正',
 ];
 
+const CONSUMABLE_EDIT_TYPE_LABELS = [
+    'purchase' => '購入（在庫を増やす）',
+    'issuance_to_facility' => '施設等への交付（在庫を減らす）',
+    'return_from_facility' => '施設等からの返却（在庫を増やす）',
+    'damage' => '破損（在庫を減らす）',
+    'loss' => '紛失（在庫を減らす）',
+];
+
+$facilitiesStmt = $pdo->query('SELECT id, name FROM facilities WHERE is_active = 1 ORDER BY name');
+$facilities = $facilitiesStmt->fetchAll();
+$validFacilityIds = array_map('intval', array_column($facilities, 'id'));
+
 $errorMessage = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
@@ -57,7 +68,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $actualQuantity = preg_match('/^\d+$/', $actualQuantityRaw) ? (int) $actualQuantityRaw : null;
         $adjustmentNote = trim((string) ($_POST['note'] ?? ''));
 
-        if (!array_key_exists($itemType, CONSUMABLE_ITEM_LABELS)
+        if (!array_key_exists($itemType, $activeItemLabels)
             || !array_key_exists($stockLocation, CONSUMABLE_STOCK_LOCATION_LABELS)
             || $actualQuantity === null) {
             $errorMessage = '在庫場所・品目・現在の実数を正しく入力してください。';
@@ -91,6 +102,84 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             header('Location: /staff/consumable_stock.php');
             exit;
         }
+    } elseif ((string) ($_POST['action'] ?? '') === 'update_transaction') {
+        $transactionId = (int) ($_POST['transaction_id'] ?? 0);
+        $itemType = (string) ($_POST['item_type'] ?? '');
+        $stockLocation = (string) ($_POST['stock_location'] ?? '');
+        $transactionType = (string) ($_POST['transaction_type'] ?? '');
+        $quantityRaw = trim((string) ($_POST['quantity'] ?? ''));
+        $quantity = preg_match('/^[1-9]\d*$/', $quantityRaw) ? (int) $quantityRaw : null;
+        $transactionDateRaw = trim((string) ($_POST['transaction_date'] ?? ''));
+        $transactionDateValue = DateTime::createFromFormat('Y-m-d', $transactionDateRaw);
+        $transactionDate = $transactionDateValue !== false && $transactionDateValue->format('Y-m-d') === $transactionDateRaw
+            ? $transactionDateRaw
+            : null;
+        $facilityId = (int) ($_POST['facility_id'] ?? 0);
+        $note = trim((string) ($_POST['note'] ?? ''));
+        $needsFacility = in_array($transactionType, ['issuance_to_facility', 'return_from_facility'], true);
+
+        $targetStmt = $pdo->prepare(
+            "SELECT id FROM consumable_stock_transactions
+             WHERE id = :id AND canceled_at IS NULL AND note LIKE '%集荷記録簿から登録%'"
+        );
+        $targetStmt->execute([':id' => $transactionId]);
+        $targetExists = $targetStmt->fetchColumn() !== false;
+
+        if (!$targetExists) {
+            $errorMessage = '修正対象の履歴が見つかりません。';
+        } elseif (!array_key_exists($itemType, $activeItemLabels)
+            || !array_key_exists($stockLocation, CONSUMABLE_STOCK_LOCATION_LABELS)) {
+            $errorMessage = '在庫場所と品目を正しく選択してください。';
+        } elseif (!array_key_exists($transactionType, CONSUMABLE_EDIT_TYPE_LABELS)) {
+            $errorMessage = '登録内容を正しく選択してください。';
+        } elseif ($quantity === null || $transactionDate === null) {
+            $errorMessage = '数量と日付を正しく入力してください。';
+        } elseif ($needsFacility && !in_array($facilityId, $validFacilityIds, true)) {
+            $errorMessage = '交付・返却の対象施設を選択してください。';
+        } else {
+            $reason = $transactionType === 'damage' ? 'disposal' : $transactionType;
+            $signedQuantity = in_array($transactionType, ['purchase', 'return_from_facility'], true) ? $quantity : -$quantity;
+            $facilityIdForUpdate = $needsFacility ? $facilityId : null;
+            $notePrefix = $transactionType === 'damage' ? '破損' : CONSUMABLE_EDIT_TYPE_LABELS[$transactionType];
+            $storedNote = $notePrefix . '（集荷記録簿から登録）' . ($note !== '' ? '：' . $note : '');
+
+            $updateStmt = $pdo->prepare(
+                'UPDATE consumable_stock_transactions
+                 SET item_type = :item_type, stock_location = :stock_location, quantity = :quantity,
+                     reason = :reason, facility_id = :facility_id, transaction_date = :transaction_date, note = :note
+                 WHERE id = :id AND canceled_at IS NULL'
+            );
+            $updateStmt->execute([
+                ':item_type' => $itemType,
+                ':stock_location' => $stockLocation,
+                ':quantity' => $signedQuantity,
+                ':reason' => $reason,
+                ':facility_id' => $facilityIdForUpdate,
+                ':transaction_date' => $transactionDate,
+                ':note' => $storedNote,
+                ':id' => $transactionId,
+            ]);
+            set_flash('success', '在庫履歴を修正し、現在庫へ反映しました。');
+            header('Location: /staff/consumable_stock.php#transaction-' . $transactionId);
+            exit;
+        }
+    } elseif ((string) ($_POST['action'] ?? '') === 'delete_transaction') {
+        $transactionId = (int) ($_POST['transaction_id'] ?? 0);
+        $deleteStmt = $pdo->prepare(
+            "UPDATE consumable_stock_transactions
+             SET canceled_at = :canceled_at, canceled_by = :canceled_by
+             WHERE id = :id AND canceled_at IS NULL AND note LIKE '%集荷記録簿から登録%'"
+        );
+        $deleteStmt->execute([
+            ':canceled_at' => (new DateTime())->format('Y-m-d H:i:s'),
+            ':canceled_by' => $staff['id'],
+            ':id' => $transactionId,
+        ]);
+        set_flash($deleteStmt->rowCount() === 1 ? 'success' : 'error', $deleteStmt->rowCount() === 1
+            ? '在庫履歴を削除し、現在庫へ反映しました。'
+            : '削除対象の履歴が見つかりません。');
+        header('Location: /staff/consumable_stock.php#stock-history');
+        exit;
     }
 }
 
@@ -100,7 +189,7 @@ $csrfToken = csrf_token();
 // ---- 現在庫の集計 ----
 $stockTotals = [];
 foreach (CONSUMABLE_STOCK_LOCATION_LABELS as $locationKey => $_locationLabel) {
-    $stockTotals[$locationKey] = array_fill_keys(array_keys(CONSUMABLE_ITEM_LABELS), 0);
+    $stockTotals[$locationKey] = array_fill_keys(array_keys($activeItemLabels), 0);
 }
 $totalsStmt = $pdo->prepare(
     "SELECT stock_location, item_type, SUM(quantity) AS total FROM (
@@ -168,12 +257,20 @@ $records = $listStmt->fetchAll();
         table.records th { background: #f5f5f5; }
         .qty-positive { color: #1e7e34; }
         .qty-negative { color: #b3261e; }
+        .record-actions { white-space: nowrap; }
+        .record-actions form { display: inline; }
+        .record-edit-row { display: none; background: #fafafa; }
+        .record-edit-row.is-open { display: table-row; }
+        .record-edit-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+        .record-edit-grid label { display: block; font-size: 0.82em; font-weight: bold; margin-bottom: 2px; }
+        .record-edit-grid input, .record-edit-grid select { box-sizing: border-box; width: 100%; padding: 5px; }
+        .danger { color: #b3261e; }
     </style>
 </head>
 <body>
 <header>
     <h1>消耗品在庫管理</h1>
-    <nav><a href="/staff/dashboard.php">ダッシュボードに戻る</a> | <a href="/staff/logout.php">ログアウト</a></nav>
+    <nav><a href="/staff/consumable_items.php">品目管理</a> | <a href="/staff/dashboard.php">ダッシュボードに戻る</a> | <a href="/staff/logout.php">ログアウト</a></nav>
 </header>
 
 <?php if ($flash !== null): ?>
@@ -191,7 +288,7 @@ $records = $listStmt->fetchAll();
             <tr><th>品目</th><th>倉庫＋車在庫</th><th>フトン巻きのジロー在庫</th><th>合計在庫</th></tr>
         </thead>
         <tbody>
-        <?php foreach (CONSUMABLE_ITEM_LABELS as $itemType => $label): ?>
+        <?php foreach ($activeItemLabels as $itemType => $label): ?>
             <?php
             $warehouseStock = $stockTotals['warehouse'][$itemType];
             $jiroStock = $stockTotals['jiro'][$itemType];
@@ -220,7 +317,7 @@ $records = $listStmt->fetchAll();
     </table>
 </section>
 
-<section class="record-list">
+<section class="record-list" id="stock-history">
     <h2>在庫増減履歴</h2>
     <?php if (empty($records)): ?>
         <p class="notice">在庫記録がありません。</p>
@@ -236,11 +333,25 @@ $records = $listStmt->fetchAll();
                     <th>対象施設等</th>
                     <th>備考</th>
                     <th>登録者</th>
+                    <th>操作</th>
                 </tr>
             </thead>
             <tbody>
                 <?php foreach ($records as $record): ?>
-                    <tr>
+                    <?php
+                    $isManualEditable = str_contains((string) ($record['note'] ?? ''), '集荷記録簿から登録');
+                    $recordType = $record['reason'];
+                    if ($recordType === 'disposal' && str_starts_with((string) ($record['note'] ?? ''), '破損')) {
+                        $recordType = 'damage';
+                    }
+                    $recordQuantity = abs((int) $record['quantity']);
+                    $userNote = '';
+                    $separatorPosition = mb_strpos((string) ($record['note'] ?? ''), '：');
+                    if ($separatorPosition !== false) {
+                        $userNote = mb_substr((string) $record['note'], $separatorPosition + 1);
+                    }
+                    ?>
+                    <tr id="transaction-<?= (int) $record['id'] ?>">
                         <td><?= htmlspecialchars($record['transaction_date'], ENT_QUOTES, 'UTF-8') ?></td>
                         <?php
                         $locationLabel = CONSUMABLE_STOCK_LOCATION_LABELS[$record['stock_location']] ?? $record['stock_location'];
@@ -251,7 +362,7 @@ $records = $listStmt->fetchAll();
                         }
                         ?>
                         <td><?= htmlspecialchars($locationLabel, ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= htmlspecialchars(CONSUMABLE_ITEM_LABELS[$record['item_type']] ?? $record['item_type'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars($itemLabels[$record['item_type']] ?? $record['item_type'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td class="<?= (int) $record['quantity'] >= 0 ? 'qty-positive' : 'qty-negative' ?>">
                             <?= (int) $record['quantity'] >= 0 ? '+' : '' ?><?= (int) $record['quantity'] ?>
                         </td>
@@ -259,7 +370,41 @@ $records = $listStmt->fetchAll();
                         <td><?= $record['facility_name'] !== null ? htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= $record['note'] !== null ? htmlspecialchars($record['note'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= htmlspecialchars($record['created_by_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td class="record-actions">
+                            <?php if ($isManualEditable): ?>
+                                <button type="button" onclick="toggleTransactionEdit(<?= (int) $record['id'] ?>)">編集</button>
+                                <form method="post" action="/staff/consumable_stock.php#stock-history" onsubmit="return confirm('この履歴を削除し、現在庫へ反映しますか？');">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                    <input type="hidden" name="action" value="delete_transaction">
+                                    <input type="hidden" name="transaction_id" value="<?= (int) $record['id'] ?>">
+                                    <button type="submit" class="danger">削除</button>
+                                </form>
+                            <?php else: ?>
+                                <span title="自動連携の記録は元の集荷・施設記録から修正してください">自動連携</span>
+                            <?php endif; ?>
+                        </td>
                     </tr>
+                    <?php if ($isManualEditable): ?>
+                        <tr class="record-edit-row" id="transaction-edit-<?= (int) $record['id'] ?>">
+                            <td colspan="9">
+                                <form method="post" action="/staff/consumable_stock.php#transaction-<?= (int) $record['id'] ?>">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                    <input type="hidden" name="action" value="update_transaction">
+                                    <input type="hidden" name="transaction_id" value="<?= (int) $record['id'] ?>">
+                                    <div class="record-edit-grid">
+                                        <div><label>日付</label><input type="date" name="transaction_date" value="<?= htmlspecialchars($record['transaction_date'], ENT_QUOTES, 'UTF-8') ?>" required></div>
+                                        <div><label>在庫場所</label><select name="stock_location" required><?php foreach (CONSUMABLE_STOCK_LOCATION_LABELS as $locationKey => $label): ?><option value="<?= htmlspecialchars($locationKey, ENT_QUOTES, 'UTF-8') ?>" <?= $locationKey === $record['stock_location'] ? 'selected' : '' ?>><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></option><?php endforeach; ?></select></div>
+                                        <div><label>品目</label><select name="item_type" required><?php foreach ($activeItemLabels as $itemType => $label): ?><option value="<?= htmlspecialchars($itemType, ENT_QUOTES, 'UTF-8') ?>" <?= $itemType === $record['item_type'] ? 'selected' : '' ?>><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></option><?php endforeach; ?></select></div>
+                                        <div><label>登録内容</label><select name="transaction_type" required><?php foreach (CONSUMABLE_EDIT_TYPE_LABELS as $typeKey => $label): ?><option value="<?= htmlspecialchars($typeKey, ENT_QUOTES, 'UTF-8') ?>" <?= $typeKey === $recordType ? 'selected' : '' ?>><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></option><?php endforeach; ?></select></div>
+                                        <div><label>数量（枚）</label><input type="number" name="quantity" min="1" step="1" value="<?= $recordQuantity ?>" required></div>
+                                        <div><label>対象施設</label><select name="facility_id"><option value="">購入・破損・紛失は選択不要</option><?php foreach ($facilities as $facility): ?><option value="<?= (int) $facility['id'] ?>" <?= (int) $facility['id'] === (int) $record['facility_id'] ? 'selected' : '' ?>><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option><?php endforeach; ?></select></div>
+                                        <div><label>備考</label><input type="text" name="note" maxlength="255" value="<?= htmlspecialchars($userNote, ENT_QUOTES, 'UTF-8') ?>"></div>
+                                    </div>
+                                    <p><button type="submit">修正を保存</button> <button type="button" onclick="toggleTransactionEdit(<?= (int) $record['id'] ?>)">閉じる</button></p>
+                                </form>
+                            </td>
+                        </tr>
+                    <?php endif; ?>
                 <?php endforeach; ?>
             </tbody>
         </table>
@@ -270,6 +415,9 @@ function toggleStockEdit(button, editing) {
     const cell = button.closest('td');
     cell.classList.toggle('stock-editing', editing);
     if (editing) cell.querySelector('input[name="actual_quantity"]').select();
+}
+function toggleTransactionEdit(id) {
+    document.getElementById('transaction-edit-' + id)?.classList.toggle('is-open');
 }
 </script>
 </body>

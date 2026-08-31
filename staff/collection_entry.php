@@ -467,6 +467,21 @@ $employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff
 $employees = $employeesStmt->fetchAll();
 $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
 
+// 集荷記録のすぐ下から、品目マスタに登録された消耗品の購入・交付・破損等も
+// 記録できるようにする。シルバーなど後から追加された品目も自動で選択肢へ反映する。
+$activeConsumableItemLabels = get_consumable_item_labels($pdo, true);
+$consumableTransactionTypeLabels = [
+    'purchase' => '購入（在庫を増やす）',
+    'issuance_to_facility' => '施設等への交付（在庫を減らす）',
+    'return_from_facility' => '施設等からの返却（在庫を増やす）',
+    'damage' => '破損（在庫を減らす）',
+    'loss' => '紛失（在庫を減らす）',
+];
+$consumableStockLocationLabels = [
+    'warehouse' => '倉庫＋車',
+    'jiro' => 'フトン巻きのジロー',
+];
+
 // 場所選択で介護施設を選んだ際の「直前の確認画面」に表示する施設ごとの前回サイクル状況。
 // jiro_dashboard.php（本日の集荷予定）と同じソース・同じロジックを再利用する（別計算式は作らない）。
 $pickupChecklist = build_jiro_checklist_data($pdo, new DateTime());
@@ -488,7 +503,71 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $todayStr = $now->format('Y-m-d');
         $nowTimeStr = $now->format('H:i:s');
 
-        if ($action === 'resolve_location') {
+        if ($action === 'record_consumable_transaction') {
+            $itemType = (string) ($_POST['consumable_item_type'] ?? '');
+            $transactionType = (string) ($_POST['consumable_transaction_type'] ?? '');
+            $quantityRaw = trim((string) ($_POST['consumable_quantity'] ?? ''));
+            $quantity = preg_match('/^[1-9]\d*$/', $quantityRaw) ? (int) $quantityRaw : null;
+            $facilityId = (int) ($_POST['consumable_facility_id'] ?? 0);
+            $stockLocation = (string) ($_POST['consumable_stock_location'] ?? '');
+            $transactionDate = cc_parse_date($_POST['consumable_transaction_date'] ?? '');
+            $note = trim((string) ($_POST['consumable_note'] ?? ''));
+            $needsFacility = in_array($transactionType, ['issuance_to_facility', 'return_from_facility'], true);
+
+            if (!array_key_exists($itemType, $activeConsumableItemLabels)) {
+                $errorMessage = '消耗品の品目を選択してください。';
+            } elseif (!array_key_exists($transactionType, $consumableTransactionTypeLabels)) {
+                $errorMessage = '消耗品の登録内容を選択してください。';
+            } elseif ($quantity === null) {
+                $errorMessage = '消耗品の数量は1以上の整数で入力してください。';
+            } elseif ($transactionDate === false) {
+                $errorMessage = '消耗品の日付を正しく入力してください。';
+            } elseif (!array_key_exists($stockLocation, $consumableStockLocationLabels)) {
+                $errorMessage = '消耗品の在庫場所を選択してください。';
+            } elseif ($needsFacility && !in_array($facilityId, $validFacilityIds, true)) {
+                $errorMessage = '交付・返却の対象施設を選択してください。';
+            } else {
+                // 破損は既存履歴との互換性を保つためreason=disposalで保存し、備考に「破損」を残す。
+                $reason = $transactionType === 'damage' ? 'disposal' : $transactionType;
+                $signedQuantity = in_array($transactionType, ['purchase', 'return_from_facility'], true)
+                    ? $quantity
+                    : -$quantity;
+                $facilityIdForInsert = $needsFacility ? $facilityId : null;
+                $notePrefix = $transactionType === 'damage' ? '破損' : $consumableTransactionTypeLabels[$transactionType];
+                $storedNote = $notePrefix . '（集荷記録簿から登録）';
+                if ($note !== '') {
+                    $storedNote .= '：' . $note;
+                }
+
+                $stmt = $pdo->prepare(
+                    'INSERT INTO consumable_stock_transactions
+                        (item_type, stock_location, quantity, reason, facility_id, transaction_date, note, created_by)
+                     VALUES
+                        (:item_type, :stock_location, :quantity, :reason, :facility_id, :transaction_date, :note, :created_by)'
+                );
+                $stmt->execute([
+                    ':item_type' => $itemType,
+                    ':stock_location' => $stockLocation,
+                    ':quantity' => $signedQuantity,
+                    ':reason' => $reason,
+                    ':facility_id' => $facilityIdForInsert,
+                    ':transaction_date' => $transactionDate,
+                    ':note' => $storedNote,
+                    ':created_by' => $staff['id'],
+                ]);
+
+                $facilitySuffix = $facilityIdForInsert !== null
+                    ? '（' . $facilityNamesById[$facilityIdForInsert] . '）'
+                    : '';
+                set_flash(
+                    'success',
+                    $activeConsumableItemLabels[$itemType] . 'の' . $consumableTransactionTypeLabels[$transactionType]
+                    . $quantity . '枚を在庫へ反映しました' . $facilitySuffix . '。'
+                );
+                header('Location: /staff/collection_entry.php#consumable-entry');
+                exit;
+            }
+        } elseif ($action === 'resolve_location') {
             // 場所選択（ステップ1）。介護施設・自社なら集荷登録、クリーニング所なら
             // 発送・到着登録のステップ2を描画するための状態を組み立てる。
             $facilityId = (int) ($_POST['location'] ?? 0);
@@ -1356,6 +1435,66 @@ function format_stage_cell($bagCount, $date, $time): string
         </fieldset>
     </section>
 <?php endif; ?>
+
+<section class="entry-form" id="consumable-entry">
+    <h2>消耗品の交付・購入・破損など</h2>
+    <p class="notice">ここで登録した数量は消耗品在庫管理へすぐ反映されます。破損・紛失・交付は在庫から減り、購入・返却は在庫へ増えます。</p>
+    <fieldset>
+        <form method="post" action="/staff/collection_entry.php#consumable-entry">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+            <input type="hidden" name="action" value="record_consumable_transaction">
+            <div class="form-row">
+                <label for="consumable_item_type">品目</label>
+                <select id="consumable_item_type" name="consumable_item_type" required>
+                    <option value="">選択してください</option>
+                    <?php foreach ($activeConsumableItemLabels as $itemType => $itemLabel): ?>
+                        <option value="<?= htmlspecialchars($itemType, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($itemLabel, ENT_QUOTES, 'UTF-8') ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="form-row">
+                <label for="consumable_transaction_type">登録内容</label>
+                <select id="consumable_transaction_type" name="consumable_transaction_type" required>
+                    <option value="">選択してください</option>
+                    <?php foreach ($consumableTransactionTypeLabels as $typeKey => $typeLabel): ?>
+                        <option value="<?= htmlspecialchars($typeKey, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($typeLabel, ENT_QUOTES, 'UTF-8') ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="form-row">
+                <label for="consumable_quantity">数量（枚）</label>
+                <input type="number" id="consumable_quantity" name="consumable_quantity" min="1" step="1" required>
+            </div>
+            <div class="form-row">
+                <label for="consumable_transaction_date">日付</label>
+                <input type="date" id="consumable_transaction_date" name="consumable_transaction_date" value="<?= (new DateTime())->format('Y-m-d') ?>" required>
+            </div>
+            <div class="form-row">
+                <label for="consumable_stock_location">在庫場所</label>
+                <select id="consumable_stock_location" name="consumable_stock_location" required>
+                    <?php foreach ($consumableStockLocationLabels as $locationKey => $locationLabel): ?>
+                        <option value="<?= htmlspecialchars($locationKey, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($locationLabel, ENT_QUOTES, 'UTF-8') ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="form-row">
+                <label for="consumable_facility_id">対象施設</label>
+                <select id="consumable_facility_id" name="consumable_facility_id">
+                    <option value="">購入・破損・紛失は選択不要</option>
+                    <?php foreach ($facilities as $facility): ?>
+                        <option value="<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="form-row">
+                <label for="consumable_note">備考</label>
+                <input type="text" id="consumable_note" name="consumable_note" maxlength="255" placeholder="破損状況、購入先など">
+            </div>
+            <button type="submit">消耗品在庫に反映する</button>
+            <a href="/staff/consumable_stock.php">現在庫と履歴を確認</a>
+        </form>
+    </fieldset>
+</section>
 
 <?php if ($editFormValues !== null): ?>
 <section class="edit-form">
