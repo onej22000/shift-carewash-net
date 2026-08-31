@@ -14,7 +14,7 @@ $logoutPath = $isAdmin ? '/admin/logout.php' : '/staff/logout.php';
 $pdo = getPdo();
 
 $facilities = $pdo->query(
-    "SELECT id, name, onboarding_start_date
+    "SELECT id, name, onboarding_start_date, room_count
      FROM facilities
      WHERE onboarding_start_date IS NOT NULL
        AND is_active = 1
@@ -53,6 +53,7 @@ foreach ($facilities as $facility) {
         'id' => (int) $facility['id'],
         'name' => (string) $facility['name'],
         'startDate' => (string) $facility['onboarding_start_date'],
+        'roomCount' => $facility['room_count'] !== null ? (int) $facility['room_count'] : null,
         'points' => [],
     ];
 }
@@ -344,10 +345,12 @@ function aggregateAll() {
         bags: point.bags,
         nets: point.nets,
     }));
-    return {id:'all',name:'全施設合計',startDate:'最も古い到着日を基準',points,upcomingPoints};
+    const roomCounts=facilities.map(f=>f.roomCount).filter(v=>Number.isInteger(v));
+    const roomCount=roomCounts.length===facilities.length ? roomCounts.reduce((sum,v)=>sum+v,0) : null;
+    return {id:'all',name:'全施設合計',startDate:'最も古い到着日を基準',roomCount,points,upcomingPoints};
 }
 
-function forecast(points, key, horizon) {
+function forecast(points, key, horizon, capacity) {
     const valid=points.filter(p=>p[key]!==null);
     if(valid.length<2) return null;
     const n=valid.length;
@@ -358,14 +361,16 @@ function forecast(points, key, horizon) {
     const slope=Math.max(0,(n*sumXY-sumX*sumY)/denominator);
     const last=valid[valid.length-1];
     const targetDays=Math.max(...points.map(p=>p.days))+horizon;
-    return {start:last, end:{days:targetDays,[key]:Math.max(0,last[key]+slope*(targetDays-last.days))}, slope};
+    const rawPrediction=Math.max(0,last[key]+slope*(targetDays-last.days));
+    const cappedPrediction=Number.isInteger(capacity) ? Math.min(capacity,rawPrediction) : rawPrediction;
+    return {start:last, end:{days:targetDays,[key]:Math.round(cappedPrediction)}, slope};
 }
 
-function chartSvg(points, horizon, xAxisLabel, upcomingPoints) {
+function chartSvg(points, horizon, xAxisLabel, upcomingPoints, capacity) {
     upcomingPoints = upcomingPoints || [];
     const width=980, height=440, left=70, right=25, top=24, bottom=62;
     const normalized=points;
-    const forecasts={nets:forecast(normalized,'nets',horizon)};
+    const forecasts={nets:forecast(normalized,'nets',horizon,capacity)};
     const upcomingCutoffDays=(normalized.length?Math.max(...normalized.map(p=>p.days)):0)+horizon;
     upcomingPoints=upcomingPoints.filter(p=>p.days<=upcomingCutoffDays);
     const maxX=Math.max(1,...normalized.map(p=>p.days),...upcomingPoints.map(p=>p.days),...Object.values(forecasts).filter(Boolean).map(f=>f.end.days));
@@ -373,20 +378,20 @@ function chartSvg(points, horizon, xAxisLabel, upcomingPoints) {
     if(forecasts.nets) values.push(forecasts.nets.end.nets);
     for(const p of upcomingPoints){ if(p.nets!==null) values.push(p.nets); }
     const maxY=Math.max(1,...values);
-    const ceiling=Math.max(1,Math.ceil(maxY/2)*2);
+    const ceiling=Math.max(4,Math.ceil(maxY/4)*4);
     const sx=x=>left+(x/maxX)*(width-left-right);
     const sy=y=>top+(1-y/ceiling)*(height-top-bottom);
     let grid='';
     for(let i=0;i<=4;i++){
         const y=top+i*(height-top-bottom)/4;
-        const value=Math.round((ceiling*(4-i)/4)*10)/10;
+        const value=Math.round(ceiling*(4-i)/4);
         grid+=`<line x1="${left}" y1="${y}" x2="${width-right}" y2="${y}" stroke="#d9e2e8" stroke-dasharray="4 4"/><text x="${left-12}" y="${y+4}" text-anchor="end" fill="#667085" font-size="12">${value}</text>`;
     }
     const ticks=[0,.25,.5,.75,1].map(v=>Math.round(maxX*v)).filter((v,i,a)=>a.indexOf(v)===i);
     let xLabels='';
     for(const tick of ticks){ const x=sx(tick); xLabels+=`<line x1="${x}" y1="${height-bottom}" x2="${x}" y2="${height-bottom+5}" stroke="#8796a5"/><text x="${x}" y="${height-bottom+23}" text-anchor="middle" fill="#667085" font-size="12">${tick}</text>`; }
     const dots=(key,color)=>normalized.filter(p=>p[key]!==null).map(p=>`<circle cx="${sx(p.days)}" cy="${sy(p[key])}" r="4" fill="${color}"><title>${p.date||p.days+'日目'}: ${p[key]}</title></circle>`).join('');
-    const forecastLine=(key,color)=>{const f=forecasts[key];return f?`<path d="M ${sx(f.start.days)} ${sy(f.start[key])} L ${sx(f.end.days)} ${sy(f.end[key])}" fill="none" stroke="${color}" stroke-width="3" stroke-dasharray="9 7"/><circle cx="${sx(f.end.days)}" cy="${sy(f.end[key])}" r="5" fill="#fff" stroke="${color}" stroke-width="3"><title>${f.end.days}日目予想: ${f.end[key].toFixed(1)}</title></circle>`:''};
+    const forecastLine=(key,color)=>{const f=forecasts[key];return f?`<path d="M ${sx(f.start.days)} ${sy(f.start[key])} L ${sx(f.end.days)} ${sy(f.end[key])}" fill="none" stroke="${color}" stroke-width="3" stroke-dasharray="9 7"/><circle cx="${sx(f.end.days)}" cy="${sy(f.end[key])}" r="5" fill="#fff" stroke="${color}" stroke-width="3"><title>${f.end.days}日目予想: ${Math.round(f.end[key])}</title></circle>`:''};
     const upcomingLine=(key,color,dash)=>upcomingPoints.length?`<path d="${linePath(upcomingPoints,key,sx,sy)}" fill="none" stroke="${color}" stroke-width="2.5" stroke-dasharray="${dash||'2 5'}"/>`:'';
     const upcomingDots=(key,color)=>upcomingPoints.filter(p=>p[key]!==null).map(p=>`<circle cx="${sx(p.days)}" cy="${sy(p[key])}" r="3" fill="${color}"><title>${p.date}（実績のない施設の想定値）: ${p[key]}</title></circle>`).join('');
     return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="洗濯ネット数の推移グラフ">
@@ -421,7 +426,7 @@ function render() {
           <h2>${escapeHtml(facility.name)}</h2>
           <div class="empty" style="padding:16px 0;">到着実績はまだありません。以下は見込みです。</div>
           <div class="meta"><div><span>${isAggregate ? '集計基準' : '受託開始日'}</span><strong>${escapeHtml(facility.startDate)}</strong></div></div>
-          <div class="chart-wrap">${chartSvg([],horizon,xAxisLabel,facilityUpcoming)}</div>
+          <div class="chart-wrap">${chartSvg([],horizon,xAxisLabel,facilityUpcoming,facility.roomCount)}</div>
           <div class="legend">${upcomingLegend}</div>
           <p class="note">まだ到着実績のない施設について、居室数が設定されていればそれを、未設定なら稼働中施設の直近実績の平均値を目標値とし、受託開始日から180日かけて0から目標値まで線形に立ち上げた見込みです。</p>`;
         return;
@@ -437,10 +442,10 @@ function render() {
     content.innerHTML=`
       <h2>${escapeHtml(facility.name)}</h2>
       <div class="meta"><div><span>${isAggregate ? '集計基準' : '受託開始日'}</span><strong>${escapeHtml(facility.startDate)}</strong></div><div><span>記録日数</span><strong>${facility.points.length}日</strong></div><div><span>洗濯ネット 合計</span><strong>${registeredNets.length?totalNets:'—'}</strong></div></div>
-      <div class="chart-wrap">${chartSvg(facility.points,horizon,xAxisLabel,upcomingPoints)}</div>
+      <div class="chart-wrap">${chartSvg(facility.points,horizon,xAxisLabel,upcomingPoints,facility.roomCount)}</div>
       <div class="legend"><span><i class="swatch" style="background:#f28e2b"></i>洗濯ネット数</span><span>破線＝増加予想</span>${upcomingLegend}</div>
       <table><thead><tr><th>到着日</th><th>経過日数</th><th>洗濯ネット数</th></tr></thead><tbody>${rows}</tbody></table>
-      <p class="note">同日の複数記録は合計しています。未登録値は「—」で表示します。予想は過去実績の直線傾向を使い、減少傾向は横ばいとして試算した参考値です。実績が少ない場合は精度が低くなります。ページを開くたびに最新のデータベースから再集計されます。${upcomingNote}</p>`;
+      <p class="note">同日の複数記録は合計しています。未登録値は「—」で表示します。予想は過去実績の直線傾向を使い、施設の居室数を上限とし、減少傾向は横ばいとして試算した参考値です。表示値は整数です。実績が少ない場合は精度が低くなります。ページを開くたびに最新のデータベースから再集計されます。${upcomingNote}</p>`;
 }
 
 select.addEventListener('change', render);
