@@ -182,6 +182,8 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
         .pickup-status-panel h2 { margin: 0 0 8px; font-size: 1.05em; color: #d89b00; }
         .pickup-status-panel ul { margin: 0; padding-left: 20px; }
         .pickup-status-panel li { margin-bottom: 4px; }
+        .no-pickup-button { margin-left: 8px; padding: 2px 10px; font-size: 0.85em; background: #d89b00; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        .no-pickup-button:disabled { opacity: 0.6; cursor: default; }
         .clock-status-panel { padding: 12px 16px; background: linear-gradient(145deg, #eceeff 0%, #d4d9ff 100%); border: 1px solid #8b93d6; border-radius: 6px; color: #33366e; margin-bottom: 16px; }
         .clock-status-panel h2 { margin: 0 0 8px; font-size: 1.05em; color: #4a4fb0; }
         .clock-status-panel > ul { margin: 0; padding-left: 20px; }
@@ -298,7 +300,15 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
         <h2>未集荷</h2>
         <ul>
             <?php foreach ($pickupNeededAlerts as $alert): ?>
-                <li><?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷予定日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?></li>
+                <li>
+                    <?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>：集荷予定日 <?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?>
+                    <form method="post" action="/staff/mark_no_pickup.php" class="inline-form no-pickup-form" onsubmit="return confirm('<?= htmlspecialchars($alert['facility_name'], ENT_QUOTES, 'UTF-8') ?>（<?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?>）は集荷なしとして確定します。よろしいですか？');">
+                        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                        <input type="hidden" name="facility_id" value="<?= (int) $alert['facility_id'] ?>">
+                        <input type="hidden" name="pickup_date" value="<?= htmlspecialchars($alert['pickup_date'], ENT_QUOTES, 'UTF-8') ?>">
+                        <button type="submit" class="no-pickup-button">集荷なし</button>
+                    </form>
+                </li>
             <?php endforeach; ?>
         </ul>
     </div>

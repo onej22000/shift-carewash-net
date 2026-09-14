@@ -2139,6 +2139,12 @@ function build_jiro_checklist_data(PDO $pdo, DateTime $today): array
  * 日付が変わった瞬間に過去の集荷忘れがアラートから消えてしまうため、受託開始日を下限に
  * 過去分もすべて対象にする（calc_first_pickup_date()/calc_expected_return_date()を
  * 交互に呼んで集荷予定日を列挙し、曜日マップの重複実装を避ける）。
+ *
+ * no_pickup_confirmations（2026-09-14追加、「集荷なし」ボタン）に記録済みの
+ * facility_id×pickup_dateは、入居者が少ない等の理由で実際に集荷物が発生しなかった
+ * ことをスタッフが確認済みという意味なので、結果から除外する。calc_first_pickup_date()・
+ * calc_expected_return_date()の予定日計算ロジック自体は一切変更しない
+ * （このフィルタは計算結果に対して後から重ねるだけ）。
  */
 function calc_pickup_needed_alerts(PDO $pdo, DateTime $today): array
 {
@@ -2153,6 +2159,9 @@ function calc_pickup_needed_alerts(PDO $pdo, DateTime $today): array
 
     $registeredStmt = $pdo->prepare(
         'SELECT pickup_date FROM collection_cycles WHERE facility_id = :facility_id AND deleted_at IS NULL'
+    );
+    $confirmedNoPickupStmt = $pdo->prepare(
+        'SELECT pickup_date FROM no_pickup_confirmations WHERE facility_id = :facility_id'
     );
 
     $alerts = [];
@@ -2170,8 +2179,11 @@ function calc_pickup_needed_alerts(PDO $pdo, DateTime $today): array
         $registeredStmt->execute([':facility_id' => $facility['id']]);
         $registeredDates = array_flip(array_column($registeredStmt->fetchAll(), 'pickup_date'));
 
+        $confirmedNoPickupStmt->execute([':facility_id' => $facility['id']]);
+        $confirmedNoPickupDates = array_flip(array_column($confirmedNoPickupStmt->fetchAll(), 'pickup_date'));
+
         while ($scheduledDate !== null && $scheduledDate <= $todayStr) {
-            if (!isset($registeredDates[$scheduledDate])) {
+            if (!isset($registeredDates[$scheduledDate]) && !isset($confirmedNoPickupDates[$scheduledDate])) {
                 $alerts[] = [
                     'facility_id' => (int) $facility['id'],
                     'facility_name' => $facility['name'],
