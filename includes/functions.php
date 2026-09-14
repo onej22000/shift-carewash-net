@@ -1360,6 +1360,35 @@ function record_vehicle_maintenance_history(
 }
 
 /**
+ * 2026-09-14緊急修正: コミット07c9442（staff/collection_entry.php・
+ * staff/consumable_stock.php）が get_consumable_item_labels() の呼び出しだけを追加し、
+ * 対応する関数定義を追加し忘れていたため、両ページがFatal error（未定義関数）で
+ * 全面的に開けなくなっていた。consumable_itemsテーブル自体は本番DBに既に存在し
+ * 実データも入っているため、その参照関数のみを最小追加する（品目管理UIの導入・
+ * item_typeカラムの型変更・可変マスタ化の本格導入は今回のスコープ外）。
+ */
+function get_consumable_items(PDO $pdo, bool $activeOnly = false): array
+{
+    $sql = 'SELECT id, item_key, name, usage_type, sort_order, is_active FROM consumable_items';
+    if ($activeOnly) {
+        $sql .= ' WHERE is_active = 1';
+    }
+    $sql .= ' ORDER BY sort_order ASC, id ASC';
+
+    return $pdo->query($sql)->fetchAll();
+}
+
+function get_consumable_item_labels(PDO $pdo, bool $activeOnly = false): array
+{
+    $labels = [];
+    foreach (get_consumable_items($pdo, $activeOnly) as $item) {
+        $labels[$item['item_key']] = $item['name'];
+    }
+
+    return $labels;
+}
+
+/**
  * $fieldToItemType の各フィールドについて $before→$after の差分を、消耗品在庫
  * （consumable_stock_transactions）の減産・増産として自動記録する共通処理。
  * 値が増えた分（交付が増えた）だけ在庫はマイナス、減った分（訂正等）はプラスになる。
