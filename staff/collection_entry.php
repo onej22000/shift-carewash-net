@@ -1,5 +1,9 @@
 <?php
 // 集荷記録簿本体。消耗品在庫管理は staff/consumable_stock.php で管理する。
+//
+// 2026-09-17: クリーニング所の「到着」を、発送と同じくチェックボックスで複数施設まとめて
+// 登録できるようにした（arrival_cycle_ids[] ＋ arrival_bag_counts[cycle_id]）。
+// 旧UIの単一選択（arrival_cycle_id ＋ arrival_bag_count）は後方互換として受け付ける。
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/functions.php';
 
@@ -607,8 +611,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $validArrivalIds = array_map('intval', array_column($arrivalCandidates, 'id'));
                     $validDispatchIds = array_map('intval', array_column($dispatchCandidates, 'id'));
 
-                    $arrivalBagCount = parse_bag_count($_POST['arrival_bag_count'] ?? '');
-                    $arrivalCycleId = (int) ($_POST['arrival_cycle_id'] ?? 0);
+                    // 到着も発送と同じく複数サイクルを一括登録できる。対象IDはチェックボックス配列、
+                    // 袋数はサイクルIDをキーにした配列で受け取る。
+                    $arrivalCycleIdsRaw = $_POST['arrival_cycle_ids'] ?? [];
+                    if (!is_array($arrivalCycleIdsRaw)) {
+                        $arrivalCycleIdsRaw = [];
+                    }
+                    $arrivalBagCountsRaw = $_POST['arrival_bag_counts'] ?? [];
+                    if (!is_array($arrivalBagCountsRaw)) {
+                        $arrivalBagCountsRaw = [];
+                    }
+                    // 旧UI（単一選択：arrival_cycle_id ＋ arrival_bag_count）から送信された場合の後方互換。
+                    // ブラウザに古いページが残っていても記録できるようにしておく。
+                    if (empty($arrivalCycleIdsRaw) && isset($_POST['arrival_cycle_id'])) {
+                        $legacyArrivalCycleId = (int) $_POST['arrival_cycle_id'];
+                        if ($legacyArrivalCycleId > 0 && parse_bag_count($_POST['arrival_bag_count'] ?? '') !== null) {
+                            $arrivalCycleIdsRaw = [$legacyArrivalCycleId];
+                            $arrivalBagCountsRaw = [$legacyArrivalCycleId => $_POST['arrival_bag_count']];
+                        }
+                    }
+                    $arrivalCycleIds = [];
+                    foreach ($arrivalCycleIdsRaw as $rawCycleId) {
+                        $cycleId = (int) $rawCycleId;
+                        if ($cycleId > 0 && !in_array($cycleId, $arrivalCycleIds, true)) {
+                            $arrivalCycleIds[] = $cycleId;
+                        }
+                    }
 
                     // 発送は複数サイクルを一括登録できる。対象IDはチェックボックス配列、
                     // 袋数はサイクルIDをキーにした配列で受け取る。
@@ -635,11 +663,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $dispatchTime = resolve_entry_time($_POST['dispatch_time'] ?? '', $nowTimeStr);
                     $dispatchEmployeeId = resolve_entry_employee_id($_POST['dispatch_employee_id'] ?? '', (int) $staff['id'], $validEmployeeIds);
 
-                    // 到着は従来どおり1件。発送だけ複数件をまとめて処理する。
-                    $wantsArrival = !empty($arrivalCandidates) && $arrivalBagCount !== null;
+                    // 到着・発送とも、チェックされた全件をまとめて処理する。
+                    $wantsArrival = !empty($arrivalCycleIds);
                     $wantsDispatch = !empty($dispatchCycleIds);
+                    $arrivalEntries = [];
+                    $arrivalSelectionError = '';
                     $dispatchEntries = [];
                     $dispatchSelectionError = '';
+
+                    foreach ($arrivalCycleIds as $arrivalCycleId) {
+                        if (!in_array($arrivalCycleId, $validArrivalIds, true)) {
+                            $arrivalSelectionError = '到着対象のサイクルが無効です（既に他の記録で更新された可能性があります）。もう一度やり直してください。';
+                            break;
+                        }
+                        $arrivalBagCount = parse_bag_count($arrivalBagCountsRaw[$arrivalCycleId] ?? '');
+                        if ($arrivalBagCount === null) {
+                            $targetName = '';
+                            foreach ($arrivalCandidates as $candidate) {
+                                if ((int) $candidate['id'] === $arrivalCycleId) {
+                                    $targetName = $facilityNamesById[(int) $candidate['facility_id']] ?? '';
+                                    break;
+                                }
+                            }
+                            $arrivalSelectionError = ($targetName !== '' ? $targetName . 'の' : '選択した対象の') . '到着リネン袋数を入力してください。';
+                            break;
+                        }
+                        $arrivalEntries[] = [
+                            'cycle_id' => $arrivalCycleId,
+                            'bag_count' => $arrivalBagCount,
+                        ];
+                    }
 
                     foreach ($dispatchCycleIds as $dispatchCycleId) {
                         if (!in_array($dispatchCycleId, $validDispatchIds, true)) {
@@ -664,16 +717,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ];
                     }
 
-                    // 到着候補が複数ある場合だけ、従来どおり明示選択を必須にする。
-                    // 発送はチェックされた全件を一括登録するため、単一IDのラジオ選択は使わない。
-                    if ($dispatchSelectionError !== '') {
+                    // 到着・発送とも、チェックされた全件を一括登録する。単一IDのラジオ選択は使わない。
+                    if ($arrivalSelectionError !== '') {
+                        $errorMessage = $arrivalSelectionError;
+                    } elseif ($dispatchSelectionError !== '') {
                         $errorMessage = $dispatchSelectionError;
-                    } elseif ($wantsArrival && count($arrivalCandidates) > 1 && !isset($_POST['arrival_cycle_id'])) {
-                        $errorMessage = '到着対象を選択してください。';
-                    } elseif ($wantsArrival && !in_array($arrivalCycleId, $validArrivalIds, true)) {
-                        $errorMessage = '到着対象のサイクルが無効です（既に他の記録で更新された可能性があります）。もう一度やり直してください。';
                     } elseif (!$wantsArrival && !$wantsDispatch) {
-                        $errorMessage = '到着を記録するか、発送する施設を1件以上選択してください。';
+                        $errorMessage = '到着する施設、または発送する施設を1件以上選択してください。';
                     } elseif ($wantsArrival && ($arrivalDate === false || $arrivalTime === false || $arrivalEmployeeId === false)) {
                         $errorMessage = '到着の日付・時間・担当者の入力内容が正しくありません。';
                     } elseif ($wantsDispatch && ($dispatchDate === false || $dispatchTime === false || $dispatchEmployeeId === false)) {
@@ -692,8 +742,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     $facilityId
                                 );
                             }
-                            if ($wantsArrival) {
-                                update_arrival($pdo, $arrivalCycleId, $arrivalBagCount, $arrivalDate, $arrivalTime, $arrivalEmployeeId, $facilityId);
+                            foreach ($arrivalEntries as $arrivalEntry) {
+                                update_arrival(
+                                    $pdo,
+                                    $arrivalEntry['cycle_id'],
+                                    $arrivalEntry['bag_count'],
+                                    $arrivalDate,
+                                    $arrivalTime,
+                                    $arrivalEmployeeId,
+                                    $facilityId
+                                );
                             }
                             $pdo->commit();
                         } catch (\Throwable $e) {
@@ -710,7 +768,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             }
                         }
                         if ($wantsArrival) {
-                            $parts[] = 'クリーニング所到着（' . $arrivalBagCount . '袋）';
+                            $arrivalTotalBagCount = array_sum(array_column($arrivalEntries, 'bag_count'));
+                            if (count($arrivalEntries) === 1) {
+                                $parts[] = 'クリーニング所到着（' . $arrivalTotalBagCount . '袋）';
+                            } else {
+                                $parts[] = 'クリーニング所到着（' . count($arrivalEntries) . '件・計' . $arrivalTotalBagCount . '袋）';
+                            }
                         }
                         set_flash('success', implode('と', $parts) . 'を記録しました（' . $facilityName . '）。');
                         header('Location: /staff/collection_entry.php');
@@ -1150,6 +1213,7 @@ function format_stage_cell($bagCount, $date, $time): string
         .candidate-actions { display: flex; gap: 8px; margin: 8px 0; }
         .dispatch-candidate-row { transition: background 0.15s, border-color 0.15s; }
         .dispatch-candidate-row.is-selected { background: #f0f6ff; border-color: #0b5ed7; }
+        .arrival-candidate-row.is-selected { background: #f0f6ff; border-color: #0b5ed7; }
         .dispatch-candidate-label { font-weight: 600; }
         .dispatch-bag-row { margin: 8px 0 0 24px; }
 
@@ -1301,32 +1365,47 @@ function format_stage_cell($bagCount, $date, $time): string
                     <?php if (empty($step2['arrival_candidates'])): ?>
                         <p class="notice">現在、到着待ちのサイクル（未到着の集荷）はありません。</p>
                     <?php else: ?>
-                        <?php if (count($step2['arrival_candidates']) === 1): ?>
-                            <?php $onlyArrivalCandidate = $step2['arrival_candidates'][0]; ?>
-                            <input type="hidden" name="arrival_cycle_id" value="<?= (int) $onlyArrivalCandidate['id'] ?>">
-                            <p class="notice">到着対象: <?= format_cycle_candidate_label($onlyArrivalCandidate, $facilityNamesById) ?></p>
-                        <?php else: ?>
-                            <p class="notice">到着待ちのサイクルが複数あります。対象を選んでください。</p>
-                            <?php foreach ($step2['arrival_candidates'] as $cycle): ?>
-                                <div class="candidate-row">
-                                    <label>
-                                        <input type="radio" name="arrival_cycle_id" value="<?= (int) $cycle['id'] ?>" data-pickup-bag-count="<?= $cycle['pickup_bag_count'] !== null ? (int) $cycle['pickup_bag_count'] : '' ?>">
-                                        <?= format_cycle_candidate_label($cycle, $facilityNamesById) ?>
-                                    </label>
-                                </div>
-                            <?php endforeach; ?>
+                        <p class="notice">到着した施設を複数選択できます。チェックした施設を1回の操作でまとめて到着登録します。</p>
+                        <?php if (count($step2['arrival_candidates']) > 1): ?>
+                            <p class="candidate-actions">
+                                <button type="button" id="arrival-select-all">すべて選択</button>
+                                <button type="button" id="arrival-clear-all">選択解除</button>
+                            </p>
                         <?php endif; ?>
-                        <div class="form-row">
-                            <label for="arrival_bag_count">到着リネン袋数</label>
+                        <?php foreach ($step2['arrival_candidates'] as $cycle): ?>
                             <?php
+                            $arrivalCycleId = (int) $cycle['id'];
                             // 集荷リネン袋数がそのまま到着数として引き継がれることが多いため初期値にセットするが、
                             // 現場での増減（一部だけ先に到着等）に対応できるよう編集は妨げない。
-                            $arrivalBagCountDefault = count($step2['arrival_candidates']) === 1
-                                ? ($step2['arrival_candidates'][0]['pickup_bag_count'] ?? '')
-                                : '';
+                            $arrivalBagCountDefault = $cycle['pickup_bag_count'] ?? '';
+                            $arrivalCheckedByDefault = count($step2['arrival_candidates']) === 1;
                             ?>
-                            <input type="number" id="arrival_bag_count" name="arrival_bag_count" min="0" step="1" value="<?= htmlspecialchars((string) $arrivalBagCountDefault, ENT_QUOTES, 'UTF-8') ?>">
-                        </div>
+                            <div class="candidate-row arrival-candidate-row<?= $arrivalCheckedByDefault ? ' is-selected' : '' ?>">
+                                <label class="arrival-candidate-label">
+                                    <input
+                                        type="checkbox"
+                                        class="arrival-cycle-checkbox"
+                                        name="arrival_cycle_ids[]"
+                                        value="<?= $arrivalCycleId ?>"
+                                        <?= $arrivalCheckedByDefault ? 'checked' : '' ?>
+                                    >
+                                    <?= format_cycle_candidate_label($cycle, $facilityNamesById) ?>
+                                </label>
+                                <div class="form-row arrival-bag-row">
+                                    <label for="arrival_bag_count_<?= $arrivalCycleId ?>">到着リネン袋数</label>
+                                    <input
+                                        type="number"
+                                        id="arrival_bag_count_<?= $arrivalCycleId ?>"
+                                        class="arrival-bag-count"
+                                        name="arrival_bag_counts[<?= $arrivalCycleId ?>]"
+                                        min="0"
+                                        step="1"
+                                        value="<?= htmlspecialchars((string) $arrivalBagCountDefault, ENT_QUOTES, 'UTF-8') ?>"
+                                        <?= $arrivalCheckedByDefault ? '' : 'disabled' ?>
+                                    >
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
                         <div class="form-grid">
                             <div class="form-row">
                                 <label for="arrival_date">到着日</label>
@@ -1741,14 +1820,52 @@ function format_stage_cell($bagCount, $date, $time): string
 </section>
 
 <script>
-document.querySelectorAll('input[name="arrival_cycle_id"][type="radio"]').forEach(function (radio) {
-    radio.addEventListener('change', function () {
-        var bagCountInput = document.getElementById('arrival_bag_count');
-        if (bagCountInput) {
-            bagCountInput.value = this.dataset.pickupBagCount || '';
-        }
-    });
+function syncArrivalCandidate(row) {
+    var checkbox = row.querySelector('.arrival-cycle-checkbox');
+    var bagCountInput = row.querySelector('.arrival-bag-count');
+    if (!checkbox || !bagCountInput) {
+        return;
+    }
+    bagCountInput.disabled = !checkbox.checked;
+    row.classList.toggle('is-selected', checkbox.checked);
+}
+
+document.querySelectorAll('.arrival-candidate-row').forEach(function (row) {
+    var checkbox = row.querySelector('.arrival-cycle-checkbox');
+    if (checkbox) {
+        checkbox.addEventListener('change', function () {
+            syncArrivalCandidate(row);
+        });
+    }
+    syncArrivalCandidate(row);
 });
+
+var arrivalSelectAllButton = document.getElementById('arrival-select-all');
+if (arrivalSelectAllButton) {
+    arrivalSelectAllButton.addEventListener('click', function () {
+        document.querySelectorAll('.arrival-candidate-row').forEach(function (row) {
+            var checkbox = row.querySelector('.arrival-cycle-checkbox');
+            if (checkbox) {
+                checkbox.checked = true;
+            }
+            syncArrivalCandidate(row);
+        });
+    });
+}
+
+var arrivalClearAllButton = document.getElementById('arrival-clear-all');
+if (arrivalClearAllButton) {
+    arrivalClearAllButton.addEventListener('click', function () {
+        document.querySelectorAll('.arrival-candidate-row').forEach(function (row) {
+            var checkbox = row.querySelector('.arrival-cycle-checkbox');
+            if (checkbox) {
+                checkbox.checked = false;
+            }
+            syncArrivalCandidate(row);
+        });
+    });
+}
+
 function syncDispatchCandidate(row) {
     var checkbox = row.querySelector('.dispatch-cycle-checkbox');
     var bagCountInput = row.querySelector('.dispatch-bag-count');
