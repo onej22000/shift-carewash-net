@@ -1803,6 +1803,19 @@ function record_work_stage_employees(PDO $pdo, int $workStageRecordId, array $em
 }
 
 /**
+ * 施設の居室数から必要リネン袋数を算出する（居室数÷15×2を四捨五入）。
+ * DBには保存せず表示時に都度計算する（居室数の変更に自動追従させるため）。
+ * 居室数が未登録またはゼロの場合はnullを返す（呼び出し側で「-」表示）。
+ */
+function calc_required_linen_bag_count(?int $roomCount): ?int
+{
+    if ($roomCount === null || $roomCount <= 0) {
+        return null;
+    }
+    return (int) round($roomCount / 15 * 2);
+}
+
+/**
  * 本日の曜日に対応するfacilities.pickup_scheduleの値を返す（日曜は集荷日設定が無いためnull）。
  */
 function todays_pickup_schedule_label(DateTime $today): ?string

@@ -5,6 +5,8 @@ require_once __DIR__ . '/../includes/functions.php';
 $staff = require_login('staff');
 $pdo = getPdo();
 
+const PREPARED_BAG_COLORS = ['オレンジ', 'シルバー', '青'];
+
 $errorMessage = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -30,6 +32,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 header('Location: /staff/facilities.php');
                 exit;
             }
+        } elseif ($action === 'update_prepared') {
+            $facilityId = (int) ($_POST['facility_id'] ?? 0);
+            $colorRaw = trim((string) ($_POST['prepared_bag_color'] ?? ''));
+            $preparedBagColor = $colorRaw === '' ? null : $colorRaw;
+            $countRaw = trim((string) ($_POST['prepared_bag_count'] ?? ''));
+            $preparedBagCount = $countRaw === '' ? null : (int) $countRaw;
+
+            $existsStmt = $pdo->prepare('SELECT 1 FROM facilities WHERE id = :id');
+            $existsStmt->execute([':id' => $facilityId]);
+
+            if ($existsStmt->fetchColumn() === false) {
+                $errorMessage = '対象の施設が見つかりません。';
+            } elseif ($preparedBagColor !== null && !in_array($preparedBagColor, PREPARED_BAG_COLORS, true)) {
+                $errorMessage = '色の指定が正しくありません。';
+            } elseif ($preparedBagCount !== null && $preparedBagCount < 0) {
+                $errorMessage = '準備完了数は0以上の数値を入力してください。';
+            } else {
+                $updateStmt = $pdo->prepare('UPDATE facilities SET prepared_bag_color = :color, prepared_bag_count = :count WHERE id = :id');
+                $updateStmt->execute([':color' => $preparedBagColor, ':count' => $preparedBagCount, ':id' => $facilityId]);
+                set_flash('success', '準備完了状況を更新しました。');
+                header('Location: /staff/facilities.php');
+                exit;
+            }
         }
     }
 }
@@ -39,7 +64,8 @@ $csrfToken = csrf_token();
 
 $facilitiesStmt = $pdo->query(
     'SELECT id, name, facility_type, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
-            issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count, is_active
+            issued_linen_bag_orange, issued_linen_bag_yellow, issued_laundry_net_count,
+            prepared_bag_color, prepared_bag_count, is_active
      FROM facilities ORDER BY is_active DESC, name'
 );
 $facilities = $facilitiesStmt->fetchAll();
@@ -64,6 +90,8 @@ $facilities = $facilitiesStmt->fetchAll();
         .status-disabled { background: #eee; color: #777; }
         .note-cell { max-width: 220px; }
         .note-cell textarea { width: 100%; box-sizing: border-box; height: 50px; font-size: 0.9em; }
+        .prepared-cell { min-width: 110px; }
+        .prepared-cell select, .prepared-cell input[type="number"] { width: 100%; box-sizing: border-box; font-size: 0.9em; margin-bottom: 4px; }
         .message { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; }
         .message.success { background: #e6f4ea; color: #1e7e34; }
         .message.error { background: #fdecea; color: #b3261e; }
@@ -97,6 +125,9 @@ $facilities = $facilitiesStmt->fetchAll();
                 <th>住所</th>
                 <th>電話番号</th>
                 <th>備考</th>
+                <th>必要リネン袋数</th>
+                <th>色</th>
+                <th>準備完了数</th>
                 <th>交付リネン袋数（オレンジ）</th>
                 <th>交付リネン袋数（黄）</th>
                 <th>交付洗濯ネット数</th>
@@ -105,6 +136,7 @@ $facilities = $facilitiesStmt->fetchAll();
         </thead>
         <tbody>
             <?php foreach ($facilities as $facility): ?>
+                <?php $requiredBagCount = calc_required_linen_bag_count($facility['room_count'] !== null ? (int) $facility['room_count'] : null); ?>
                 <tr>
                     <td><a href="/staff/facility_detail.php?id=<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></a></td>
                     <td><?= htmlspecialchars($facility['facility_type'], ENT_QUOTES, 'UTF-8') ?></td>
@@ -121,6 +153,25 @@ $facilities = $facilitiesStmt->fetchAll();
                             <textarea name="note"><?= htmlspecialchars($facility['note'] ?? '', ENT_QUOTES, 'UTF-8') ?></textarea>
                             <button type="submit">保存</button>
                         </form>
+                    </td>
+                    <td><?= $requiredBagCount !== null ? $requiredBagCount . '枚' : '-' ?></td>
+                    <?php $preparedFormId = 'prepared-form-' . (int) $facility['id']; ?>
+                    <td class="prepared-cell">
+                        <form method="post" action="/staff/facilities.php" id="<?= htmlspecialchars($preparedFormId, ENT_QUOTES, 'UTF-8') ?>" class="prepared-form">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                            <input type="hidden" name="action" value="update_prepared">
+                            <input type="hidden" name="facility_id" value="<?= (int) $facility['id'] ?>">
+                        </form>
+                        <select name="prepared_bag_color" form="<?= htmlspecialchars($preparedFormId, ENT_QUOTES, 'UTF-8') ?>">
+                            <option value="">-</option>
+                            <?php foreach (PREPARED_BAG_COLORS as $colorOption): ?>
+                                <option value="<?= htmlspecialchars($colorOption, ENT_QUOTES, 'UTF-8') ?>" <?= $facility['prepared_bag_color'] === $colorOption ? 'selected' : '' ?>><?= htmlspecialchars($colorOption, ENT_QUOTES, 'UTF-8') ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </td>
+                    <td class="prepared-cell">
+                        <input type="number" name="prepared_bag_count" min="0" step="1" form="<?= htmlspecialchars($preparedFormId, ENT_QUOTES, 'UTF-8') ?>" value="<?= $facility['prepared_bag_count'] !== null ? (int) $facility['prepared_bag_count'] : '' ?>">
+                        <button type="submit" form="<?= htmlspecialchars($preparedFormId, ENT_QUOTES, 'UTF-8') ?>">保存</button>
                     </td>
                     <td><?= $facility['issued_linen_bag_orange'] !== null ? (int) $facility['issued_linen_bag_orange'] . '枚' : '-' ?></td>
                     <td><?= $facility['issued_linen_bag_yellow'] !== null ? (int) $facility['issued_linen_bag_yellow'] . '枚' : '-' ?></td>

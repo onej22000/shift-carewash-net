@@ -9,6 +9,8 @@ const FACILITY_EDITABLE_FIELDS = ['name', 'facility_type', 'company_name', 'room
 
 const FACILITY_TYPES = ['介護施設', 'クリーニング所'];
 
+const PREPARED_BAG_COLORS = ['オレンジ', 'シルバー', '青'];
+
 // クリーニング所は連番から除外し、一覧の最下部に固定表示する。表示順・番号ラベルはこの並びに従う。
 const CLEANING_FACILITY_LABELS = ['フトン巻きのジロー' => 'A', 'フジヤクリーニング' => 'B'];
 
@@ -163,6 +165,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 header('Location: /admin/facilities.php');
                 exit;
             }
+        } elseif ($action === 'update_prepared') {
+            $facilityId = (int) ($_POST['facility_id'] ?? 0);
+            $colorRaw = trim((string) ($_POST['prepared_bag_color'] ?? ''));
+            $preparedBagColor = $colorRaw === '' ? null : $colorRaw;
+            $countRaw = trim((string) ($_POST['prepared_bag_count'] ?? ''));
+            $preparedBagCount = $countRaw === '' ? null : (int) $countRaw;
+
+            $existsStmt = $pdo->prepare('SELECT 1 FROM facilities WHERE id = :id');
+            $existsStmt->execute([':id' => $facilityId]);
+
+            if ($existsStmt->fetchColumn() === false) {
+                $errorMessage = '対象の施設が見つかりません。';
+            } elseif ($preparedBagColor !== null && !in_array($preparedBagColor, PREPARED_BAG_COLORS, true)) {
+                $errorMessage = '色の指定が正しくありません。';
+            } elseif ($preparedBagCount !== null && $preparedBagCount < 0) {
+                $errorMessage = '準備完了数は0以上の数値を入力してください。';
+            } else {
+                $updateStmt = $pdo->prepare('UPDATE facilities SET prepared_bag_color = :color, prepared_bag_count = :count WHERE id = :id');
+                $updateStmt->execute([':color' => $preparedBagColor, ':count' => $preparedBagCount, ':id' => $facilityId]);
+                set_flash('success', '準備完了状況を更新しました。');
+                header('Location: /admin/facilities.php');
+                exit;
+            }
         } elseif ($action === 'disable') {
             $facilityId = (int) ($_POST['facility_id'] ?? 0);
             $stmt = $pdo->prepare('UPDATE facilities SET is_active = 0 WHERE id = :id');
@@ -186,7 +211,8 @@ $csrfToken = csrf_token();
 
 $facilitiesStmt = $pdo->query(
     'SELECT id, name, facility_type, company_name, room_count, onboarding_start_date, pickup_schedule, address, phone_number, note,
-            issued_linen_bag_orange, issued_linen_bag_yellow, issued_linen_bag_blue, issued_laundry_net_count, is_active
+            issued_linen_bag_orange, issued_linen_bag_yellow, issued_linen_bag_blue, issued_laundry_net_count,
+            prepared_bag_color, prepared_bag_count, is_active
      FROM facilities'
 );
 $allFacilities = $facilitiesStmt->fetchAll();
@@ -336,9 +362,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
         .form-row label { display: inline-block; width: 170px; vertical-align: top; }
         .form-row input[type="text"], .form-row input[type="date"], .form-row input[type="number"], .form-row select { width: 260px; }
         .form-row textarea { width: 260px; height: 60px; vertical-align: top; }
+        .table-scroll { overflow-x: auto; }
         table.facilities { border-collapse: collapse; width: 100%; }
         table.facilities th, table.facilities td { border: 1px solid #ccc; padding: 8px; text-align: left; }
         table.facilities th { background: #f5f5f5; }
+        .prepared-cell { min-width: 110px; }
+        .prepared-cell select, .prepared-cell input[type="number"] { width: 100%; box-sizing: border-box; font-size: 0.9em; margin-bottom: 4px; }
+        @media (max-width: 900px) {
+            table.facilities { white-space: nowrap; }
+        }
         .status-badge { display: inline-block; font-size: 0.8em; padding: 2px 8px; border-radius: 10px; }
         .status-active { background: #e6f4ea; color: #1e7e34; }
         .status-disabled { background: #eee; color: #777; }
@@ -479,6 +511,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
     <?php elseif (empty($displayFacilities)): ?>
         <p class="notice">絞り込み条件に一致する施設がありません。</p>
     <?php else: ?>
+        <div class="table-scroll">
         <table class="facilities">
             <thead>
                 <tr>
@@ -492,6 +525,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
                     <th>住所</th>
                     <th>電話番号</th>
                     <th>備考</th>
+                    <th>必要リネン袋数</th>
+                    <th>色</th>
+                    <th>準備完了数</th>
                     <th>交付リネン袋数（オレンジ）</th>
                     <th>交付リネン袋数（黄）</th>
                     <th>交付リネン袋数（青）</th>
@@ -502,6 +538,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
             </thead>
             <tbody>
                 <?php foreach ($displayFacilities as $facility): ?>
+                    <?php $requiredBagCount = calc_required_linen_bag_count($facility['room_count'] !== null ? (int) $facility['room_count'] : null); ?>
                     <tr>
                         <td><?= htmlspecialchars($facility['display_number'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><a href="/admin/facility_detail.php?id=<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></a></td>
@@ -513,6 +550,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
                         <td><?= $facility['address'] !== null ? htmlspecialchars($facility['address'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= $facility['phone_number'] !== null ? htmlspecialchars($facility['phone_number'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td class="note-cell"><?= $facility['note'] !== null ? nl2br(htmlspecialchars($facility['note'], ENT_QUOTES, 'UTF-8')) : '-' ?></td>
+                        <td><?= $requiredBagCount !== null ? $requiredBagCount . '枚' : '-' ?></td>
+                        <?php $preparedFormId = 'prepared-form-' . (int) $facility['id']; ?>
+                        <td class="prepared-cell">
+                            <form method="post" action="/admin/facilities.php" id="<?= htmlspecialchars($preparedFormId, ENT_QUOTES, 'UTF-8') ?>" class="inline-form prepared-form">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                <input type="hidden" name="action" value="update_prepared">
+                                <input type="hidden" name="facility_id" value="<?= (int) $facility['id'] ?>">
+                            </form>
+                            <select name="prepared_bag_color" form="<?= htmlspecialchars($preparedFormId, ENT_QUOTES, 'UTF-8') ?>">
+                                <option value="">-</option>
+                                <?php foreach (PREPARED_BAG_COLORS as $colorOption): ?>
+                                    <option value="<?= htmlspecialchars($colorOption, ENT_QUOTES, 'UTF-8') ?>" <?= $facility['prepared_bag_color'] === $colorOption ? 'selected' : '' ?>><?= htmlspecialchars($colorOption, ENT_QUOTES, 'UTF-8') ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
+                        <td class="prepared-cell">
+                            <input type="number" name="prepared_bag_count" min="0" step="1" form="<?= htmlspecialchars($preparedFormId, ENT_QUOTES, 'UTF-8') ?>" value="<?= $facility['prepared_bag_count'] !== null ? (int) $facility['prepared_bag_count'] : '' ?>">
+                            <button type="submit" form="<?= htmlspecialchars($preparedFormId, ENT_QUOTES, 'UTF-8') ?>">保存</button>
+                        </td>
                         <td><?= $facility['issued_linen_bag_orange'] !== null ? (int) $facility['issued_linen_bag_orange'] . '枚' : '-' ?></td>
                         <td><?= $facility['issued_linen_bag_yellow'] !== null ? (int) $facility['issued_linen_bag_yellow'] . '枚' : '-' ?></td>
                         <td><?= $facility['issued_linen_bag_blue'] !== null ? (int) $facility['issued_linen_bag_blue'] . '枚' : '-' ?></td>
@@ -546,6 +602,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '') {
                 <?php endforeach; ?>
             </tbody>
         </table>
+        </div>
     <?php endif; ?>
 </section>
 </body>
