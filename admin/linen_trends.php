@@ -155,7 +155,7 @@ $payload = array_values($payload);
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>洗濯ネット推移予測</title>
+    <title>推移予測</title>
     <style>
         :root { --navy:#183b56; --blue:#247ba0; --orange:#f28e2b; --ink:#243447; --muted:#667085; --line:#d9e2e8; --bg:#f4f7f9; }
         * { box-sizing: border-box; }
@@ -176,7 +176,7 @@ $payload = array_values($payload);
         .meta span { color:var(--muted); font-size:.82rem; }
         .chart-wrap { width:100%; overflow-x:auto; }
         svg { width:100%; min-width:640px; height:auto; display:block; }
-        .legend { display:flex; gap:20px; justify-content:center; margin:8px 0 0; font-size:.9rem; }
+        .legend { display:flex; gap:8px 20px; flex-wrap:wrap; justify-content:center; margin:8px 0 0; font-size:.9rem; }
         .swatch { display:inline-block; width:18px; height:3px; vertical-align:middle; margin-right:6px; }
         table { width:100%; border-collapse:collapse; margin-top:18px; }
         th,td { padding:9px 10px; border-bottom:1px solid #e6ecef; text-align:right; }
@@ -197,7 +197,7 @@ $payload = array_values($payload);
 </head>
 <body>
 <header>
-    <h1>洗濯ネット推移予測</h1>
+    <h1>推移予測</h1>
     <nav>ログイン中: <?= htmlspecialchars((string) $employee['name'], ENT_QUOTES, 'UTF-8') ?>さん | <a href="<?= htmlspecialchars($dashboardPath, ENT_QUOTES, 'UTF-8') ?>">ダッシュボード</a> | <a href="<?= htmlspecialchars($logoutPath, ENT_QUOTES, 'UTF-8') ?>">ログアウト</a></nav>
 </header>
 <main>
@@ -268,6 +268,7 @@ $payload = array_values($payload);
 <script>
 const facilities = <?= json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 const today = <?= json_encode(date('Y-m-d')) ?>;
+const residents = <?= json_encode($residentPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 // UTC日付演算でブラウザーのタイムゾーンによる日付ずれを防止する。
 const DAY = 86400000;
 const time = date => Date.parse(date + 'T00:00:00Z');
@@ -437,8 +438,9 @@ function calculationDetails(results,model,end) {
       <details open><summary>施設別の計算内訳（${escapeHtml(end)}まで）</summary><div class="chart-wrap"><table><thead><tr><th>施設</th><th>初回集荷日</th><th>最新実績日：ネット数</th><th>90%上限</th><th>予測最終回</th><th>上限適用前の増分・新施設は予測量</th><th>期間末予測</th></tr></thead><tbody>${facilityRows}</tbody></table></div></details>
       </section>`;
 }
-function chartSvg(actual, predicted, base, end) {
-    const width=980,height=440,left=70,right=25,top=24,bottom=62;
+// res：入居者数の系列（右軸・人）。null のときはネット数（左軸）のみ。
+function chartSvg(actual, predicted, base, end, res) {
+    const width=980,height=440,left=70,right=res?70:25,top=24,bottom=62;
     const maxX=Math.max(1,elapsed(end,base));
     const maxY=Math.max(4,...actual.concat(predicted).filter(p=>p.nets!==null).map(p=>p.nets));
     const ceiling=Math.ceil(maxY/4)*4;
@@ -459,7 +461,43 @@ function chartSvg(actual, predicted, base, end) {
         grid+=`<line x1="${left}" y1="${y}" x2="${width-right}" y2="${y}" stroke="#d9e2e8" stroke-dasharray="4 4"/><text x="${left-12}" y="${y+4}" text-anchor="end" fill="#667085" font-size="12">${ceiling*(4-i)/4}</text><text x="${x}" y="${height-bottom+23}" text-anchor="middle" fill="#667085" font-size="12">${date}</text>`;
     }
     const dots=(points,color)=>points.filter(p=>p.nets!==null).map(p=>`<circle cx="${sx(p.date)}" cy="${sy(p.nets)}" r="3" fill="${color}"><title>${escapeHtml(p.date)}: ${p.nets}</title></circle>`).join('');
-    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="1回あたりの洗濯ネット実績と予測">${grid}<path d="${path(actual)}" fill="none" stroke="#f28e2b" stroke-width="3"/>${dots(actual,'#f28e2b')}<path d="${path(predicted)}" fill="none" stroke="#247ba0" stroke-width="3" stroke-dasharray="9 7"/>${dots(predicted,'#247ba0')}<text x="490" y="428" text-anchor="middle" fill="#495867">日付</text></svg>`;
+    let residentLayer='';
+    if(res) {
+        // 右軸は入居者数専用の目盛り。ネット数の軸とは共有しない。
+        const maxR=Math.max(4,res.cap>0?res.cap:0,...res.actual.concat(res.predicted).map(p=>p.residents));
+        const ceilingR=Math.ceil(maxR/4)*4;
+        const sr=value=>top+(1-value/ceilingR)*(height-top-bottom);
+        const rpath=points=>points.map((p,i)=>`${i?' L':' M'} ${sx(p.date).toFixed(1)} ${sr(p.residents).toFixed(1)}`).join('');
+        const rdots=(points,color)=>points.map(p=>`<circle cx="${sx(p.date)}" cy="${sr(p.residents)}" r="3.5" fill="${color}"><title>入居者数 ${escapeHtml(p.date)}: ${p.residents}人</title></circle>`).join('');
+        for(let i=0;i<=4;i++) {
+            const y=top+i*(height-top-bottom)/4;
+            residentLayer+=`<text x="${width-right+12}" y="${y+4}" text-anchor="start" fill="#2a9d8f" font-size="12">${ceilingR*(4-i)/4}</text>`;
+        }
+        residentLayer+=`<line x1="${width-right}" y1="${top}" x2="${width-right}" y2="${height-bottom}" stroke="#2a9d8f"/><text x="${width-5}" y="14" text-anchor="end" fill="#2a9d8f" font-size="12">入居者数（人）</text>`;
+        if(res.cap>0) residentLayer+=`<line x1="${left}" y1="${sr(res.cap)}" x2="${width-right}" y2="${sr(res.cap)}" stroke="#b42318" stroke-width="1.5" stroke-dasharray="3 5"/><text x="${width-right-6}" y="${sr(res.cap)-6}" text-anchor="end" fill="#b42318" font-size="12">入居者上限（居室数×0.9）${Math.round(res.cap*10)/10}人</text>`;
+        residentLayer+=`<path d="${rpath(res.actual)}" fill="none" stroke="#2a9d8f" stroke-width="3"/>${rdots(res.actual,'#2a9d8f')}<path d="${rpath(res.predicted)}" fill="none" stroke="#8e44ad" stroke-width="3" stroke-dasharray="9 7"/>${rdots(res.predicted,'#8e44ad')}`;
+        residentLayer+=`<line x1="${left}" y1="${top}" x2="${left}" y2="${height-bottom}" stroke="#f28e2b"/><text x="5" y="14" text-anchor="start" fill="#f28e2b" font-size="12">ネット数</text>`;
+    }
+    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="1回あたりの洗濯ネット実績と予測${res?'、月末入居者数の実績と予測':''}">${grid}<path d="${path(actual)}" fill="none" stroke="#f28e2b" stroke-width="3"/>${dots(actual,'#f28e2b')}<path d="${path(predicted)}" fill="none" stroke="#247ba0" stroke-width="3" stroke-dasharray="9 7"/>${dots(predicted,'#247ba0')}${residentLayer}<text x="490" y="428" text-anchor="middle" fill="#495867">日付</text></svg>`;
+}
+// グラフ用の入居者数系列。施設別はその施設、全施設は予測できた施設だけを日付ごとに合算。
+// 実績は各施設の最新入力値を持ち越し（受託開始日＝0人）、予測は最新実績日より後を予測値で置き換える。
+function residentSeries(selected, end) {
+    const results=selected.map(f=>({f,...predictResidents(f,end,today)})).filter(r=>!r.reason);
+    if(!results.length) return null;
+    const round=n=>Math.round(n*10)/10;
+    if(selected.length===1) {
+        const r=results[0];
+        return {actual:[{date:r.f.startDate,residents:0},...r.actual], predicted:r.points.length?[r.last,...r.points]:[], cap:r.cap, count:1};
+    }
+    const carry=(r,date)=>{ const a=r.actual.filter(p=>p.date<=date); return a.length?a[a.length-1].residents:0; };
+    const levelAt=(r,date)=>date>r.last.date?r.valueAt(date):carry(r,date);
+    const actualDates=[...new Set(results.flatMap(r=>[r.f.startDate,...r.actual.map(p=>p.date)]))].sort();
+    const actual=actualDates.map(date=>({date,residents:round(results.reduce((s,r)=>s+carry(r,date),0))}));
+    const anchor=actual[actual.length-1];
+    const forecastDates=[...new Set(results.flatMap(r=>r.points.map(p=>p.date)))].filter(date=>date>anchor.date).sort();
+    const predicted=forecastDates.map(date=>({date,residents:round(results.reduce((s,r)=>s+levelAt(r,date),0))}));
+    return {actual, predicted:predicted.length?[anchor,...predicted]:[], cap:null, count:results.length};
 }
 function render() {
     if(!facilities.length) {content.innerHTML='<div class="empty">受託開始日が登録された施設はありません。</div>';return;}
@@ -472,7 +510,9 @@ function render() {
     const rawForecast=all?levels.forecast:results[0].points;
     const anchor=all?levels.anchor:results[0].last;
     const predicted=anchor && rawForecast.length?[anchor,...rawForecast]:rawForecast;
-    const dates=[today,...actual.map(p=>p.date),...predicted.map(p=>p.date)].sort();
+    // 入居者数は右軸に重ねる。予測期間はネットと同じ end（増加予想のプルダウン）に連動。
+    const res=residentSeries(selected,end);
+    const dates=[today,...actual.map(p=>p.date),...predicted.map(p=>p.date),...(res?res.actual.concat(res.predicted).map(p=>p.date):[])].sort();
     const base=dates[0];
     const warnings=results.flatMap(r=>[...(r.reason?[`${r.f.name}：${r.reason}`]:[]),...(r.warnings||[]).map(w=>`${r.f.name}：${w}`)]);
     if(!model.error && model.rate===0) warnings.push('基準実績に増加が観測されていないため、観測範囲より先は横ばいです。');
@@ -491,8 +531,9 @@ function render() {
       <p>${escapeHtml(summary)}</p><p>対象：${selected.length}施設 ／ 登録居室数合計：${rooms}室${configured.length<selected.length?'（設定済み施設のみ）':''} ／ 90%合計上限：${capacityText} ／ 期間末の予測：${lastForecast?lastForecast.nets+'ネット':'算出不可'}</p><p class="note">${escapeHtml(modelNote)}</p>
       ${warnings.length?`<p class="note" role="status">${warnings.map(escapeHtml).join('<br>')}</p>`:''}
       <div class="meta"><div><span>実績の記録日数</span><strong>${actual.length}日</strong></div><div><span>直近の1回量合計</span><strong>${registered.length?registered[registered.length-1].nets:'—'}</strong></div><div><span>予測期間</span><strong>本日から${horizon}日先まで</strong></div></div>
-      <div class="chart-wrap">${chartSvg(actual,predicted,base,end)}</div>
-      <div class="legend"><span><i class="swatch" style="background:#f28e2b"></i>実績</span><span><i class="swatch" style="background:#247ba0"></i>破線＝予測（新施設を含む）</span></div>
+      <div class="chart-wrap">${chartSvg(actual,predicted,base,end,res)}</div>
+      <div class="legend"><span><i class="swatch" style="background:#f28e2b"></i>ネット数の実績（左軸）</span><span><i class="swatch" style="background:#247ba0"></i>破線＝ネット数の予測（左軸・新施設を含む）</span>${res?`<span><i class="swatch" style="background:#2a9d8f"></i>入居者数の実績（右軸${all?`・${res.count}施設分の合計`:''}）</span><span><i class="swatch" style="background:#8e44ad"></i>破線＝入居者数の予測（右軸${all?`・${res.count}施設分の合計`:''}）</span>${res.cap>0?'<span><i class="swatch" style="background:#b42318"></i>点線＝入居者上限（居室数×0.9）</span>':''}`:''}</div>
+      ${res?(all?`<p class="note">入居者数：${res.count}施設分の合計（入居者数が入力され予測できた施設のみ。データなしの${selected.length-res.count}施設は含みません）</p>`:''):'<p class="note">入居者数：データなし</p>'}
       ${calculationDetails(results,model,end)}
       <p class="note">開始日の次の集荷日を第1回とし、枚方長尾の各サイクルのネット増加数をそのまま各施設に適用します。居室数で増加数を倍率補正しません。居室数の90%は上限だけに使うため、小さい施設ほど早く到達します。観測範囲の先は直近約8サイクルの平均増加数を使います。全施設の線は各施設の直近1回量を持ち越した合計で、当日の集荷量や累計枚数ではありません。過去に一度も実績がない稼働施設を含む期間は実績合計を未確定にします。1人1回1ネットの仮定です。</p>
       <table><thead><tr><th>集荷日</th><th>1回量（全施設では直近値合計）</th></tr></thead><tbody>${actual.map(p=>`<tr><td>${escapeHtml(p.date)}</td><td>${p.nets??'—'}</td></tr>`).join('')}</tbody></table>
@@ -504,7 +545,6 @@ forecastDaysSelect.addEventListener('change',render);
 render();
 
 // ===== 入居者数推移予測（洗濯ネット予測とは独立に計算。ネット数⇔入居者数の換算はしない） =====
-const residents = <?= json_encode($residentPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 const residentContent=document.getElementById('residentContent');
 // 予測に使う実績：対象月のうち入居者数が0以外で入力された月末だけ。0・未入力は除外。
 function residentPoints(f) {
@@ -541,7 +581,7 @@ function predictResidents(f, endDate, today) {
         cursor=new Date(Date.UTC(cursor.getUTCFullYear(),cursor.getUTCMonth()+1,1));
     }
     if(endDate>from && !dates.includes(endDate)) dates.push(endDate);
-    return {actual, last, slope, cap, warnings, points:dates.map(date=>({date,residents:valueAt(date)}))};
+    return {actual, last, slope, cap, warnings, valueAt, points:dates.map(date=>({date,residents:valueAt(date)}))};
 }
 // 1人あたりネット数：ネット推移予測と同じ指標（validPoints＝集荷日単位の確定済み返却準備ネット数合計）の、
 // 同じ月の最後の確定集荷日の値 ÷ 月末入居者数。0・未入力の月、確定集荷日のない月は算出しない。
@@ -554,24 +594,6 @@ function netsPerResident(f) {
         return {month:m, count, net, ratio:count>0 && net?Math.round(net.nets/count*100)/100:null};
     });
 }
-function residentChartSvg(actual, predicted, base, end, cap) {
-    const width=980,height=400,left=70,right=25,top=24,bottom=62;
-    const maxX=Math.max(1,elapsed(end,base));
-    const maxY=Math.max(4,cap>0?cap:0,...actual.concat(predicted).map(p=>p.residents));
-    const ceiling=Math.ceil(maxY/4)*4;
-    const sx=date=>left+elapsed(date,base)/maxX*(width-left-right);
-    const sy=value=>top+(1-value/ceiling)*(height-top-bottom);
-    const path=points=>points.map((p,i)=>`${i?'L':'M'} ${sx(p.date).toFixed(1)} ${sy(p.residents).toFixed(1)}`).join(' ');
-    let grid='';
-    for(let i=0;i<=4;i++) {
-        const y=top+i*(height-top-bottom)/4, x=left+i*(width-left-right)/4;
-        const date=dateAt(time(base)+Math.round(maxX*i/4)*DAY);
-        grid+=`<line x1="${left}" y1="${y}" x2="${width-right}" y2="${y}" stroke="#d9e2e8" stroke-dasharray="4 4"/><text x="${left-12}" y="${y+4}" text-anchor="end" fill="#667085" font-size="12">${ceiling*(4-i)/4}</text><text x="${x}" y="${height-bottom+23}" text-anchor="middle" fill="#667085" font-size="12">${date}</text>`;
-    }
-    const capLine=cap>0?`<line x1="${left}" y1="${sy(cap)}" x2="${width-right}" y2="${sy(cap)}" stroke="#b42318" stroke-dasharray="2 5"/><text x="${width-right}" y="${sy(cap)-6}" text-anchor="end" fill="#b42318" font-size="12">居室数×0.9＝${Math.round(cap*10)/10}人</text>`:'';
-    const dots=(points,color)=>points.map(p=>`<circle cx="${sx(p.date)}" cy="${sy(p.residents)}" r="3.5" fill="${color}"><title>${escapeHtml(p.date)}: ${p.residents}人</title></circle>`).join('');
-    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="月末入居者数の実績と予測">${grid}${capLine}<path d="${path(actual)}" fill="none" stroke="#2a9d8f" stroke-width="3"/>${dots(actual,'#2a9d8f')}<path d="${path(predicted)}" fill="none" stroke="#6c5ce7" stroke-width="3" stroke-dasharray="9 7"/>${dots(predicted,'#6c5ce7')}<text x="490" y="${height-12}" text-anchor="middle" fill="#495867">日付（縦軸：入居者数・人）</text></svg>`;
-}
 function renderResidents() {
     if(!facilities.length) {residentContent.innerHTML='';return;}
     const all=select.value==='all';
@@ -579,7 +601,7 @@ function renderResidents() {
     const horizon=Number(forecastDaysSelect.value), end=dateAt(time(today)+horizon*DAY);
     const results=selected.map(f=>({f,...predictResidents(f,end,today)}));
     const fmt=n=>Number(n).toFixed(2);
-    const intro=`<h2>入居者数推移予測</h2><p class="note">洗濯ネット推移予測とは別に、月末入居者数の実績だけから計算します（1人で複数ネットを使う方がいるため、ネット数と入居者数は換算しません）。受託開始日を0人の起点とし、0以外で入力された月末の実績と合わせて最小二乗法で1日あたりの増加人数を求め、最新実績から延長します。上限は居室数×0.9です。0・未入力の月は計算に使いません。</p>`;
+    const intro=`<h2>入居者数推移予測</h2><p class="note">洗濯ネット推移予測とは別に、月末入居者数の実績だけから計算します（1人で複数ネットを使う方がいるため、ネット数と入居者数は換算しません）。受託開始日を0人の起点とし、0以外で入力された月末の実績と合わせて最小二乗法で1日あたりの増加人数を求め、最新実績から延長します。上限は居室数×0.9です。0・未入力の月は計算に使いません。グラフは上の推移予測に右軸（人）で重ねて表示しています。</p>`;
     if(all) {
         const rows=results.map(r=>{
             const endPoint=r.points.length?r.points[r.points.length-1]:null;
@@ -590,7 +612,7 @@ function renderResidents() {
         residentContent.innerHTML=`${intro}
           <p>期間末（${escapeHtml(end)}）の予測合計：<strong>${usable.length?total+'人':'データなし'}</strong>${usable.length?`（予測できた${usable.length}施設の合計。データなし等の${results.length-usable.length}施設は含みません）`:''}</p>
           <div class="chart-wrap"><table><thead><tr><th>施設</th><th>予測に使う月数</th><th>最新実績</th><th>傾き（人/日）</th><th>90%上限</th><th>期間末予測</th></tr></thead><tbody>${rows}</tbody></table></div>
-          <p class="note">施設を選ぶと、グラフと1人あたりネット数を表示します。</p>`;
+          <p class="note">グラフには、予測できた施設の合計を右軸に表示しています。施設を選ぶと、施設別の内訳と1人あたりネット数を表示します。</p>`;
         return;
     }
     const r=results[0], f=r.f;
@@ -603,15 +625,10 @@ function renderResidents() {
         residentContent.innerHTML=`${intro}<h3>${escapeHtml(f.name)}</h3><div class="empty">${escapeHtml(r.reason)}</div>${perTable}`;
         return;
     }
-    const actualLine=[{date:f.startDate,residents:0},...r.actual];
-    const predicted=r.points.length?[r.last,...r.points]:[];
-    const base=[f.startDate,today,...predicted.map(p=>p.date)].sort()[0];
     const endPoint=r.points.length?r.points[r.points.length-1]:null;
     residentContent.innerHTML=`${intro}<h3>${escapeHtml(f.name)}</h3>
       <p>起点：${escapeHtml(f.startDate)}＝0人 ／ 予測に使う実績：${r.actual.length}か月 ／ 傾き：<strong>${fmt(r.slope)}人/日</strong>（約${(r.slope*30).toFixed(1)}人/30日） ／ 90%上限：${r.cap>0?Math.round(r.cap*10)/10+'人':'未設定'} ／ 期間末（${escapeHtml(end)}）の予測：<strong>${endPoint?endPoint.residents+'人':'—'}</strong></p>
       ${r.warnings.length?`<p class="note" role="status">${r.warnings.map(escapeHtml).join('<br>')}</p>`:''}
-      <div class="chart-wrap">${residentChartSvg(actualLine,predicted,base,end,r.cap)}</div>
-      <div class="legend"><span><i class="swatch" style="background:#2a9d8f"></i>月末入居者数の実績（起点0人を含む）</span><span><i class="swatch" style="background:#6c5ce7"></i>破線＝予測</span></div>
       <details><summary>予測値を確認（${r.points.length}件）</summary><table><thead><tr><th>日付</th><th>予測入居者数</th></tr></thead><tbody>${r.points.map(p=>`<tr><td>${escapeHtml(p.date)}</td><td>${p.residents}</td></tr>`).join('')}</tbody></table></details>
       ${perTable}`;
 }
