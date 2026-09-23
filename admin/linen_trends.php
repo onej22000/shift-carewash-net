@@ -22,6 +22,98 @@ $facilities = $pdo->query(
      ORDER BY name"
 )->fetchAll(PDO::FETCH_ASSOC);
 
+// 入居者数の入力対象月：受託開始月〜当月の各月末。
+$currentMonthEnd = date('Y-m-t');
+$residentMonths = [];
+foreach ($facilities as $facility) {
+    $months = [];
+    $cursor = new DateTimeImmutable(substr((string) $facility['onboarding_start_date'], 0, 7) . '-01');
+    while (($monthEnd = $cursor->format('Y-m-t')) <= $currentMonthEnd) {
+        $months[] = $monthEnd;
+        $cursor = $cursor->modify('+1 month');
+    }
+    $residentMonths[(int) $facility['id']] = $months;
+}
+
+// 入居者数の保存（管理者のみ）。空欄は未入力に戻す＝行を削除。
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $facilityId = (int) ($_POST['facility_id'] ?? 0);
+    $redirect = '/admin/linen_trends.php' . (isset($residentMonths[$facilityId]) ? '?facility=' . $facilityId : '');
+    $input = $_POST['resident_count'] ?? [];
+    if (!$isAdmin) {
+        set_flash('error', '入居者数の入力・編集は管理者のみ可能です。');
+    } elseif (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
+        set_flash('error', '不正なリクエストです。画面を再読み込みしてやり直してください。');
+    } elseif (empty($residentMonths[$facilityId])) {
+        set_flash('error', '入居者数を入力できる施設・月が見つかりません。');
+    } elseif (!is_array($input) || array_diff(array_map('strval', array_keys($input)), $residentMonths[$facilityId])) {
+        set_flash('error', '入力対象外の月が含まれています。画面を再読み込みしてやり直してください。');
+    } else {
+        $errors = [];
+        $values = [];
+        foreach ($residentMonths[$facilityId] as $monthEnd) {
+            $raw = $input[$monthEnd] ?? '';
+            $raw = is_string($raw) ? trim($raw) : null;
+            if ($raw === '') {
+                $values[$monthEnd] = null;
+            } elseif ($raw !== null && preg_match('/\A\d{1,5}\z/', $raw)) {
+                $values[$monthEnd] = (int) $raw;
+            } else {
+                $errors[] = $monthEnd . '：0以上の整数で入力してください';
+            }
+        }
+        if ($errors) {
+            set_flash('error', '保存していません。' . implode(' ／ ', $errors));
+        } else {
+            $upsert = $pdo->prepare(
+                'INSERT INTO facility_resident_counts (facility_id, month_end_date, resident_count, created_by, updated_by)
+                 VALUES (:facility_id, :month_end_date, :resident_count, :created_by, :updated_by)
+                 ON DUPLICATE KEY UPDATE
+                     updated_by = IF(resident_count <> VALUES(resident_count), VALUES(updated_by), updated_by),
+                     resident_count = VALUES(resident_count)'
+            );
+            $delete = $pdo->prepare('DELETE FROM facility_resident_counts WHERE facility_id = :facility_id AND month_end_date = :month_end_date');
+            $pdo->beginTransaction();
+            try {
+                foreach ($values as $monthEnd => $count) {
+                    if ($count === null) {
+                        $delete->execute([':facility_id' => $facilityId, ':month_end_date' => $monthEnd]);
+                    } else {
+                        $upsert->execute([
+                            ':facility_id' => $facilityId, ':month_end_date' => $monthEnd, ':resident_count' => $count,
+                            ':created_by' => (int) $employee['id'], ':updated_by' => (int) $employee['id'],
+                        ]);
+                    }
+                }
+                $pdo->commit();
+                set_flash('success', '入居者数を保存しました。');
+            } catch (Throwable $e) {
+                $pdo->rollBack();
+                set_flash('error', '入居者数の保存に失敗しました。');
+            }
+        }
+    }
+    header('Location: ' . $redirect);
+    exit;
+}
+$flash = pop_flash();
+$csrfToken = $isAdmin ? csrf_token() : '';
+$requestedFacilityId = (int) ($_GET['facility'] ?? 0);
+
+// 入力済みの入居者数（対象月の範囲内のみ）。0も入力値として保持し、予測時に除外する。
+$residentCounts = [];
+foreach ($pdo->query('SELECT facility_id, month_end_date, resident_count FROM facility_resident_counts') as $row) {
+    $id = (int) $row['facility_id'];
+    if (isset($residentMonths[$id]) && in_array((string) $row['month_end_date'], $residentMonths[$id], true)) {
+        $residentCounts[$id][(string) $row['month_end_date']] = (int) $row['resident_count'];
+    }
+}
+$residentPayload = [];
+foreach ($facilities as $facility) {
+    $id = (int) $facility['id'];
+    $residentPayload[(string) $id] = ['months' => $residentMonths[$id], 'counts' => (object) ($residentCounts[$id] ?? [])];
+}
+
 // 集荷日単位で集計。未入力を含む日は部分合計を確定値として学習しない。
 $rows = $pdo->query(
     "SELECT cc.facility_id, cc.pickup_date, MAX(cc.arrival_date) AS arrival_date,
@@ -92,6 +184,14 @@ $payload = array_values($payload);
         th:first-child,td:first-child { text-align:left; }
         .empty { padding:42px 10px; color:var(--muted); text-align:center; }
         .note { color:var(--muted); font-size:.85rem; margin:12px 0 0; }
+        .message { padding:12px 14px; border-radius:8px; margin:0 0 16px; }
+        .message.success { background:#e7f6ec; color:#1e6b3a; border:1px solid #b7e1c4; }
+        .message.error { background:#fdecec; color:#9b1c1c; border:1px solid #f3b8b8; }
+        .resident-form details { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:10px; }
+        .resident-form summary { cursor:pointer; font-weight:700; color:var(--navy); }
+        .resident-form input[type=number] { width:110px; padding:7px 8px; border:1px solid #aebdc7; border-radius:6px; font-size:1rem; text-align:right; }
+        .resident-form button { margin-top:10px; padding:9px 18px; border:0; border-radius:8px; background:var(--navy); color:#fff; font-size:1rem; cursor:pointer; }
+        .excluded { color:var(--muted); }
         @media (max-width:600px) { main { padding:12px; } .updated { width:100%; margin-left:0; } }
     </style>
 </head>
@@ -101,6 +201,9 @@ $payload = array_values($payload);
     <nav>ログイン中: <?= htmlspecialchars((string) $employee['name'], ENT_QUOTES, 'UTF-8') ?>さん | <a href="<?= htmlspecialchars($dashboardPath, ENT_QUOTES, 'UTF-8') ?>">ダッシュボード</a> | <a href="<?= htmlspecialchars($logoutPath, ENT_QUOTES, 'UTF-8') ?>">ログアウト</a></nav>
 </header>
 <main>
+    <?php if ($flash !== null): ?>
+        <p class="message <?= htmlspecialchars($flash['type'], ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($flash['message'], ENT_QUOTES, 'UTF-8') ?></p>
+    <?php endif; ?>
     <section class="toolbar">
         <div>
             <label for="facility">表示する施設</label>
@@ -121,6 +224,46 @@ $payload = array_values($payload);
         <div class="updated">表示時点: <?= htmlspecialchars(date('Y-m-d H:i'), ENT_QUOTES, 'UTF-8') ?></div>
     </section>
     <section class="card" id="content"></section>
+    <section class="card" id="residentContent"></section>
+    <section class="card resident-form">
+        <h2>月末入居者数<?= $isAdmin ? 'の入力' : '（閲覧のみ）' ?></h2>
+        <p class="note">各月末日時点の入居者数です。受託開始月から当月末まで表示します。0と未入力の月は入居者数予測から除外します（0人としては計算しません）。<?= $isAdmin ? '空欄にして保存すると未入力に戻ります。' : '入力・編集は管理者のみ可能です。' ?></p>
+        <?php
+        $pendingNames = [];
+        foreach ($facilities as $facility):
+            $id = (int) $facility['id'];
+            if (!$residentMonths[$id]) { $pendingNames[] = (string) $facility['name']; continue; }
+            $counts = $residentCounts[$id] ?? [];
+            $entered = count(array_filter($counts, fn($c) => $c > 0));
+        ?>
+        <details<?= $requestedFacilityId === $id ? ' open' : '' ?>>
+            <summary><?= htmlspecialchars((string) $facility['name'], ENT_QUOTES, 'UTF-8') ?>（受託開始日：<?= htmlspecialchars((string) $facility['onboarding_start_date'], ENT_QUOTES, 'UTF-8') ?> ／ 予測に使える月：<?= $entered ?>件）</summary>
+            <?php if ($isAdmin): ?>
+            <form method="post" action="/admin/linen_trends.php">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                <input type="hidden" name="facility_id" value="<?= $id ?>">
+            <?php endif; ?>
+                <div class="chart-wrap"><table>
+                    <thead><tr><th>月末日</th><th>入居者数</th></tr></thead>
+                    <tbody>
+                    <?php foreach ($residentMonths[$id] as $monthEnd): $count = $counts[$monthEnd] ?? null; ?>
+                        <tr>
+                            <td><label for="resident-<?= $id ?>-<?= $monthEnd ?>"><?= htmlspecialchars($monthEnd, ENT_QUOTES, 'UTF-8') ?></label></td>
+                            <td><?php if ($isAdmin): ?><input type="number" id="resident-<?= $id ?>-<?= $monthEnd ?>" name="resident_count[<?= $monthEnd ?>]" min="0" max="99999" step="1" inputmode="numeric" value="<?= $count !== null ? $count : '' ?>"><?php else: ?><?= $count !== null ? $count . '人' : '未入力' ?><?php endif; ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table></div>
+            <?php if ($isAdmin): ?>
+                <button type="submit">この施設の入居者数を保存</button>
+            </form>
+            <?php endif; ?>
+        </details>
+        <?php endforeach; ?>
+        <?php if ($pendingNames): ?>
+            <p class="note">受託開始前のため入力対象の月がない施設：<?= htmlspecialchars(implode('、', $pendingNames), ENT_QUOTES, 'UTF-8') ?></p>
+        <?php endif; ?>
+    </section>
 </main>
 <script>
 const facilities = <?= json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -265,6 +408,9 @@ const escapeHtml=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&
 for(const f of [{id:'all',name:'全施設合計'},...facilities]) {
     const option=document.createElement('option'); option.value=f.id; option.textContent=f.name; select.appendChild(option);
 }
+// 入居者数の保存後は、保存した施設を選択した状態で戻す。
+const requestedFacility=<?= json_encode($requestedFacilityId > 0 ? (string) $requestedFacilityId : null) ?>;
+if(requestedFacility && facilities.some(f=>String(f.id)===requestedFacility)) select.value=requestedFacility;
 const model=buildModel(facilities);
 function calculationDetails(results,model,end) {
     if(model.error) return `<section><h3>予測の算出根拠</h3><p>${escapeHtml(model.error)}</p></section>`;
@@ -356,6 +502,122 @@ function render() {
 select.addEventListener('change',render);
 forecastDaysSelect.addEventListener('change',render);
 render();
+
+// ===== 入居者数推移予測（洗濯ネット予測とは独立に計算。ネット数⇔入居者数の換算はしない） =====
+const residents = <?= json_encode($residentPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+const residentContent=document.getElementById('residentContent');
+// 予測に使う実績：対象月のうち入居者数が0以外で入力された月末だけ。0・未入力は除外。
+function residentPoints(f) {
+    const r=residents[String(f.id)];
+    if(!r) return [];
+    return r.months.filter(m=>Number.isInteger(r.counts[m]) && r.counts[m]>0).map(m=>({date:m,residents:r.counts[m]}));
+}
+// 受託開始日＝0人を起点に含め、全データ点の最小二乗法で1日あたりの増加人数を出す。
+// 最新実績＋傾き×経過日数で延長し、上限はネット予測と同じ居室数×0.9（最新実績が上限超過なら最新値を維持）。
+function predictResidents(f, endDate, today) {
+    const actual=residentPoints(f);
+    if(!actual.length) return {actual, points:[], reason:'データなし'};
+    const data=[{date:f.startDate,residents:0},...actual].map(p=>({x:elapsed(p.date,f.startDate),y:p.residents}));
+    const mx=data.reduce((s,p)=>s+p.x,0)/data.length, my=data.reduce((s,p)=>s+p.y,0)/data.length;
+    const sxx=data.reduce((s,p)=>s+(p.x-mx)**2,0), sxy=data.reduce((s,p)=>s+(p.x-mx)*(p.y-my),0);
+    if(!(sxx>0)) return {actual, points:[], reason:'受託開始日と同じ日付の実績しかないため傾きを算出できません。'};
+    const slope=sxy/sxx, cap=f.roomCount*0.9, last=actual[actual.length-1];
+    const warnings=[];
+    if(!(cap>0)) warnings.push('居室数が未設定のため、上限なしで予測しています。');
+    else if(last.residents>cap) warnings.push('最新実績が居室数の90%を超えています。最新値を維持します。');
+    if(slope<0) warnings.push('傾きがマイナスのため減少方向の予測です（0人未満にはしません）。');
+    const valueAt=date=>{
+        let value=Math.max(0,last.residents+slope*elapsed(date,last.date));
+        if(cap>0) value=Math.min(Math.max(cap,last.residents),value);
+        return Math.round(value*10)/10;
+    };
+    // 予測点：最新実績日と本日より後の各月末、および予測期間末日。
+    const from=last.date>today?last.date:today, dates=[];
+    let cursor=new Date(time(from.slice(0,8)+'01'));
+    while(true) {
+        const monthEnd=dateAt(Date.UTC(cursor.getUTCFullYear(),cursor.getUTCMonth()+1,0));
+        if(monthEnd>endDate) break;
+        if(monthEnd>from) dates.push(monthEnd);
+        cursor=new Date(Date.UTC(cursor.getUTCFullYear(),cursor.getUTCMonth()+1,1));
+    }
+    if(endDate>from && !dates.includes(endDate)) dates.push(endDate);
+    return {actual, last, slope, cap, warnings, points:dates.map(date=>({date,residents:valueAt(date)}))};
+}
+// 1人あたりネット数：ネット推移予測と同じ指標（validPoints＝集荷日単位の確定済み返却準備ネット数合計）の、
+// 同じ月の最後の確定集荷日の値 ÷ 月末入居者数。0・未入力の月、確定集荷日のない月は算出しない。
+function netsPerResident(f) {
+    const r=residents[String(f.id)], nets=validPoints(f);
+    return (r?r.months:[]).map(m=>{
+        const count=Number.isInteger(r.counts[m])?r.counts[m]:null;
+        const inMonth=nets.filter(p=>p.date.slice(0,7)===m.slice(0,7) && p.date<=m);
+        const net=inMonth.length?inMonth[inMonth.length-1]:null;
+        return {month:m, count, net, ratio:count>0 && net?Math.round(net.nets/count*100)/100:null};
+    });
+}
+function residentChartSvg(actual, predicted, base, end, cap) {
+    const width=980,height=400,left=70,right=25,top=24,bottom=62;
+    const maxX=Math.max(1,elapsed(end,base));
+    const maxY=Math.max(4,cap>0?cap:0,...actual.concat(predicted).map(p=>p.residents));
+    const ceiling=Math.ceil(maxY/4)*4;
+    const sx=date=>left+elapsed(date,base)/maxX*(width-left-right);
+    const sy=value=>top+(1-value/ceiling)*(height-top-bottom);
+    const path=points=>points.map((p,i)=>`${i?'L':'M'} ${sx(p.date).toFixed(1)} ${sy(p.residents).toFixed(1)}`).join(' ');
+    let grid='';
+    for(let i=0;i<=4;i++) {
+        const y=top+i*(height-top-bottom)/4, x=left+i*(width-left-right)/4;
+        const date=dateAt(time(base)+Math.round(maxX*i/4)*DAY);
+        grid+=`<line x1="${left}" y1="${y}" x2="${width-right}" y2="${y}" stroke="#d9e2e8" stroke-dasharray="4 4"/><text x="${left-12}" y="${y+4}" text-anchor="end" fill="#667085" font-size="12">${ceiling*(4-i)/4}</text><text x="${x}" y="${height-bottom+23}" text-anchor="middle" fill="#667085" font-size="12">${date}</text>`;
+    }
+    const capLine=cap>0?`<line x1="${left}" y1="${sy(cap)}" x2="${width-right}" y2="${sy(cap)}" stroke="#b42318" stroke-dasharray="2 5"/><text x="${width-right}" y="${sy(cap)-6}" text-anchor="end" fill="#b42318" font-size="12">居室数×0.9＝${Math.round(cap*10)/10}人</text>`:'';
+    const dots=(points,color)=>points.map(p=>`<circle cx="${sx(p.date)}" cy="${sy(p.residents)}" r="3.5" fill="${color}"><title>${escapeHtml(p.date)}: ${p.residents}人</title></circle>`).join('');
+    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="月末入居者数の実績と予測">${grid}${capLine}<path d="${path(actual)}" fill="none" stroke="#2a9d8f" stroke-width="3"/>${dots(actual,'#2a9d8f')}<path d="${path(predicted)}" fill="none" stroke="#6c5ce7" stroke-width="3" stroke-dasharray="9 7"/>${dots(predicted,'#6c5ce7')}<text x="490" y="${height-12}" text-anchor="middle" fill="#495867">日付（縦軸：入居者数・人）</text></svg>`;
+}
+function renderResidents() {
+    if(!facilities.length) {residentContent.innerHTML='';return;}
+    const all=select.value==='all';
+    const selected=all?facilities:facilities.filter(f=>String(f.id)===select.value);
+    const horizon=Number(forecastDaysSelect.value), end=dateAt(time(today)+horizon*DAY);
+    const results=selected.map(f=>({f,...predictResidents(f,end,today)}));
+    const fmt=n=>Number(n).toFixed(2);
+    const intro=`<h2>入居者数推移予測</h2><p class="note">洗濯ネット推移予測とは別に、月末入居者数の実績だけから計算します（1人で複数ネットを使う方がいるため、ネット数と入居者数は換算しません）。受託開始日を0人の起点とし、0以外で入力された月末の実績と合わせて最小二乗法で1日あたりの増加人数を求め、最新実績から延長します。上限は居室数×0.9です。0・未入力の月は計算に使いません。</p>`;
+    if(all) {
+        const rows=results.map(r=>{
+            const endPoint=r.points.length?r.points[r.points.length-1]:null;
+            return `<tr><td>${escapeHtml(r.f.name)}</td><td>${r.actual.length}</td><td>${r.last?`${escapeHtml(r.last.date)}：${r.last.residents}人`:'—'}</td><td>${r.reason?'—':fmt(r.slope)}</td><td>${r.f.roomCount>0?fmt(r.f.roomCount*0.9):'未設定'}</td><td>${r.reason?escapeHtml(r.reason):endPoint?endPoint.residents+'人':'—'}</td></tr>`;
+        }).join('');
+        const usable=results.filter(r=>!r.reason && r.points.length);
+        const total=Math.round(usable.reduce((s,r)=>s+r.points[r.points.length-1].residents,0)*10)/10;
+        residentContent.innerHTML=`${intro}
+          <p>期間末（${escapeHtml(end)}）の予測合計：<strong>${usable.length?total+'人':'データなし'}</strong>${usable.length?`（予測できた${usable.length}施設の合計。データなし等の${results.length-usable.length}施設は含みません）`:''}</p>
+          <div class="chart-wrap"><table><thead><tr><th>施設</th><th>予測に使う月数</th><th>最新実績</th><th>傾き（人/日）</th><th>90%上限</th><th>期間末予測</th></tr></thead><tbody>${rows}</tbody></table></div>
+          <p class="note">施設を選ぶと、グラフと1人あたりネット数を表示します。</p>`;
+        return;
+    }
+    const r=results[0], f=r.f;
+    const perResident=netsPerResident(f);
+    const perRows=perResident.map(p=>`<tr><td>${escapeHtml(p.month)}</td><td>${p.count===null?'未入力':p.count+'人'}</td><td>${p.count>0?'○':`<span class="excluded">除外（${p.count===null?'未入力':'0人'}）</span>`}</td><td>${p.net?`${escapeHtml(p.net.date)}：${p.net.nets}`:'—'}</td><td>${p.ratio!==null?fmt(p.ratio):'—'}</td></tr>`).join('');
+    const perTable=perResident.length?`<h3>月別実績と入居者1人あたりのネット数（参考値）</h3>
+      <div class="chart-wrap"><table><thead><tr><th>月末日</th><th>入居者数</th><th>予測に使用</th><th>同月の最終確定集荷日：ネット数</th><th>1人あたりネット数</th></tr></thead><tbody>${perRows}</tbody></table></div>
+      <p class="note">ネット数は洗濯ネット推移予測と同じ指標（集荷日ごとの返却準備ネット数の合計。未入力を含む日・到着日未確定の日は除外）で、その月の最後の確定集荷日の1回量です。1人あたりネット数は参考値で、予測には使いません。</p>`:'<p class="note">受託開始前のため、入力対象の月はまだありません。</p>';
+    if(r.reason) {
+        residentContent.innerHTML=`${intro}<h3>${escapeHtml(f.name)}</h3><div class="empty">${escapeHtml(r.reason)}</div>${perTable}`;
+        return;
+    }
+    const actualLine=[{date:f.startDate,residents:0},...r.actual];
+    const predicted=r.points.length?[r.last,...r.points]:[];
+    const base=[f.startDate,today,...predicted.map(p=>p.date)].sort()[0];
+    const endPoint=r.points.length?r.points[r.points.length-1]:null;
+    residentContent.innerHTML=`${intro}<h3>${escapeHtml(f.name)}</h3>
+      <p>起点：${escapeHtml(f.startDate)}＝0人 ／ 予測に使う実績：${r.actual.length}か月 ／ 傾き：<strong>${fmt(r.slope)}人/日</strong>（約${(r.slope*30).toFixed(1)}人/30日） ／ 90%上限：${r.cap>0?Math.round(r.cap*10)/10+'人':'未設定'} ／ 期間末（${escapeHtml(end)}）の予測：<strong>${endPoint?endPoint.residents+'人':'—'}</strong></p>
+      ${r.warnings.length?`<p class="note" role="status">${r.warnings.map(escapeHtml).join('<br>')}</p>`:''}
+      <div class="chart-wrap">${residentChartSvg(actualLine,predicted,base,end,r.cap)}</div>
+      <div class="legend"><span><i class="swatch" style="background:#2a9d8f"></i>月末入居者数の実績（起点0人を含む）</span><span><i class="swatch" style="background:#6c5ce7"></i>破線＝予測</span></div>
+      <details><summary>予測値を確認（${r.points.length}件）</summary><table><thead><tr><th>日付</th><th>予測入居者数</th></tr></thead><tbody>${r.points.map(p=>`<tr><td>${escapeHtml(p.date)}</td><td>${p.residents}</td></tr>`).join('')}</tbody></table></details>
+      ${perTable}`;
+}
+select.addEventListener('change',renderResidents);
+forecastDaysSelect.addEventListener('change',renderResidents);
+renderResidents();
 
 </script>
 </body>
