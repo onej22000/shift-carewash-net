@@ -1,49 +1,17 @@
 <?php
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/functions.php';
+require_once __DIR__ . '/../includes/consumable_stock_common.php';
 
 $staff = require_login('staff');
 $pdo = getPdo();
 
 // 消耗品品目マスタ（consumable_items、管理者の /admin/consumable_items.php で管理）から取得する。
 // $itemLabels は無効化された品目も含む全品目（履歴表示用）、$activeItemLabels は有効な品目のみ
-// （現在庫の集計・実在庫補正フォームの対象用）。
+// （現在庫の集計・新規登録フォームの対象用）。品目一覧・在庫計算・増減理由等の定数は
+// includes/consumable_stock_common.php に共通化してある（admin/consumable_stock.phpと同じ物を使う）。
 $itemLabels = get_consumable_item_labels($pdo);
 $activeItemLabels = get_consumable_item_labels($pdo, true);
-
-const CONSUMABLE_STOCK_LOCATION_LABELS = [
-    'warehouse' => '倉庫＋車',
-    'jiro' => 'フトン巻きのジロー',
-];
-
-const JIRO_FACILITY_NAME = 'フトン巻きのジロー';
-
-function get_effective_consumable_stock(PDO $pdo, string $stockLocation, string $itemType): int
-{
-    $stmt = $pdo->prepare(
-        "SELECT COALESCE(SUM(delta), 0) FROM (
-             SELECT quantity AS delta FROM consumable_stock_transactions
-             WHERE stock_location = ? AND item_type = ? AND canceled_at IS NULL
-             UNION ALL
-             SELECT -t.quantity AS delta FROM consumable_stock_transactions t
-             INNER JOIN facilities f ON f.id = t.facility_id
-             WHERE ? = 'jiro' AND t.stock_location = 'warehouse' AND t.item_type = ?
-               AND t.reason IN ('issuance_to_facility', 'return_from_facility')
-               AND f.name = ? AND t.canceled_at IS NULL
-         ) effective_stock"
-    );
-    $stmt->execute([$stockLocation, $itemType, $stockLocation, $itemType, JIRO_FACILITY_NAME]);
-    return (int) $stmt->fetchColumn();
-}
-
-const CONSUMABLE_REASON_LABELS = [
-    'purchase' => '購入',
-    'return_from_facility' => '施設等からの返却',
-    'disposal' => '廃棄',
-    'loss' => '紛失',
-    'issuance_to_facility' => '施設等への交付',
-    'stock_adjustment' => '実在庫への補正',
-];
 
 const CONSUMABLE_EDIT_TYPE_LABELS = [
     'purchase' => '購入（在庫を増やす）',
@@ -99,6 +67,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 set_flash('success', '入力された実数は現在庫と同じため、変更はありません。');
             }
+            header('Location: /staff/consumable_stock.php');
+            exit;
+        }
+    } elseif ((string) ($_POST['action'] ?? '') === 'create') {
+        // 在庫記録の追加（入庫）・交付（出庫）。admin/consumable_stock.phpの新規登録と
+        // 同じ共通処理（parse_consumable_stock_input/ensure_consumable_stock_sufficient/
+        // insert_consumable_stock_transaction、includes/consumable_stock_common.php）を使う。
+        [$createValues, $createParseErrors] = parse_consumable_stock_input($_POST, $validFacilityIds, array_keys($activeItemLabels));
+
+        if (empty($createParseErrors)) {
+            $insufficientStockError = ensure_consumable_stock_sufficient(
+                $pdo,
+                $createValues['stock_location'],
+                $createValues['item_type'],
+                (int) $createValues['quantity']
+            );
+            if ($insufficientStockError !== null) {
+                $createParseErrors[] = $insufficientStockError;
+            }
+        }
+
+        if (!empty($createParseErrors)) {
+            $errorMessage = implode(' ', $createParseErrors);
+        } else {
+            insert_consumable_stock_transaction($pdo, $createValues, $staff['id']);
+            set_flash('success', '在庫記録を登録しました。');
             header('Location: /staff/consumable_stock.php');
             exit;
         }
@@ -187,30 +181,30 @@ $flash = pop_flash();
 $csrfToken = csrf_token();
 
 // ---- 現在庫の集計 ----
-$stockTotals = [];
-foreach (CONSUMABLE_STOCK_LOCATION_LABELS as $locationKey => $_locationLabel) {
-    $stockTotals[$locationKey] = array_fill_keys(array_keys($activeItemLabels), 0);
-}
-$totalsStmt = $pdo->prepare(
-    "SELECT stock_location, item_type, SUM(quantity) AS total FROM (
-         SELECT stock_location, item_type, quantity FROM consumable_stock_transactions WHERE canceled_at IS NULL
-         UNION ALL
-         SELECT 'jiro', t.item_type, -t.quantity FROM consumable_stock_transactions t
-         INNER JOIN facilities f ON f.id = t.facility_id
-         WHERE t.stock_location = 'warehouse'
-           AND t.reason IN ('issuance_to_facility', 'return_from_facility')
-           AND f.name = ? AND t.canceled_at IS NULL
-     ) effective_stock GROUP BY stock_location, item_type"
-);
-$totalsStmt->execute([JIRO_FACILITY_NAME]);
-foreach ($totalsStmt->fetchAll() as $row) {
-    $stockTotals[$row['stock_location']][$row['item_type']] = (int) $row['total'];
+$stockTotals = calc_consumable_stock_totals($pdo, array_keys($activeItemLabels));
+
+// ---- 在庫記録の追加フォームの初期値（admin/consumable_stock.phpの新規登録フォームと同じ形） ----
+$formItemType = '';
+$formStockLocation = 'warehouse';
+$formQuantity = '';
+$formReason = '';
+$formFacilityId = '';
+$formTransactionDate = (new DateTime())->format('Y-m-d');
+$formNote = '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $errorMessage !== '' && (string) ($_POST['action'] ?? '') === 'create') {
+    $formItemType = (string) ($_POST['item_type'] ?? '');
+    $formStockLocation = (string) ($_POST['stock_location'] ?? 'warehouse');
+    $formQuantity = (string) ($_POST['quantity'] ?? '');
+    $formReason = (string) ($_POST['reason'] ?? '');
+    $formFacilityId = (string) ($_POST['facility_id'] ?? '');
+    $formTransactionDate = (string) ($_POST['transaction_date'] ?? '');
+    $formNote = (string) ($_POST['note'] ?? '');
 }
 
 // ---- 一覧の取得（取り消し済みの記録は従業員には表示しない） ----
 $listStmt = $pdo->query(
     "SELECT t.id, t.item_type, t.stock_location, t.quantity, t.reason, t.facility_id, t.transaction_date, t.note, t.created_at,
-            creator.name AS created_by_name, f.name AS facility_name
+            creator.name AS created_by_name, creator.role AS created_by_role, f.name AS facility_name
      FROM consumable_stock_transactions t
      INNER JOIN employees creator ON creator.id = t.created_by
      LEFT JOIN facilities f ON f.id = t.facility_id
@@ -265,6 +259,7 @@ $records = $listStmt->fetchAll();
         .record-edit-grid label { display: block; font-size: 0.82em; font-weight: bold; margin-bottom: 2px; }
         .record-edit-grid input, .record-edit-grid select { box-sizing: border-box; width: 100%; padding: 5px; }
         .danger { color: #b3261e; }
+        .role-badge { font-size: 0.85em; color: #777; }
     </style>
 </head>
 <body>
@@ -315,6 +310,83 @@ $records = $listStmt->fetchAll();
         <?php endforeach; ?>
         </tbody>
     </table>
+</section>
+
+<section class="stock-form">
+    <h2>在庫記録の追加（入庫・交付）</h2>
+    <fieldset>
+        <form method="post" action="/staff/consumable_stock.php">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+            <input type="hidden" name="action" value="create">
+
+            <div class="form-row">
+                <label for="item_type">品目</label>
+                <select id="item_type" name="item_type" required>
+                    <option value="">選択してください</option>
+                    <?php foreach ($activeItemLabels as $itemType => $label): ?>
+                        <option value="<?= htmlspecialchars($itemType, ENT_QUOTES, 'UTF-8') ?>" <?= $formItemType === $itemType ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div class="form-row">
+                <label for="stock_location">在庫場所</label>
+                <select id="stock_location" name="stock_location" required>
+                    <?php foreach (CONSUMABLE_STOCK_LOCATION_LABELS as $locationKey => $locationLabel): ?>
+                        <option value="<?= htmlspecialchars($locationKey, ENT_QUOTES, 'UTF-8') ?>" <?= $formStockLocation === $locationKey ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($locationLabel, ENT_QUOTES, 'UTF-8') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div class="form-row">
+                <label for="quantity">増減数</label>
+                <input type="number" id="quantity" name="quantity" step="1" min="1" value="<?= htmlspecialchars($formQuantity, ENT_QUOTES, 'UTF-8') ?>" required>
+                <div style="font-size:0.8em;color:#777;">常に正の数（増減の大きさ）を入力してください。在庫が増えるか減るかは増減理由から自動判定されます：購入・施設等からの返却＝在庫＋／廃棄・紛失・施設等への交付＝在庫－。</div>
+            </div>
+
+            <div class="form-row">
+                <label for="reason">増減理由</label>
+                <select id="reason" name="reason" required>
+                    <option value="">選択してください</option>
+                    <?php foreach (CONSUMABLE_REASON_SIGN as $reasonKey => $_reasonSign): ?>
+                        <?php $reasonLabel = CONSUMABLE_REASON_LABELS[$reasonKey]; ?>
+                        <option value="<?= htmlspecialchars($reasonKey, ENT_QUOTES, 'UTF-8') ?>" <?= $formReason === $reasonKey ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($reasonLabel, ENT_QUOTES, 'UTF-8') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div class="form-row">
+                <label for="facility_id">対象施設等</label>
+                <select id="facility_id" name="facility_id">
+                    <option value="">（該当なし）</option>
+                    <?php foreach ($facilities as $facility): ?>
+                        <option value="<?= (int) $facility['id'] ?>" <?= $formFacilityId === (string) $facility['id'] ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <div style="font-size:0.8em;color:#777;">「施設等からの返却」「施設等への交付」を選んだ場合は必須です。</div>
+            </div>
+
+            <div class="form-row">
+                <label for="transaction_date">発生日</label>
+                <input type="date" id="transaction_date" name="transaction_date" value="<?= htmlspecialchars($formTransactionDate, ENT_QUOTES, 'UTF-8') ?>" required>
+            </div>
+
+            <div class="form-row">
+                <label for="note">備考</label>
+                <input type="text" id="note" name="note" maxlength="255" value="<?= htmlspecialchars($formNote, ENT_QUOTES, 'UTF-8') ?>">
+            </div>
+
+            <button type="submit">登録する</button>
+        </form>
+    </fieldset>
 </section>
 
 <section class="record-list" id="stock-history">
@@ -369,7 +441,10 @@ $records = $listStmt->fetchAll();
                         <td><?= htmlspecialchars(CONSUMABLE_REASON_LABELS[$record['reason']] ?? $record['reason'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= $record['facility_name'] !== null ? htmlspecialchars($record['facility_name'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
                         <td><?= $record['note'] !== null ? htmlspecialchars($record['note'], ENT_QUOTES, 'UTF-8') : '-' ?></td>
-                        <td><?= htmlspecialchars($record['created_by_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td>
+                            <?= htmlspecialchars($record['created_by_name'], ENT_QUOTES, 'UTF-8') ?>
+                            <span class="role-badge">(<?= htmlspecialchars(CONSUMABLE_STOCK_ROLE_LABELS[$record['created_by_role']] ?? $record['created_by_role'], ENT_QUOTES, 'UTF-8') ?>)</span>
+                        </td>
                         <td class="record-actions">
                             <?php if ($isManualEditable): ?>
                                 <button type="button" onclick="toggleTransactionEdit(<?= (int) $record['id'] ?>)">編集</button>
