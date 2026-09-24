@@ -438,17 +438,21 @@ function calculationDetails(results,model,end) {
       <details open><summary>施設別の計算内訳（${escapeHtml(end)}まで）</summary><div class="chart-wrap"><table><thead><tr><th>施設</th><th>初回集荷日</th><th>最新実績日：ネット数</th><th>90%上限</th><th>予測最終回</th><th>上限適用前の増分・新施設は予測量</th><th>期間末予測</th></tr></thead><tbody>${facilityRows}</tbody></table></div></details>
       </section>`;
 }
+// 縦軸の最大値：表示する全系列（ネット・入居者の実績と予測）の最大値に約10%の余白を足し、4等分で整数の目盛りになるよう切り上げる。
+// 90%上限はここに含めない（縦軸の範囲に入るときだけ線を引く）。
+function chartCeiling(actual, predicted, res) {
+    const values=actual.concat(predicted).filter(p=>p.nets!==null).map(p=>p.nets)
+        .concat(res?res.actual.concat(res.predicted).map(p=>p.residents):[]);
+    return Math.ceil(Math.max(4,...values)*1.1/4)*4;
+}
 // ネット数と入居者数を1本の軸（数）に同じ目盛りで重ねる。
 // res：入居者数の系列（null＝データなし）。cap：90%上限＝居室数×0.9（未設定なら null）。
+// 90%上限が縦軸の範囲に入るときは破線、入らないときはグラフ上部に文字で表示する。
 function chartSvg(actual, predicted, base, end, res, cap) {
     const width=980,height=440,left=70,right=45,top=24,bottom=62;
     const netColor='#f28e2b', resColor='#8e44ad', capColor='#b42318';
     const maxX=Math.max(1,elapsed(end,base));
-    const values=actual.concat(predicted).filter(p=>p.nets!==null).map(p=>p.nets)
-        .concat(res?res.actual.concat(res.predicted).map(p=>p.residents):[]);
-    // 90%上限と全系列の最大値のうち大きい方に5%の余白を足し、4等分で整数の目盛りになるよう切り上げる。
-    const maxY=Math.max(4,cap>0?cap:0,...values);
-    const ceiling=Math.ceil(maxY*1.05/4)*4;
+    const ceiling=chartCeiling(actual,predicted,res), capVisible=cap>0 && cap<=ceiling;
     const sx=date=>left+elapsed(date,base)/maxX*(width-left-right);
     const sy=value=>top+(1-value/ceiling)*(height-top-bottom);
     function path(points,key) {
@@ -471,7 +475,8 @@ function chartSvg(actual, predicted, base, end, res, cap) {
     let layers='';
     if(cap>0) {
         const capText=Math.round(cap*10)/10;
-        layers+=`<line x1="${left}" y1="${sy(cap)}" x2="${width-right}" y2="${sy(cap)}" stroke="${capColor}" stroke-width="1.5" stroke-dasharray="6 5"><title>90%上限（居室数×0.9） ${capText}</title></line><text x="${width-right-6}" y="${sy(cap)-6}" text-anchor="end" fill="${capColor}" font-size="12">90%上限（居室数×0.9）${capText}</text>`;
+        if(!capVisible) layers+=`<text x="${width-right}" y="14" text-anchor="end" fill="${capColor}" font-size="12">90%上限：${capText}</text>`;
+        else layers+=`<line x1="${left}" y1="${sy(cap)}" x2="${width-right}" y2="${sy(cap)}" stroke="${capColor}" stroke-width="1.5" stroke-dasharray="6 5"><title>90%上限（居室数×0.9） ${capText}</title></line><text x="${width-right-6}" y="${sy(cap)-6}" text-anchor="end" fill="${capColor}" font-size="12">90%上限（居室数×0.9）${capText}</text>`;
     }
     layers+=`<path d="${path(actual,'nets')}" fill="none" stroke="${netColor}" stroke-width="3"/><path d="${path(predicted,'nets')}" fill="none" stroke="${netColor}" stroke-width="3" stroke-dasharray="9 7"/>`;
     if(res) layers+=`<path d="${path(res.actual,'residents')}" fill="none" stroke="${resColor}" stroke-width="3"/><path d="${path(res.predicted,'residents')}" fill="none" stroke="${resColor}" stroke-width="3" stroke-dasharray="9 7"/>`;
@@ -483,24 +488,30 @@ function chartSvg(actual, predicted, base, end, res, cap) {
 function legendSwatch(color, dash, dot) {
     return `<svg class="swatch" viewBox="0 0 30 10" aria-hidden="true"><line x1="1" y1="5" x2="29" y2="5" stroke="${color}" stroke-width="${dash==='cap'?1.5:3}"${dash?` stroke-dasharray="${dash==='cap'?'4 3':'6 4'}"`:''}/>${dot?`<circle cx="15" cy="5" r="3.5" fill="${color}"/>`:''}</svg>`;
 }
-// グラフ用の入居者数系列。施設別はその施設、全施設は予測できた施設だけを日付ごとに合算。
-// 実績は各施設の最新入力値を持ち越し（受託開始日＝0人）、予測は最新実績日より後を予測値で置き換える。
+// グラフ用の入居者数系列。施設別はその施設、全施設は実績から予測した施設と他施設ペースで推定した施設を日付ごとに合算。
+// 実績は実績のある施設の最新入力値を持ち越し（受託開始日＝0人）、予測は最新実績日より後を予測値・推定値で置き換える。
 function residentSeries(selected, end) {
-    const results=selected.map(f=>({f,...predictResidents(f,end,today)})).filter(r=>!r.reason);
+    const pace=residentPace();
+    const results=selected.map(f=>({f,...residentForecast(f,pace,end)})).filter(r=>!r.reason);
     if(!results.length) return null;
     const round=n=>Math.round(n*10)/10;
+    const measured=results.filter(r=>!r.estimated);
+    const counts={measured:measured.length, estimated:results.length-measured.length};
     if(selected.length===1) {
         const r=results[0];
-        return {actual:[{date:r.f.startDate,residents:0},...r.actual], predicted:r.points.length?[r.last,...r.points]:[], count:1};
+        // 推定施設は実績の線を持たない。受託開始日が過去なら開始日＝0人から予測線を引く。
+        if(r.estimated) return {actual:[], predicted:r.f.startDate<r.points[0].date?[{date:r.f.startDate,residents:0},...r.points]:r.points, ...counts};
+        return {actual:[{date:r.f.startDate,residents:0},...r.actual], predicted:r.points.length?[r.last,...r.points]:[], ...counts};
     }
     const carry=(r,date)=>{ const a=r.actual.filter(p=>p.date<=date); return a.length?a[a.length-1].residents:0; };
-    const levelAt=(r,date)=>date>r.last.date?r.valueAt(date):carry(r,date);
-    const actualDates=[...new Set(results.flatMap(r=>[r.f.startDate,...r.actual.map(p=>p.date)]))].sort();
-    const actual=actualDates.map(date=>({date,residents:round(results.reduce((s,r)=>s+carry(r,date),0))}));
-    const anchor=actual[actual.length-1];
-    const forecastDates=[...new Set(results.flatMap(r=>r.points.map(p=>p.date)))].filter(date=>date>anchor.date).sort();
-    const predicted=forecastDates.map(date=>({date,residents:round(results.reduce((s,r)=>s+levelAt(r,date),0))}));
-    return {actual, predicted:predicted.length?[anchor,...predicted]:[], count:results.length};
+    const levelAt=(r,date)=>r.estimated||date>r.last.date?r.valueAt(date):carry(r,date);
+    const actualDates=[...new Set(measured.flatMap(r=>[r.f.startDate,...r.actual.map(p=>p.date)]))].sort();
+    const actual=actualDates.map(date=>({date,residents:round(measured.reduce((s,r)=>s+carry(r,date),0))}));
+    const anchor=actual.length?actual[actual.length-1]:null;
+    const totalAt=date=>({date,residents:round(results.reduce((s,r)=>s+levelAt(r,date),0))});
+    const forecastDates=[...new Set(results.flatMap(r=>r.points.map(p=>p.date)))].filter(date=>!anchor || date>anchor.date).sort();
+    const predicted=forecastDates.map(totalAt);
+    return {actual, predicted:predicted.length && anchor?[totalAt(anchor.date),...predicted]:predicted, ...counts};
 }
 function render() {
     if(!facilities.length) {content.innerHTML='<div class="empty">受託開始日が登録された施設はありません。</div>';return;}
@@ -532,14 +543,16 @@ function render() {
     const lastForecast=rawForecast.filter(p=>p.nets!==null).slice(-1)[0];
     // グラフの90%上限線：全施設は全施設の居室数合計×0.9、施設別はその施設の居室数×0.9。居室数未設定があれば引かない。
     const cap=configured.length===selected.length && rooms>0?rooms*0.9:null;
-    const resLabel=all&&res?`入居者数（${res.count}施設分の合計）`:'入居者数';
+    const resLabel=!res?'':all?`入居者数（実績${res.measured}施設＋推定${res.estimated}施設）`:res.estimated?'入居者数（他施設ペースで推定）':'入居者数';
+    const capVisible=cap>0 && cap<=chartCeiling(actual,predicted,res);
+    const resMissing=res?selected.length-res.measured-res.estimated:0;
     content.innerHTML=`<h2>${escapeHtml(title)}</h2>
       <p>${escapeHtml(summary)}</p><p>対象：${selected.length}施設 ／ 登録居室数合計：${rooms}室${configured.length<selected.length?'（設定済み施設のみ）':''} ／ 90%合計上限：${capacityText} ／ 期間末の予測：${lastForecast?lastForecast.nets+'ネット':'算出不可'}</p><p class="note">${escapeHtml(modelNote)}</p>
       ${warnings.length?`<p class="note" role="status">${warnings.map(escapeHtml).join('<br>')}</p>`:''}
       <div class="meta"><div><span>実績の記録日数</span><strong>${actual.length}日</strong></div><div><span>直近の1回量合計</span><strong>${registered.length?registered[registered.length-1].nets:'—'}</strong></div><div><span>予測期間</span><strong>本日から${horizon}日先まで</strong></div></div>
       <div class="chart-wrap">${chartSvg(actual,predicted,base,end,res,cap)}</div>
-      <div class="legend"><span>${legendSwatch('#f28e2b','',true)}ネット：実績</span><span>${legendSwatch('#f28e2b','net',false)}ネット：予測（新施設を含む）</span>${res?`<span>${legendSwatch('#8e44ad','',true)}${escapeHtml(resLabel)}：実績</span><span>${legendSwatch('#8e44ad','res',false)}${escapeHtml(resLabel)}：予測</span>`:''}${cap?`<span>${legendSwatch('#b42318','cap',false)}90%上限（居室数×0.9）</span>`:''}</div>
-      ${res?(all?`<p class="note">入居者数：${res.count}施設分の合計（入居者数が入力され予測できた施設のみ。データなしの${selected.length-res.count}施設は含みません）</p>`:''):'<p class="note">入居者数：データなし</p>'}
+      <div class="legend"><span>${legendSwatch('#f28e2b','',true)}ネット：実績</span><span>${legendSwatch('#f28e2b','net',false)}ネット：予測（新施設を含む）</span>${res?`${res.actual.length?`<span>${legendSwatch('#8e44ad','',true)}${escapeHtml(resLabel)}：実績</span>`:''}<span>${legendSwatch('#8e44ad','res',false)}${escapeHtml(resLabel)}：予測</span>`:''}${capVisible?`<span>${legendSwatch('#b42318','cap',false)}90%上限（居室数×0.9）</span>`:''}</div>
+      ${res?(all?`<p class="note">入居者数：実績${res.measured}施設＋推定${res.estimated}施設の合計。推定は入居者数が未入力の施設で、実績のある施設の平均ペース×居室数×受託開始日からの日数で算出します（開始日までは0人、上限は居室数×0.9）。${resMissing?`データなしの${resMissing}施設は含みません。`:''}</p>`:(res.estimated?'<p class="note">入居者数：実績が未入力のため、他施設ペースで推定しています。</p>':'')):'<p class="note">入居者数：データなし</p>'}
       ${calculationDetails(results,model,end)}
       <p class="note">開始日の次の集荷日を第1回とし、枚方長尾の各サイクルのネット増加数をそのまま各施設に適用します。居室数で増加数を倍率補正しません。居室数の90%は上限だけに使うため、小さい施設ほど早く到達します。観測範囲の先は直近約8サイクルの平均増加数を使います。全施設の線は各施設の直近1回量を持ち越した合計で、当日の集荷量や累計枚数ではありません。過去に一度も実績がない稼働施設を含む期間は実績合計を未確定にします。1人1回1ネットの仮定です。</p>
       <table><thead><tr><th>集荷日</th><th>1回量（全施設では直近値合計）</th></tr></thead><tbody>${actual.map(p=>`<tr><td>${escapeHtml(p.date)}</td><td>${p.nets??'—'}</td></tr>`).join('')}</tbody></table>
@@ -589,6 +602,37 @@ function predictResidents(f, endDate, today) {
     if(endDate>from && !dates.includes(endDate)) dates.push(endDate);
     return {actual, last, slope, cap, warnings, valueAt, points:dates.map(date=>({date,residents:valueAt(date)}))};
 }
+// 基準ペース：自分の実績から予測できた施設それぞれの「傾き（人/日）÷居室数」の平均。該当施設がなければ null（全施設データなし）。
+function residentPace() {
+    const sources=facilities.map(f=>({f,...predictResidents(f,today,today)})).filter(r=>!r.reason && r.f.roomCount>0)
+        .map(r=>({name:r.f.name,rate:r.slope/r.f.roomCount}));
+    return sources.length?{rate:sources.reduce((s,p)=>s+p.rate,0)/sources.length, sources}:null;
+}
+// 入居者数が未入力の施設の推定：居室数×基準ペース×受託開始日からの日数。受託開始日までは0人、上限は居室数×0.9。
+// 予測点：本日、本日より後の各月末、期間内の受託開始日・上限到達日、予測期間末日。
+function estimateResidents(f, pace, endDate, today) {
+    if(!pace) return {actual:[], points:[], reason:'データなし'};
+    if(!(f.roomCount>0)) return {actual:[], points:[], reason:'データなし（居室数が未設定のため推定できません）'};
+    const cap=f.roomCount*0.9, slope=f.roomCount*pace.rate, warnings=[];
+    if(!(slope>0)) warnings.push('基準ペースが0以下のため、推定値は0人のままです。');
+    const valueAt=date=>Math.round(Math.min(cap,Math.max(0,slope*elapsed(date,f.startDate)))*10)/10;
+    const dates=new Set([today,endDate]);
+    let cursor=new Date(time(today.slice(0,8)+'01'));
+    while(true) {
+        const monthEnd=dateAt(Date.UTC(cursor.getUTCFullYear(),cursor.getUTCMonth()+1,0));
+        if(monthEnd>endDate) break;
+        if(monthEnd>today) dates.add(monthEnd);
+        cursor=new Date(Date.UTC(cursor.getUTCFullYear(),cursor.getUTCMonth()+1,1));
+    }
+    const capDate=slope>0?dateAt(time(f.startDate)+Math.ceil(cap/slope)*DAY):null;
+    for(const d of [f.startDate,capDate]) if(d && d>today && d<=endDate) dates.add(d);
+    return {actual:[], last:null, slope, cap, warnings, valueAt, estimated:true, points:[...dates].sort().map(date=>({date,residents:valueAt(date)}))};
+}
+// 実績のある施設は自分の実績から予測（従来どおり）。入居者数が未入力の施設だけ他施設ペースで推定する。
+function residentForecast(f, pace, endDate) {
+    const r=predictResidents(f,endDate,today);
+    return r.reason==='データなし'?estimateResidents(f,pace,endDate,today):{...r, estimated:false};
+}
 // 1人あたりネット数：ネット推移予測と同じ指標（validPoints＝集荷日単位の確定済み返却準備ネット数合計）の、
 // 同じ月の最後の確定集荷日の値 ÷ 月末入居者数。0・未入力の月、確定集荷日のない月は算出しない。
 function netsPerResident(f) {
@@ -605,20 +649,27 @@ function renderResidents() {
     const all=select.value==='all';
     const selected=all?facilities:facilities.filter(f=>String(f.id)===select.value);
     const horizon=Number(forecastDaysSelect.value), end=dateAt(time(today)+horizon*DAY);
-    const results=selected.map(f=>({f,...predictResidents(f,end,today)}));
+    const pace=residentPace();
+    const results=selected.map(f=>({f,...residentForecast(f,pace,end)}));
     const fmt=n=>Number(n).toFixed(2);
-    const intro=`<h2>入居者数推移予測</h2><p class="note">洗濯ネット推移予測とは別に、月末入居者数の実績だけから計算します（1人で複数ネットを使う方がいるため、ネット数と入居者数は換算しません）。受託開始日を0人の起点とし、0以外で入力された月末の実績と合わせて最小二乗法で1日あたりの増加人数を求め、最新実績から延長します。上限は居室数×0.9です。0・未入力の月は計算に使いません。グラフは上の推移予測に、ネット数と同じ軸で重ねて表示しています。</p>`;
+    const pct=n=>(n*100).toFixed(2)+'%';
+    const method=r=>r.reason?'—':r.estimated?'他施設ペース（推定）':'実績';
+    const paceText=pace?`基準ペース ${pct(pace.rate)}/日（実績のある施設の「傾き÷居室数」の平均：${pace.sources.map(p=>`${p.name} ${pct(p.rate)}`).join('、')}）`:'基準ペース：算出不可（入居者数の実績がある施設がありません）';
+    const intro=`<h2>入居者数推移予測</h2><p class="note">洗濯ネット推移予測とは別に、月末入居者数から計算します（1人で複数ネットを使う方がいるため、ネット数と入居者数は換算しません）。実績のある施設は、受託開始日を0人の起点とし、0以外で入力された月末の実績と合わせて最小二乗法で1日あたりの増加人数を求め、最新実績から延長します。0・未入力の月は計算に使いません。入居者数が未入力の施設は、実績のある施設それぞれの「傾き（人/日）÷居室数」の平均（基準ペース）を使い、居室数×基準ペース×受託開始日からの日数で推定します（受託開始日までは0人）。実績のある施設が1つもない場合は、全施設をデータなしとします。上限はいずれも居室数×0.9です。グラフは上の推移予測に、ネット数と同じ軸で重ねて表示しています。</p>`;
+    const forecastTable=r=>`<details><summary>予測値を確認（${r.points.length}件）</summary><table><thead><tr><th>日付</th><th>予測入居者数</th></tr></thead><tbody>${r.points.map(p=>`<tr><td>${escapeHtml(p.date)}</td><td>${p.residents}</td></tr>`).join('')}</tbody></table></details>`;
     if(all) {
         const rows=results.map(r=>{
             const endPoint=r.points.length?r.points[r.points.length-1]:null;
-            return `<tr><td>${escapeHtml(r.f.name)}</td><td>${r.actual.length}</td><td>${r.last?`${escapeHtml(r.last.date)}：${r.last.residents}人`:'—'}</td><td>${r.reason?'—':fmt(r.slope)}</td><td>${r.f.roomCount>0?fmt(r.f.roomCount*0.9):'未設定'}</td><td>${r.reason?escapeHtml(r.reason):endPoint?endPoint.residents+'人':'—'}</td></tr>`;
+            return `<tr><td>${escapeHtml(r.f.name)}</td><td>${method(r)}</td><td>${r.actual.length}</td><td>${r.last?`${escapeHtml(r.last.date)}：${r.last.residents}人`:'—'}</td><td>${r.reason?'—':fmt(r.slope)}</td><td>${r.f.roomCount>0?fmt(r.f.roomCount*0.9):'未設定'}</td><td>${r.reason?escapeHtml(r.reason):endPoint?endPoint.residents+'人':'—'}</td></tr>`;
         }).join('');
         const usable=results.filter(r=>!r.reason && r.points.length);
+        const measured=usable.filter(r=>!r.estimated).length, estimated=usable.length-measured;
         const total=Math.round(usable.reduce((s,r)=>s+r.points[r.points.length-1].residents,0)*10)/10;
         residentContent.innerHTML=`${intro}
-          <p>期間末（${escapeHtml(end)}）の予測合計：<strong>${usable.length?total+'人':'データなし'}</strong>${usable.length?`（予測できた${usable.length}施設の合計。データなし等の${results.length-usable.length}施設は含みません）`:''}</p>
-          <div class="chart-wrap"><table><thead><tr><th>施設</th><th>予測に使う月数</th><th>最新実績</th><th>傾き（人/日）</th><th>90%上限</th><th>期間末予測</th></tr></thead><tbody>${rows}</tbody></table></div>
-          <p class="note">グラフには、予測できた施設の合計をネット数と同じ軸で表示しています。施設を選ぶと、施設別の内訳と1人あたりネット数を表示します。</p>`;
+          <p>期間末（${escapeHtml(end)}）の予測合計：<strong>${usable.length?total+'人':'データなし'}</strong>${usable.length?`（実績${measured}施設＋推定${estimated}施設の合計${results.length-usable.length?`。データなし等の${results.length-usable.length}施設は含みません`:''}）`:''}</p>
+          <p class="note">${escapeHtml(paceText)}。推定施設の予測人数＝居室数×基準ペース×受託開始日からの日数（受託開始日までは0人、上限は居室数×0.9）。推定施設の「傾き」は居室数×基準ペースです。</p>
+          <div class="chart-wrap"><table><thead><tr><th>施設</th><th>予測方法</th><th>予測に使う月数</th><th>最新実績</th><th>傾き（人/日）</th><th>90%上限</th><th>期間末予測</th></tr></thead><tbody>${rows}</tbody></table></div>
+          <p class="note">グラフには、実績${measured}施設＋推定${estimated}施設の合計をネット数と同じ軸で表示しています。施設を選ぶと、施設別の内訳と1人あたりネット数を表示します。</p>`;
         return;
     }
     const r=results[0], f=r.f;
@@ -632,10 +683,14 @@ function renderResidents() {
         return;
     }
     const endPoint=r.points.length?r.points[r.points.length-1]:null;
+    const summary=r.estimated
+        ?`予測方法：<strong>他施設ペース（推定）</strong> ／ 受託開始日：${escapeHtml(f.startDate)}（この日から増加） ／ 基準ペース ${pct(pace.rate)}/日 × 居室数${f.roomCount}室 ＝ <strong>${fmt(r.slope)}人/日</strong> ／ 90%上限：${Math.round(r.cap*10)/10}人 ／ 期間末（${escapeHtml(end)}）の予測：<strong>${endPoint?endPoint.residents+'人':'—'}</strong>`
+        :`予測方法：<strong>実績</strong> ／ 起点：${escapeHtml(f.startDate)}＝0人 ／ 予測に使う実績：${r.actual.length}か月 ／ 傾き：<strong>${fmt(r.slope)}人/日</strong>（約${(r.slope*30).toFixed(1)}人/30日） ／ 90%上限：${r.cap>0?Math.round(r.cap*10)/10+'人':'未設定'} ／ 期間末（${escapeHtml(end)}）の予測：<strong>${endPoint?endPoint.residents+'人':'—'}</strong>`;
     residentContent.innerHTML=`${intro}<h3>${escapeHtml(f.name)}</h3>
-      <p>起点：${escapeHtml(f.startDate)}＝0人 ／ 予測に使う実績：${r.actual.length}か月 ／ 傾き：<strong>${fmt(r.slope)}人/日</strong>（約${(r.slope*30).toFixed(1)}人/30日） ／ 90%上限：${r.cap>0?Math.round(r.cap*10)/10+'人':'未設定'} ／ 期間末（${escapeHtml(end)}）の予測：<strong>${endPoint?endPoint.residents+'人':'—'}</strong></p>
+      <p>${summary}</p>
+      ${r.estimated?`<p class="note">入居者数の実績が未入力のため、${escapeHtml(paceText)}から推定しています。月末入居者数を入力すると、この施設自身の実績による予測に切り替わります。</p>`:''}
       ${r.warnings.length?`<p class="note" role="status">${r.warnings.map(escapeHtml).join('<br>')}</p>`:''}
-      <details><summary>予測値を確認（${r.points.length}件）</summary><table><thead><tr><th>日付</th><th>予測入居者数</th></tr></thead><tbody>${r.points.map(p=>`<tr><td>${escapeHtml(p.date)}</td><td>${p.residents}</td></tr>`).join('')}</tbody></table></details>
+      ${forecastTable(r)}
       ${perTable}`;
 }
 select.addEventListener('change',renderResidents);
