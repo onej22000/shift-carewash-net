@@ -177,7 +177,7 @@ $payload = array_values($payload);
         .chart-wrap { width:100%; overflow-x:auto; }
         svg { width:100%; min-width:640px; height:auto; display:block; }
         .legend { display:flex; gap:8px 20px; flex-wrap:wrap; justify-content:center; margin:8px 0 0; font-size:.9rem; }
-        .swatch { display:inline-block; width:18px; height:3px; vertical-align:middle; margin-right:6px; }
+        .legend .swatch { display:inline-block; width:30px; min-width:0; height:10px; vertical-align:middle; margin-right:6px; }
         table { width:100%; border-collapse:collapse; margin-top:18px; }
         th,td { padding:9px 10px; border-bottom:1px solid #e6ecef; text-align:right; }
         th { background:#eaf3f8; color:var(--navy); }
@@ -438,19 +438,24 @@ function calculationDetails(results,model,end) {
       <details open><summary>施設別の計算内訳（${escapeHtml(end)}まで）</summary><div class="chart-wrap"><table><thead><tr><th>施設</th><th>初回集荷日</th><th>最新実績日：ネット数</th><th>90%上限</th><th>予測最終回</th><th>上限適用前の増分・新施設は予測量</th><th>期間末予測</th></tr></thead><tbody>${facilityRows}</tbody></table></div></details>
       </section>`;
 }
-// res：入居者数の系列（右軸・人）。null のときはネット数（左軸）のみ。
-function chartSvg(actual, predicted, base, end, res) {
-    const width=980,height=440,left=70,right=res?70:25,top=24,bottom=62;
+// ネット数と入居者数を1本の軸（数）に同じ目盛りで重ねる。
+// res：入居者数の系列（null＝データなし）。cap：90%上限＝居室数×0.9（未設定なら null）。
+function chartSvg(actual, predicted, base, end, res, cap) {
+    const width=980,height=440,left=70,right=45,top=24,bottom=62;
+    const netColor='#f28e2b', resColor='#8e44ad', capColor='#b42318';
     const maxX=Math.max(1,elapsed(end,base));
-    const maxY=Math.max(4,...actual.concat(predicted).filter(p=>p.nets!==null).map(p=>p.nets));
-    const ceiling=Math.ceil(maxY/4)*4;
+    const values=actual.concat(predicted).filter(p=>p.nets!==null).map(p=>p.nets)
+        .concat(res?res.actual.concat(res.predicted).map(p=>p.residents):[]);
+    // 90%上限と全系列の最大値のうち大きい方に5%の余白を足し、4等分で整数の目盛りになるよう切り上げる。
+    const maxY=Math.max(4,cap>0?cap:0,...values);
+    const ceiling=Math.ceil(maxY*1.05/4)*4;
     const sx=date=>left+elapsed(date,base)/maxX*(width-left-right);
     const sy=value=>top+(1-value/ceiling)*(height-top-bottom);
-    function path(points) {
+    function path(points,key) {
         let active=false,result='';
         for(const p of points) {
-            if(p.nets===null) {active=false;continue;}
-            result+=`${active?' L':' M'} ${sx(p.date).toFixed(1)} ${sy(p.nets).toFixed(1)}`; active=true;
+            if(p[key]===null) {active=false;continue;}
+            result+=`${active?' L':' M'} ${sx(p.date).toFixed(1)} ${sy(p[key]).toFixed(1)}`; active=true;
         }
         return result;
     }
@@ -460,25 +465,23 @@ function chartSvg(actual, predicted, base, end, res) {
         const date=dateAt(time(base)+Math.round(maxX*i/4)*DAY);
         grid+=`<line x1="${left}" y1="${y}" x2="${width-right}" y2="${y}" stroke="#d9e2e8" stroke-dasharray="4 4"/><text x="${left-12}" y="${y+4}" text-anchor="end" fill="#667085" font-size="12">${ceiling*(4-i)/4}</text><text x="${x}" y="${height-bottom+23}" text-anchor="middle" fill="#667085" font-size="12">${date}</text>`;
     }
-    const dots=(points,color)=>points.filter(p=>p.nets!==null).map(p=>`<circle cx="${sx(p.date)}" cy="${sy(p.nets)}" r="3" fill="${color}"><title>${escapeHtml(p.date)}: ${p.nets}</title></circle>`).join('');
-    let residentLayer='';
-    if(res) {
-        // 右軸は入居者数専用の目盛り。ネット数の軸とは共有しない。
-        const maxR=Math.max(4,res.cap>0?res.cap:0,...res.actual.concat(res.predicted).map(p=>p.residents));
-        const ceilingR=Math.ceil(maxR/4)*4;
-        const sr=value=>top+(1-value/ceilingR)*(height-top-bottom);
-        const rpath=points=>points.map((p,i)=>`${i?' L':' M'} ${sx(p.date).toFixed(1)} ${sr(p.residents).toFixed(1)}`).join('');
-        const rdots=(points,color)=>points.map(p=>`<circle cx="${sx(p.date)}" cy="${sr(p.residents)}" r="3.5" fill="${color}"><title>入居者数 ${escapeHtml(p.date)}: ${p.residents}人</title></circle>`).join('');
-        for(let i=0;i<=4;i++) {
-            const y=top+i*(height-top-bottom)/4;
-            residentLayer+=`<text x="${width-right+12}" y="${y+4}" text-anchor="start" fill="#2a9d8f" font-size="12">${ceilingR*(4-i)/4}</text>`;
-        }
-        residentLayer+=`<line x1="${width-right}" y1="${top}" x2="${width-right}" y2="${height-bottom}" stroke="#2a9d8f"/><text x="${width-5}" y="14" text-anchor="end" fill="#2a9d8f" font-size="12">入居者数（人）</text>`;
-        if(res.cap>0) residentLayer+=`<line x1="${left}" y1="${sr(res.cap)}" x2="${width-right}" y2="${sr(res.cap)}" stroke="#b42318" stroke-width="1.5" stroke-dasharray="3 5"/><text x="${width-right-6}" y="${sr(res.cap)-6}" text-anchor="end" fill="#b42318" font-size="12">入居者上限（居室数×0.9）${Math.round(res.cap*10)/10}人</text>`;
-        residentLayer+=`<path d="${rpath(res.actual)}" fill="none" stroke="#2a9d8f" stroke-width="3"/>${rdots(res.actual,'#2a9d8f')}<path d="${rpath(res.predicted)}" fill="none" stroke="#8e44ad" stroke-width="3" stroke-dasharray="9 7"/>${rdots(res.predicted,'#8e44ad')}`;
-        residentLayer+=`<line x1="${left}" y1="${top}" x2="${left}" y2="${height-bottom}" stroke="#f28e2b"/><text x="5" y="14" text-anchor="start" fill="#f28e2b" font-size="12">ネット数</text>`;
+    grid+=`<line x1="${left}" y1="${top}" x2="${left}" y2="${height-bottom}" stroke="#98a2b3"/><text x="${left-12}" y="14" text-anchor="end" fill="#495867" font-size="12">数</text>`;
+    // 実績は見える点、予測は破線のみ（点は透明にしてツールチップ用の当たり判定だけ残す）。
+    const dots=(points,key,color,label,unit,visible)=>points.filter(p=>p[key]!==null).map(p=>`<circle cx="${sx(p.date)}" cy="${sy(p[key])}" r="${visible?3.5:6}" fill="${visible?color:'transparent'}"><title>${escapeHtml(p.date)}${visible?'':'（予測）'}\n${label} ${p[key]}${unit}</title></circle>`).join('');
+    let layers='';
+    if(cap>0) {
+        const capText=Math.round(cap*10)/10;
+        layers+=`<line x1="${left}" y1="${sy(cap)}" x2="${width-right}" y2="${sy(cap)}" stroke="${capColor}" stroke-width="1.5" stroke-dasharray="6 5"><title>90%上限（居室数×0.9） ${capText}</title></line><text x="${width-right-6}" y="${sy(cap)-6}" text-anchor="end" fill="${capColor}" font-size="12">90%上限（居室数×0.9）${capText}</text>`;
     }
-    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="1回あたりの洗濯ネット実績と予測${res?'、月末入居者数の実績と予測':''}">${grid}<path d="${path(actual)}" fill="none" stroke="#f28e2b" stroke-width="3"/>${dots(actual,'#f28e2b')}<path d="${path(predicted)}" fill="none" stroke="#247ba0" stroke-width="3" stroke-dasharray="9 7"/>${dots(predicted,'#247ba0')}${residentLayer}<text x="490" y="428" text-anchor="middle" fill="#495867">日付</text></svg>`;
+    layers+=`<path d="${path(actual,'nets')}" fill="none" stroke="${netColor}" stroke-width="3"/><path d="${path(predicted,'nets')}" fill="none" stroke="${netColor}" stroke-width="3" stroke-dasharray="9 7"/>`;
+    if(res) layers+=`<path d="${path(res.actual,'residents')}" fill="none" stroke="${resColor}" stroke-width="3"/><path d="${path(res.predicted,'residents')}" fill="none" stroke="${resColor}" stroke-width="3" stroke-dasharray="9 7"/>`;
+    layers+=dots(actual,'nets',netColor,'ネット','',true)+dots(predicted,'nets',netColor,'ネット','',false);
+    if(res) layers+=dots(res.actual,'residents',resColor,'入居者','人',true)+dots(res.predicted,'residents',resColor,'入居者','人',false);
+    return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="1回あたりの洗濯ネット${res?'と月末入居者数':''}の実績と予測">${grid}${layers}<text x="490" y="428" text-anchor="middle" fill="#495867">日付</text></svg>`;
+}
+// 凡例の見本。グラフと同じ色・線種（実線＋点／破線）で描く。
+function legendSwatch(color, dash, dot) {
+    return `<svg class="swatch" viewBox="0 0 30 10" aria-hidden="true"><line x1="1" y1="5" x2="29" y2="5" stroke="${color}" stroke-width="${dash==='cap'?1.5:3}"${dash?` stroke-dasharray="${dash==='cap'?'4 3':'6 4'}"`:''}/>${dot?`<circle cx="15" cy="5" r="3.5" fill="${color}"/>`:''}</svg>`;
 }
 // グラフ用の入居者数系列。施設別はその施設、全施設は予測できた施設だけを日付ごとに合算。
 // 実績は各施設の最新入力値を持ち越し（受託開始日＝0人）、予測は最新実績日より後を予測値で置き換える。
@@ -488,7 +491,7 @@ function residentSeries(selected, end) {
     const round=n=>Math.round(n*10)/10;
     if(selected.length===1) {
         const r=results[0];
-        return {actual:[{date:r.f.startDate,residents:0},...r.actual], predicted:r.points.length?[r.last,...r.points]:[], cap:r.cap, count:1};
+        return {actual:[{date:r.f.startDate,residents:0},...r.actual], predicted:r.points.length?[r.last,...r.points]:[], count:1};
     }
     const carry=(r,date)=>{ const a=r.actual.filter(p=>p.date<=date); return a.length?a[a.length-1].residents:0; };
     const levelAt=(r,date)=>date>r.last.date?r.valueAt(date):carry(r,date);
@@ -497,7 +500,7 @@ function residentSeries(selected, end) {
     const anchor=actual[actual.length-1];
     const forecastDates=[...new Set(results.flatMap(r=>r.points.map(p=>p.date)))].filter(date=>date>anchor.date).sort();
     const predicted=forecastDates.map(date=>({date,residents:round(results.reduce((s,r)=>s+levelAt(r,date),0))}));
-    return {actual, predicted:predicted.length?[anchor,...predicted]:[], cap:null, count:results.length};
+    return {actual, predicted:predicted.length?[anchor,...predicted]:[], count:results.length};
 }
 function render() {
     if(!facilities.length) {content.innerHTML='<div class="empty">受託開始日が登録された施設はありません。</div>';return;}
@@ -510,7 +513,7 @@ function render() {
     const rawForecast=all?levels.forecast:results[0].points;
     const anchor=all?levels.anchor:results[0].last;
     const predicted=anchor && rawForecast.length?[anchor,...rawForecast]:rawForecast;
-    // 入居者数は右軸に重ねる。予測期間はネットと同じ end（増加予想のプルダウン）に連動。
+    // 入居者数はネット数と同じ軸に重ねる。予測期間はネットと同じ end（増加予想のプルダウン）に連動。
     const res=residentSeries(selected,end);
     const dates=[today,...actual.map(p=>p.date),...predicted.map(p=>p.date),...(res?res.actual.concat(res.predicted).map(p=>p.date):[])].sort();
     const base=dates[0];
@@ -527,12 +530,15 @@ function render() {
     const rooms=configured.reduce((sum,f)=>sum+f.roomCount,0);
     const capacityText=configured.length===selected.length?`${Math.round(rooms*0.9*10)/10}ネット`:'未確定（居室数未設定あり）';
     const lastForecast=rawForecast.filter(p=>p.nets!==null).slice(-1)[0];
+    // グラフの90%上限線：全施設は全施設の居室数合計×0.9、施設別はその施設の居室数×0.9。居室数未設定があれば引かない。
+    const cap=configured.length===selected.length && rooms>0?rooms*0.9:null;
+    const resLabel=all&&res?`入居者数（${res.count}施設分の合計）`:'入居者数';
     content.innerHTML=`<h2>${escapeHtml(title)}</h2>
       <p>${escapeHtml(summary)}</p><p>対象：${selected.length}施設 ／ 登録居室数合計：${rooms}室${configured.length<selected.length?'（設定済み施設のみ）':''} ／ 90%合計上限：${capacityText} ／ 期間末の予測：${lastForecast?lastForecast.nets+'ネット':'算出不可'}</p><p class="note">${escapeHtml(modelNote)}</p>
       ${warnings.length?`<p class="note" role="status">${warnings.map(escapeHtml).join('<br>')}</p>`:''}
       <div class="meta"><div><span>実績の記録日数</span><strong>${actual.length}日</strong></div><div><span>直近の1回量合計</span><strong>${registered.length?registered[registered.length-1].nets:'—'}</strong></div><div><span>予測期間</span><strong>本日から${horizon}日先まで</strong></div></div>
-      <div class="chart-wrap">${chartSvg(actual,predicted,base,end,res)}</div>
-      <div class="legend"><span><i class="swatch" style="background:#f28e2b"></i>ネット数の実績（左軸）</span><span><i class="swatch" style="background:#247ba0"></i>破線＝ネット数の予測（左軸・新施設を含む）</span>${res?`<span><i class="swatch" style="background:#2a9d8f"></i>入居者数の実績（右軸${all?`・${res.count}施設分の合計`:''}）</span><span><i class="swatch" style="background:#8e44ad"></i>破線＝入居者数の予測（右軸${all?`・${res.count}施設分の合計`:''}）</span>${res.cap>0?'<span><i class="swatch" style="background:#b42318"></i>点線＝入居者上限（居室数×0.9）</span>':''}`:''}</div>
+      <div class="chart-wrap">${chartSvg(actual,predicted,base,end,res,cap)}</div>
+      <div class="legend"><span>${legendSwatch('#f28e2b','',true)}ネット：実績</span><span>${legendSwatch('#f28e2b','net',false)}ネット：予測（新施設を含む）</span>${res?`<span>${legendSwatch('#8e44ad','',true)}${escapeHtml(resLabel)}：実績</span><span>${legendSwatch('#8e44ad','res',false)}${escapeHtml(resLabel)}：予測</span>`:''}${cap?`<span>${legendSwatch('#b42318','cap',false)}90%上限（居室数×0.9）</span>`:''}</div>
       ${res?(all?`<p class="note">入居者数：${res.count}施設分の合計（入居者数が入力され予測できた施設のみ。データなしの${selected.length-res.count}施設は含みません）</p>`:''):'<p class="note">入居者数：データなし</p>'}
       ${calculationDetails(results,model,end)}
       <p class="note">開始日の次の集荷日を第1回とし、枚方長尾の各サイクルのネット増加数をそのまま各施設に適用します。居室数で増加数を倍率補正しません。居室数の90%は上限だけに使うため、小さい施設ほど早く到達します。観測範囲の先は直近約8サイクルの平均増加数を使います。全施設の線は各施設の直近1回量を持ち越した合計で、当日の集荷量や累計枚数ではありません。過去に一度も実績がない稼働施設を含む期間は実績合計を未確定にします。1人1回1ネットの仮定です。</p>
@@ -601,7 +607,7 @@ function renderResidents() {
     const horizon=Number(forecastDaysSelect.value), end=dateAt(time(today)+horizon*DAY);
     const results=selected.map(f=>({f,...predictResidents(f,end,today)}));
     const fmt=n=>Number(n).toFixed(2);
-    const intro=`<h2>入居者数推移予測</h2><p class="note">洗濯ネット推移予測とは別に、月末入居者数の実績だけから計算します（1人で複数ネットを使う方がいるため、ネット数と入居者数は換算しません）。受託開始日を0人の起点とし、0以外で入力された月末の実績と合わせて最小二乗法で1日あたりの増加人数を求め、最新実績から延長します。上限は居室数×0.9です。0・未入力の月は計算に使いません。グラフは上の推移予測に右軸（人）で重ねて表示しています。</p>`;
+    const intro=`<h2>入居者数推移予測</h2><p class="note">洗濯ネット推移予測とは別に、月末入居者数の実績だけから計算します（1人で複数ネットを使う方がいるため、ネット数と入居者数は換算しません）。受託開始日を0人の起点とし、0以外で入力された月末の実績と合わせて最小二乗法で1日あたりの増加人数を求め、最新実績から延長します。上限は居室数×0.9です。0・未入力の月は計算に使いません。グラフは上の推移予測に、ネット数と同じ軸で重ねて表示しています。</p>`;
     if(all) {
         const rows=results.map(r=>{
             const endPoint=r.points.length?r.points[r.points.length-1]:null;
@@ -612,7 +618,7 @@ function renderResidents() {
         residentContent.innerHTML=`${intro}
           <p>期間末（${escapeHtml(end)}）の予測合計：<strong>${usable.length?total+'人':'データなし'}</strong>${usable.length?`（予測できた${usable.length}施設の合計。データなし等の${results.length-usable.length}施設は含みません）`:''}</p>
           <div class="chart-wrap"><table><thead><tr><th>施設</th><th>予測に使う月数</th><th>最新実績</th><th>傾き（人/日）</th><th>90%上限</th><th>期間末予測</th></tr></thead><tbody>${rows}</tbody></table></div>
-          <p class="note">グラフには、予測できた施設の合計を右軸に表示しています。施設を選ぶと、施設別の内訳と1人あたりネット数を表示します。</p>`;
+          <p class="note">グラフには、予測できた施設の合計をネット数と同じ軸で表示しています。施設を選ぶと、施設別の内訳と1人あたりネット数を表示します。</p>`;
         return;
     }
     const r=results[0], f=r.f;
