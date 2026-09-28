@@ -29,6 +29,7 @@ $workDayCount = count($attendanceByDate);
 $holidayDates = fetch_holiday_dates($pdo, $month['start_str'], $month['end_str']);
 
 // ---- 月間集計（管理者の賃金確認 admin/wages.php と同じ calc_wage_summary() で本人分のみ計算。表示専用） ----
+// 交通費・手当・合計・確定状態の扱いは build_monthly_wage_overview() で admin/attendance_monthly.php と共通化している。
 $wageEmployeeStmt = $pdo->prepare(
     'SELECT id, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount
      FROM employees WHERE id = :id'
@@ -36,26 +37,8 @@ $wageEmployeeStmt = $pdo->prepare(
 $wageEmployeeStmt->execute([':id' => $employeeId]);
 $wageEmployee = $wageEmployeeStmt->fetch();
 
-$wageSummary = calc_wage_summary($pdo, $wageEmployee, $yearMonth);
-$commuteTotal = calc_commute_allowance_total($wageEmployee, $wageSummary['attendance_days']);
-$allowanceTotal = sum_allowance_amounts(get_employee_allowances($pdo, $employeeId));
-
-// 管理者の賃金確認一覧と同じく、確定済みの月は交通費・手当・合計に確定時の値を表示する
-$confirmedWageStmt = $pdo->prepare(
-    'SELECT total_wage, commute_allowance_total, allowance_total
-     FROM monthly_wages WHERE employee_id = :employee_id AND `year_month` = :year_month'
-);
-$confirmedWageStmt->execute([':employee_id' => $employeeId, ':year_month' => $yearMonth]);
-$confirmedWage = $confirmedWageStmt->fetch();
-if ($confirmedWage !== false) {
-    $displayCommuteTotal = (int) $confirmedWage['commute_allowance_total'];
-    $displayAllowanceTotal = (int) $confirmedWage['allowance_total'];
-    $displayGrandTotal = (int) $confirmedWage['total_wage'] + $displayCommuteTotal + $displayAllowanceTotal;
-} else {
-    $displayCommuteTotal = $commuteTotal;
-    $displayAllowanceTotal = $allowanceTotal;
-    $displayGrandTotal = $wageSummary['grand_total_wage'] + $commuteTotal + $allowanceTotal;
-}
+$wageOverview = build_monthly_wage_overview($pdo, $wageEmployee, $yearMonth);
+$wageSummary = $wageOverview['summary'];
 $wageBreakdownRows = [
     [
         'label' => '平日',
@@ -177,7 +160,7 @@ $calendarWeeks = array_chunk($calendarCells, 7);
 
 <section class="wage-summary">
     <h3>月間集計
-        <?php if ($confirmedWage !== false): ?>
+        <?php if ($wageOverview['is_confirmed']): ?>
             <span class="status-badge status-confirmed">確定済み</span>
         <?php else: ?>
             <span class="status-badge status-provisional">未確定</span>
@@ -191,9 +174,9 @@ $calendarWeeks = array_chunk($calendarCells, 7);
         <div><dt>基本給</dt><dd><?= number_format($wageSummary['base_wage']) ?>円</dd></div>
         <div><dt>残業手当</dt><dd><?= number_format($wageSummary['overtime_wage']) ?>円</dd></div>
         <div><dt>深夜手当</dt><dd><?= number_format($wageSummary['night_wage']) ?>円</dd></div>
-        <div><dt>交通費</dt><dd><?= number_format($displayCommuteTotal) ?>円</dd></div>
-        <div><dt>手当</dt><dd><?= number_format($displayAllowanceTotal) ?>円</dd></div>
-        <div><dt>合計</dt><dd class="grand-total"><?= number_format($displayGrandTotal) ?>円</dd></div>
+        <div><dt>交通費</dt><dd><?= number_format($wageOverview['display_commute_total']) ?>円</dd></div>
+        <div><dt>手当</dt><dd><?= number_format($wageOverview['display_allowance_total']) ?>円</dd></div>
+        <div><dt>合計</dt><dd class="grand-total"><?= number_format($wageOverview['display_grand_total']) ?>円</dd></div>
     </dl>
 
     <div class="wage-table-scroll">

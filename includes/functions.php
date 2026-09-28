@@ -651,6 +651,47 @@ function calc_attendance_category_breakdown(array $records): array
 }
 
 /**
+ * 月間集計の表示用データ（calc_wage_summary() の結果＋交通費・手当・確定状態）をまとめて返す。
+ * 従業員の月間打刻実績（staff/attendance_monthly.php）と管理者の月間打刻実績
+ * （admin/attendance_monthly.php）の月間集計で共通に使う。表示専用で、確定・保存は行わない。
+ * 交通費・手当・合計は admin/wages.php の従業員一覧と同じく、確定済み（monthly_wagesに行がある）月は
+ * 確定時の値、未確定の月は現在の実績からの試算値を display_* に入れる。
+ * $employee には id, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount が必要。
+ */
+function build_monthly_wage_overview(PDO $pdo, array $employee, string $yearMonth): array
+{
+    $employeeId = (int) $employee['id'];
+    $summary = calc_wage_summary($pdo, $employee, $yearMonth);
+    $commuteTotal = calc_commute_allowance_total($employee, $summary['attendance_days']);
+    $allowanceTotal = sum_allowance_amounts(get_employee_allowances($pdo, $employeeId));
+
+    $confirmedStmt = $pdo->prepare(
+        'SELECT total_wage, commute_allowance_total, allowance_total
+         FROM monthly_wages WHERE employee_id = :employee_id AND `year_month` = :year_month'
+    );
+    $confirmedStmt->execute([':employee_id' => $employeeId, ':year_month' => $yearMonth]);
+    $confirmed = $confirmedStmt->fetch();
+
+    if ($confirmed !== false) {
+        $displayCommuteTotal = (int) $confirmed['commute_allowance_total'];
+        $displayAllowanceTotal = (int) $confirmed['allowance_total'];
+        $displayGrandTotal = (int) $confirmed['total_wage'] + $displayCommuteTotal + $displayAllowanceTotal;
+    } else {
+        $displayCommuteTotal = $commuteTotal;
+        $displayAllowanceTotal = $allowanceTotal;
+        $displayGrandTotal = $summary['grand_total_wage'] + $commuteTotal + $allowanceTotal;
+    }
+
+    return [
+        'summary' => $summary,
+        'is_confirmed' => $confirmed !== false,
+        'display_commute_total' => $displayCommuteTotal,
+        'display_allowance_total' => $displayAllowanceTotal,
+        'display_grand_total' => $displayGrandTotal,
+    ];
+}
+
+/**
  * 交通費の月間計上額を計算する。
  * 日額区分: その月の実際の出勤日数（attendanceの日数）× 日額
  * 月額区分: 出勤日数に関わらず固定額
