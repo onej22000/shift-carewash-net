@@ -120,6 +120,7 @@ $calendarWeeks = array_chunk($calendarCells, 7);
         table.wage-breakdown th:first-child, table.wage-breakdown td:first-child { text-align: left; }
         table.wage-breakdown th { background: #f5f5f5; }
         .wage-note { font-size: 0.8em; color: #555; margin: 8px 0 0; }
+        .wage-subheading { margin: 16px 0 6px; font-size: 0.95em; }
         .status-badge { display: inline-block; font-size: 0.8em; padding: 2px 8px; border-radius: 10px; font-weight: normal; }
         .status-provisional { background: #fff3cd; color: #856404; }
         .status-confirmed { background: #e6f4ea; color: #1e7e34; }
@@ -229,6 +230,38 @@ $calendarWeeks = array_chunk($calendarCells, 7);
             </tbody>
         </table>
     </div>
+    <h4 class="wage-subheading">区分別</h4>
+    <div class="wage-table-scroll">
+        <table class="wage-breakdown">
+            <thead>
+                <tr>
+                    <th>区分</th>
+                    <th>出勤日数</th>
+                    <th>労働時間</th>
+                    <th>残業時間</th>
+                    <th>深夜労働時間</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($wageSummary['category_breakdown'] as $categoryLabel => $categoryStats): ?>
+                    <tr>
+                        <td>
+                            <?php if (isset(CATEGORY_COLORS[$categoryLabel])): ?>
+                                <span class="category-badge" style="background:<?= htmlspecialchars(CATEGORY_COLORS[$categoryLabel], ENT_QUOTES, 'UTF-8') ?>;"><?= htmlspecialchars($categoryLabel, ENT_QUOTES, 'UTF-8') ?></span>
+                            <?php else: ?>
+                                <?= htmlspecialchars($categoryLabel, ENT_QUOTES, 'UTF-8') ?>
+                            <?php endif; ?>
+                        </td>
+                        <td><?= $categoryStats['attendance_days'] ?>日</td>
+                        <td><?= htmlspecialchars(format_minutes_as_hours($categoryStats['total_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars(format_minutes_as_hours($categoryStats['overtime_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars(format_minutes_as_hours($categoryStats['night_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+    <p class="wage-note">区分別の出勤日数は延べ日数です（同じ日に複数の区分で打刻した日は、それぞれの区分に1日ずつ数えるため、合計が月の出勤日数より多くなることがあります）。1日8時間を超えた残業時間は、打刻の時刻順で8時間を超えた後に働いていた区分に計上しています。</p>
     <p class="wage-note">退勤済みの打刻のみを集計しています（勤務中の打刻は含みません）。未確定の月は、打刻の修正などにより金額が変わることがあります。</p>
 </section>
 

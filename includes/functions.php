@@ -559,35 +559,95 @@ function calc_wage_breakdown_from_daily_minutes(PDO $pdo, array $employee, array
     ];
 }
 
+const ATTENDANCE_CATEGORY_NONE_LABEL = '区分なし';
+
 /**
  * 指定従業員・指定月の退勤済み打刻（attendance）から、平日/土日祝・所定/残業・深夜の時間と賃金を集計する。
  * 管理者の賃金確認（admin/wages.php）の一覧・確定処理と、従業員の月間打刻実績
  * （staff/attendance_monthly.php）の月間集計の両方から呼ばれる（両画面で数値が一致するよう共通化）。
  * $employee には id, hourly_wage_weekday, hourly_wage_holiday が必要。
+ *
+ * 返り値には calc_wage_breakdown_from_daily_minutes() の結果に加え、打刻区分（attendance.category）別の
+ * 時間内訳 category_breakdown を含む（admin/wages.php は使用しない。詳細は calc_attendance_category_breakdown()）。
  */
 function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
 {
     [$monthStart, $monthEnd] = get_month_range($yearMonth);
 
     $stmt = $pdo->prepare(
-        "SELECT DATE(clock_in_at) AS work_day, clock_in_at, clock_out_at, work_minutes
+        "SELECT DATE(clock_in_at) AS work_day, clock_in_at, clock_out_at, work_minutes, category
          FROM attendance
          WHERE employee_id = :employee_id AND status = 'done'
            AND deleted_at IS NULL
-           AND DATE(clock_in_at) BETWEEN :start AND :end"
+           AND DATE(clock_in_at) BETWEEN :start AND :end
+         ORDER BY clock_in_at, id"
     );
     $stmt->execute([':employee_id' => $employee['id'], ':start' => $monthStart, ':end' => $monthEnd]);
 
     $dailyMinutes = [];
     $dailyNightMinutes = [];
+    $records = [];
     foreach ($stmt->fetchAll() as $row) {
         $workMinutes = (int) $row['work_minutes'];
+        $nightMinutes = calc_record_night_work_minutes($row['clock_in_at'], $row['clock_out_at'], $workMinutes);
         $dailyMinutes[$row['work_day']] = ($dailyMinutes[$row['work_day']] ?? 0) + $workMinutes;
-        $dailyNightMinutes[$row['work_day']] = ($dailyNightMinutes[$row['work_day']] ?? 0)
-            + calc_record_night_work_minutes($row['clock_in_at'], $row['clock_out_at'], $workMinutes);
+        $dailyNightMinutes[$row['work_day']] = ($dailyNightMinutes[$row['work_day']] ?? 0) + $nightMinutes;
+        $records[] = [
+            'work_day' => $row['work_day'],
+            'category' => $row['category'],
+            'work_minutes' => $workMinutes,
+            'night_minutes' => $nightMinutes,
+        ];
     }
 
-    return calc_wage_breakdown_from_daily_minutes($pdo, $employee, $dailyMinutes, $dailyNightMinutes);
+    $summary = calc_wage_breakdown_from_daily_minutes($pdo, $employee, $dailyMinutes, $dailyNightMinutes);
+    $summary['category_breakdown'] = calc_attendance_category_breakdown($records);
+
+    return $summary;
+}
+
+/**
+ * 打刻区分（attendance.category）別の 出勤日数・労働時間・残業時間・深夜労働時間 を集計する（時間のみ、金額は扱わない）。
+ * - 残業時間: 1日の打刻を出勤時刻順に積み上げ、REGULAR_WORK_MINUTES_PER_DAY（8時間）を超えた時点以降に
+ *   働いていた区分へ割り当てる（例: 店舗376分→洗濯代行181分の日は、残業77分がすべて洗濯代行）。
+ *   区分別残業の合計は、日単位で算出する既存の残業時間（overtime_minutes）と必ず一致する。
+ * - 出勤日数: 延べ日数。同じ日に複数区分で打刻した日は、それぞれの区分に1日ずつ計上する。
+ * - 区分がNULLの打刻（区分カラム導入前の2026年7月分など）は ATTENDANCE_CATEGORY_NONE_LABEL として計上し、
+ *   区分別の労働・残業・深夜時間の合計が月合計と一致するようにする。
+ * $records は出勤時刻順に並んだ [work_day, category, work_minutes, night_minutes] の配列。
+ * 返り値は SHIFT_CATEGORIES の順（区分なしは該当打刻がある場合のみ末尾に追加）。
+ */
+function calc_attendance_category_breakdown(array $records): array
+{
+    $breakdown = [];
+    foreach (SHIFT_CATEGORIES as $category) {
+        $breakdown[$category] = ['attendance_days' => 0, 'total_minutes' => 0, 'overtime_minutes' => 0, 'night_minutes' => 0];
+    }
+
+    $cumulativeMinutesByDay = [];
+    $daysByCategory = [];
+    foreach ($records as $record) {
+        $category = $record['category'] ?? ATTENDANCE_CATEGORY_NONE_LABEL;
+        if (!isset($breakdown[$category])) {
+            $breakdown[$category] = ['attendance_days' => 0, 'total_minutes' => 0, 'overtime_minutes' => 0, 'night_minutes' => 0];
+        }
+
+        $day = $record['work_day'];
+        $before = $cumulativeMinutesByDay[$day] ?? 0;
+        $regularMinutes = max(0, min($record['work_minutes'], REGULAR_WORK_MINUTES_PER_DAY - $before));
+        $cumulativeMinutesByDay[$day] = $before + $record['work_minutes'];
+
+        $breakdown[$category]['total_minutes'] += $record['work_minutes'];
+        $breakdown[$category]['overtime_minutes'] += $record['work_minutes'] - $regularMinutes;
+        $breakdown[$category]['night_minutes'] += $record['night_minutes'];
+        $daysByCategory[$category][$day] = true;
+    }
+
+    foreach ($daysByCategory as $category => $days) {
+        $breakdown[$category]['attendance_days'] = count($days);
+    }
+
+    return $breakdown;
 }
 
 /**
