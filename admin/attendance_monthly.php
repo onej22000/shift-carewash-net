@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/functions.php';
+require_once __DIR__ . '/../includes/attendance_monthly_common.php';
 
 $admin = require_login('admin');
 $pdo = getPdo();
@@ -55,18 +56,13 @@ function parse_attendance_datetime_fields(array $post): array
 }
 
 // ---- 対象月の決定 ----
-$yearMonth = (string) ($_GET['month'] ?? (new DateTime())->format('Y-m'));
-if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $yearMonth)) {
-    $yearMonth = (new DateTime())->format('Y-m');
-}
-
-$monthStart = DateTime::createFromFormat('Y-m-d', $yearMonth . '-01');
-$monthEnd = (clone $monthStart)->modify('last day of this month');
-$monthStartStr = $monthStart->format('Y-m-d');
-$monthEndStr = $monthEnd->format('Y-m-d');
+$month = resolve_attendance_month($_GET['month'] ?? null);
+$yearMonth = $month['year_month'];
+$monthStartStr = $month['start_str'];
+$monthEndStr = $month['end_str'];
 $todayStr = (new DateTime('today'))->format('Y-m-d');
-$prevMonth = (clone $monthStart)->modify('-1 month')->format('Y-m');
-$nextMonth = (clone $monthStart)->modify('+1 month')->format('Y-m');
+$prevMonth = $month['prev_month'];
+$nextMonth = $month['next_month'];
 $pageUrl = '/admin/attendance_monthly.php?month=' . $yearMonth;
 
 // ---- 従業員一覧（過去の実績を追える監査用画面のため、状態を問わず全staffを対象とする） ----
@@ -171,15 +167,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $employeeId = (int) $_POST['employee_id'];
                     $totalBreakMinutes = recompute_total_break_minutes(null, null, null, $values['break_start_at'], $values['break_end_at']);
 
-                    $workMinutes = null;
-                    $status = 'working';
-                    if ($values['clock_out_at'] !== null) {
-                        $ci = new DateTime($values['clock_in_at']);
-                        $co = new DateTime($values['clock_out_at']);
-                        $rawMinutes = max(0, (int) round(($co->getTimestamp() - $ci->getTimestamp()) / 60));
-                        $workMinutes = max(0, $rawMinutes - ($totalBreakMinutes ?? 0));
-                        $status = 'done';
-                    }
+                    $workMinutes = calc_attendance_work_minutes($values['clock_in_at'], $values['clock_out_at'], $totalBreakMinutes);
+                    $status = $values['clock_out_at'] !== null ? 'done' : 'working';
 
                     $insertStmt = $pdo->prepare(
                         'INSERT INTO attendance (employee_id, category, clock_in_at, clock_out_at, break_start_at, break_end_at, total_break_minutes, work_minutes, status)
@@ -234,15 +223,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $values['break_end_at']
                         );
 
-                        $workMinutes = null;
-                        $status = 'working';
-                        if ($values['clock_out_at'] !== null) {
-                            $ci = new DateTime($values['clock_in_at']);
-                            $co = new DateTime($values['clock_out_at']);
-                            $rawMinutes = max(0, (int) round(($co->getTimestamp() - $ci->getTimestamp()) / 60));
-                            $workMinutes = max(0, $rawMinutes - ($totalBreakMinutes ?? 0));
-                            $status = 'done';
-                        }
+                        $workMinutes = calc_attendance_work_minutes($values['clock_in_at'], $values['clock_out_at'], $totalBreakMinutes);
+                        $status = $values['clock_out_at'] !== null ? 'done' : 'working';
 
                         try {
                             $pdo->beginTransaction();
@@ -367,95 +349,20 @@ foreach ($confirmedMonthsStmt->fetchAll() as $row) {
 }
 
 // ---- 日付リスト ----
-$dates = [];
-$cursor = clone $monthStart;
-while ($cursor <= $monthEnd) {
-    $dates[] = clone $cursor;
-    $cursor->modify('+1 day');
-}
+$dates = $month['dates'];
 
-// ---- シフト（予定） ----
+// ---- シフト（予定）・打刻（実績） ----
 $shiftsByEmployeeDate = [];
-if (!empty($employees)) {
-    $stmt = $pdo->prepare(
-        'SELECT employee_id, work_date, start_time, end_time, categories
-         FROM shifts
-         WHERE work_date BETWEEN :start AND :end
-         ORDER BY work_date, start_time'
-    );
-    $stmt->execute([':start' => $monthStartStr, ':end' => $monthEndStr]);
-    foreach ($stmt->fetchAll() as $row) {
-        $shiftsByEmployeeDate[(int) $row['employee_id']][$row['work_date']][] = $row;
-    }
-}
-
-// ---- 打刻（実績） ----
 $attendanceByEmployeeDate = [];
 $totalWorkMinutes = 0;
 if (!empty($employees)) {
-    $stmt = $pdo->prepare(
-        'SELECT id, employee_id, clock_in_at, clock_out_at, work_minutes, total_break_minutes, status
-         FROM attendance
-         WHERE DATE(clock_in_at) BETWEEN :start AND :end
-           AND deleted_at IS NULL
-         ORDER BY clock_in_at'
-    );
-    $stmt->execute([':start' => $monthStartStr, ':end' => $monthEndStr]);
-    foreach ($stmt->fetchAll() as $row) {
-        $workDate = substr($row['clock_in_at'], 0, 10);
-        $attendanceByEmployeeDate[(int) $row['employee_id']][$workDate][] = $row;
-        if ($row['status'] === 'done' && $row['work_minutes'] !== null) {
-            $totalWorkMinutes += (int) $row['work_minutes'];
-        }
-    }
+    $shiftsByEmployeeDate = fetch_monthly_shifts_by_employee_date($pdo, $monthStartStr, $monthEndStr);
+    [$attendanceByEmployeeDate, $totalWorkMinutes] = fetch_monthly_attendance_by_employee_date($pdo, $monthStartStr, $monthEndStr);
 }
 
 $holidayDates = fetch_holiday_dates($pdo, $monthStartStr, $monthEndStr);
 $weekdayLabels = ['月', '火', '水', '木', '金', '土', '日'];
 $csrfToken = csrf_token();
-
-function render_attendance_day_cell(array $shiftsForDay, array $attendanceForDay, string $pageUrl): void
-{
-    foreach ($shiftsForDay as $shift) {
-        $categories = categories_from_value($shift['categories']);
-        ?>
-        <div class="plan-entry">
-            <span class="entry-label">予定</span>
-            <?= htmlspecialchars(substr($shift['start_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?>〜<?= htmlspecialchars(substr($shift['end_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?>
-            <?php foreach ($categories as $category): ?>
-                <span class="category-badge" style="background:<?= htmlspecialchars(CATEGORY_COLORS[$category] ?? CATEGORY_COLOR_NONE, ENT_QUOTES, 'UTF-8') ?>;"><?= htmlspecialchars($category, ENT_QUOTES, 'UTF-8') ?></span>
-            <?php endforeach; ?>
-        </div>
-        <?php
-    }
-
-    if (!empty($shiftsForDay) && empty($attendanceForDay)) {
-        ?>
-        <div class="missing-punch">実績: 未打刻</div>
-        <?php
-    }
-
-    foreach ($attendanceForDay as $record) {
-        $inTime = substr($record['clock_in_at'], 11, 5);
-        $outTime = $record['clock_out_at'] !== null ? substr($record['clock_out_at'], 11, 5) : null;
-        $editUrl = $pageUrl . '&edit=' . (int) $record['id'];
-        ?>
-        <div class="actual-entry" onclick="event.stopPropagation(); location.href='<?= htmlspecialchars($editUrl, ENT_QUOTES, 'UTF-8') ?>';">
-            <span class="entry-label">実績</span>
-            <?= htmlspecialchars($inTime, ENT_QUOTES, 'UTF-8') ?>〜<?= $outTime !== null ? htmlspecialchars($outTime, ENT_QUOTES, 'UTF-8') : '' ?>
-            <?php if ($outTime === null): ?>
-                <span class="working-badge">勤務中</span>
-            <?php endif; ?>
-            <?php if ($record['work_minutes'] !== null): ?>
-                <div class="entry-sub">
-                    休憩<?= $record['total_break_minutes'] !== null ? (int) $record['total_break_minutes'] : 0 ?>分 /
-                    実働<?= htmlspecialchars(format_minutes_as_hours((int) $record['work_minutes']), ENT_QUOTES, 'UTF-8') ?>
-                </div>
-            <?php endif; ?>
-        </div>
-        <?php
-    }
-}
 ?>
 <!DOCTYPE html>
 <html lang="ja">

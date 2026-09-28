@@ -587,7 +587,7 @@ $hasUnreadBoardPosts = (bool) $unreadBoardStmt->fetchColumn();
             </tbody>
         </table>
     <?php endif; ?>
-    <p class="attendance-history-link" style="margin-top:8px;"><a href="/staff/history.php">過去の打刻履歴</a></p>
+    <p class="attendance-history-link" style="margin-top:8px;"><a href="/staff/history.php">過去の打刻履歴</a> | <a href="/staff/attendance_monthly.php">月間打刻実績</a></p>
 </section>
 <?php endif; ?>
 
