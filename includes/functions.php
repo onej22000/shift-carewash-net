@@ -560,6 +560,37 @@ function calc_wage_breakdown_from_daily_minutes(PDO $pdo, array $employee, array
 }
 
 /**
+ * 指定従業員・指定月の退勤済み打刻（attendance）から、平日/土日祝・所定/残業・深夜の時間と賃金を集計する。
+ * 管理者の賃金確認（admin/wages.php）の一覧・確定処理と、従業員の月間打刻実績
+ * （staff/attendance_monthly.php）の月間集計の両方から呼ばれる（両画面で数値が一致するよう共通化）。
+ * $employee には id, hourly_wage_weekday, hourly_wage_holiday が必要。
+ */
+function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
+{
+    [$monthStart, $monthEnd] = get_month_range($yearMonth);
+
+    $stmt = $pdo->prepare(
+        "SELECT DATE(clock_in_at) AS work_day, clock_in_at, clock_out_at, work_minutes
+         FROM attendance
+         WHERE employee_id = :employee_id AND status = 'done'
+           AND deleted_at IS NULL
+           AND DATE(clock_in_at) BETWEEN :start AND :end"
+    );
+    $stmt->execute([':employee_id' => $employee['id'], ':start' => $monthStart, ':end' => $monthEnd]);
+
+    $dailyMinutes = [];
+    $dailyNightMinutes = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $workMinutes = (int) $row['work_minutes'];
+        $dailyMinutes[$row['work_day']] = ($dailyMinutes[$row['work_day']] ?? 0) + $workMinutes;
+        $dailyNightMinutes[$row['work_day']] = ($dailyNightMinutes[$row['work_day']] ?? 0)
+            + calc_record_night_work_minutes($row['clock_in_at'], $row['clock_out_at'], $workMinutes);
+    }
+
+    return calc_wage_breakdown_from_daily_minutes($pdo, $employee, $dailyMinutes, $dailyNightMinutes);
+}
+
+/**
  * 交通費の月間計上額を計算する。
  * 日額区分: その月の実際の出勤日数（attendanceの日数）× 日額
  * 月額区分: 出勤日数に関わらず固定額

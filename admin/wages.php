@@ -5,31 +5,6 @@ require_once __DIR__ . '/../includes/functions.php';
 $admin = require_login('admin');
 $pdo = getPdo();
 
-function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
-{
-    [$monthStart, $monthEnd] = get_month_range($yearMonth);
-
-    $stmt = $pdo->prepare(
-        "SELECT DATE(clock_in_at) AS work_day, clock_in_at, clock_out_at, work_minutes
-         FROM attendance
-         WHERE employee_id = :employee_id AND status = 'done'
-           AND deleted_at IS NULL
-           AND DATE(clock_in_at) BETWEEN :start AND :end"
-    );
-    $stmt->execute([':employee_id' => $employee['id'], ':start' => $monthStart, ':end' => $monthEnd]);
-
-    $dailyMinutes = [];
-    $dailyNightMinutes = [];
-    foreach ($stmt->fetchAll() as $row) {
-        $workMinutes = (int) $row['work_minutes'];
-        $dailyMinutes[$row['work_day']] = ($dailyMinutes[$row['work_day']] ?? 0) + $workMinutes;
-        $dailyNightMinutes[$row['work_day']] = ($dailyNightMinutes[$row['work_day']] ?? 0)
-            + calc_record_night_work_minutes($row['clock_in_at'], $row['clock_out_at'], $workMinutes);
-    }
-
-    return calc_wage_breakdown_from_daily_minutes($pdo, $employee, $dailyMinutes, $dailyNightMinutes);
-}
-
 $errorMessage = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {

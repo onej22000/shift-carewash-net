@@ -27,6 +27,61 @@ $attendanceByDate = $attendanceByEmployeeDate[$employeeId] ?? [];
 $workDayCount = count($attendanceByDate);
 
 $holidayDates = fetch_holiday_dates($pdo, $month['start_str'], $month['end_str']);
+
+// ---- 月間集計（管理者の賃金確認 admin/wages.php と同じ calc_wage_summary() で本人分のみ計算。表示専用） ----
+$wageEmployeeStmt = $pdo->prepare(
+    'SELECT id, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount
+     FROM employees WHERE id = :id'
+);
+$wageEmployeeStmt->execute([':id' => $employeeId]);
+$wageEmployee = $wageEmployeeStmt->fetch();
+
+$wageSummary = calc_wage_summary($pdo, $wageEmployee, $yearMonth);
+$commuteTotal = calc_commute_allowance_total($wageEmployee, $wageSummary['attendance_days']);
+$allowanceTotal = sum_allowance_amounts(get_employee_allowances($pdo, $employeeId));
+
+// 管理者の賃金確認一覧と同じく、確定済みの月は交通費・手当・合計に確定時の値を表示する
+$confirmedWageStmt = $pdo->prepare(
+    'SELECT total_wage, commute_allowance_total, allowance_total
+     FROM monthly_wages WHERE employee_id = :employee_id AND `year_month` = :year_month'
+);
+$confirmedWageStmt->execute([':employee_id' => $employeeId, ':year_month' => $yearMonth]);
+$confirmedWage = $confirmedWageStmt->fetch();
+if ($confirmedWage !== false) {
+    $displayCommuteTotal = (int) $confirmedWage['commute_allowance_total'];
+    $displayAllowanceTotal = (int) $confirmedWage['allowance_total'];
+    $displayGrandTotal = (int) $confirmedWage['total_wage'] + $displayCommuteTotal + $displayAllowanceTotal;
+} else {
+    $displayCommuteTotal = $commuteTotal;
+    $displayAllowanceTotal = $allowanceTotal;
+    $displayGrandTotal = $wageSummary['grand_total_wage'] + $commuteTotal + $allowanceTotal;
+}
+$wageBreakdownRows = [
+    [
+        'label' => '平日',
+        'days' => $wageSummary['weekday_attendance_days'],
+        'total_minutes' => $wageSummary['weekday_total_minutes'],
+        'overtime_minutes' => $wageSummary['weekday_overtime_minutes'],
+        'night_minutes' => $wageSummary['weekday_night_minutes'],
+        'hourly_wage' => (int) $wageEmployee['hourly_wage_weekday'],
+        'base_wage' => $wageSummary['weekday_wage'],
+        'overtime_wage' => $wageSummary['weekday_overtime_wage'],
+        'night_wage' => $wageSummary['weekday_night_wage'],
+        'total_wage' => $wageSummary['weekday_total_wage'],
+    ],
+    [
+        'label' => '土日祝',
+        'days' => $wageSummary['holiday_attendance_days'],
+        'total_minutes' => $wageSummary['holiday_total_minutes'],
+        'overtime_minutes' => $wageSummary['holiday_overtime_minutes'],
+        'night_minutes' => $wageSummary['holiday_night_minutes'],
+        'hourly_wage' => (int) $wageEmployee['hourly_wage_holiday'],
+        'base_wage' => $wageSummary['holiday_wage'],
+        'overtime_wage' => $wageSummary['holiday_overtime_wage'],
+        'night_wage' => $wageSummary['holiday_night_wage'],
+        'total_wage' => $wageSummary['holiday_total_wage'],
+    ],
+];
 $weekdayLabels = ['月', '火', '水', '木', '金', '土', '日'];
 
 // 月曜始まりのカレンダーにするため、月初の曜日まで空セルを詰める
@@ -53,6 +108,21 @@ $calendarWeeks = array_chunk($calendarCells, 7);
         .month-nav a { padding: 4px 10px; border: 1px solid #ccc; border-radius: 12px; text-decoration: none; color: #222; }
         .month-nav form { display: inline-flex; gap: 6px; align-items: center; }
         .summary { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; font-weight: bold; }
+        .wage-summary { border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
+        .wage-summary h3 { margin: 0 0 8px; font-size: 1.05em; }
+        .wage-summary dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 16px; margin: 0 0 12px; }
+        .wage-summary dt { font-size: 0.8em; color: #555; }
+        .wage-summary dd { margin: 0; font-weight: bold; }
+        .wage-summary dd.grand-total { color: #0b5ed7; font-size: 1.15em; }
+        .wage-table-scroll { overflow-x: auto; }
+        table.wage-breakdown { border-collapse: collapse; width: 100%; font-size: 0.9em; }
+        table.wage-breakdown th, table.wage-breakdown td { border: 1px solid #ccc; padding: 6px; text-align: right; white-space: nowrap; }
+        table.wage-breakdown th:first-child, table.wage-breakdown td:first-child { text-align: left; }
+        table.wage-breakdown th { background: #f5f5f5; }
+        .wage-note { font-size: 0.8em; color: #555; margin: 8px 0 0; }
+        .status-badge { display: inline-block; font-size: 0.8em; padding: 2px 8px; border-radius: 10px; font-weight: normal; }
+        .status-provisional { background: #fff3cd; color: #856404; }
+        .status-confirmed { background: #e6f4ea; color: #1e7e34; }
         table.attendance-calendar { border-collapse: collapse; width: 100%; table-layout: fixed; }
         table.attendance-calendar th, table.attendance-calendar td { border: 1px solid #ccc; vertical-align: top; padding: 4px; }
         table.attendance-calendar th { background: #f5f5f5; }
@@ -103,6 +173,64 @@ $calendarWeeks = array_chunk($calendarCells, 7);
     <span>合計休憩: <?= htmlspecialchars(format_minutes_as_hours($totalBreakMinutes), ENT_QUOTES, 'UTF-8') ?></span>
     <span>合計実働: <?= htmlspecialchars(format_minutes_as_hours($totalWorkMinutes), ENT_QUOTES, 'UTF-8') ?></span>
 </div>
+
+<section class="wage-summary">
+    <h3>月間集計
+        <?php if ($confirmedWage !== false): ?>
+            <span class="status-badge status-confirmed">確定済み</span>
+        <?php else: ?>
+            <span class="status-badge status-provisional">未確定</span>
+        <?php endif; ?>
+    </h3>
+    <dl>
+        <div><dt>出勤日数</dt><dd><?= $wageSummary['attendance_days'] ?>日</dd></div>
+        <div><dt>労働時間</dt><dd><?= htmlspecialchars(format_minutes_as_hours($wageSummary['total_minutes']), ENT_QUOTES, 'UTF-8') ?></dd></div>
+        <div><dt>残業時間</dt><dd><?= htmlspecialchars(format_minutes_as_hours($wageSummary['overtime_minutes']), ENT_QUOTES, 'UTF-8') ?></dd></div>
+        <div><dt>深夜労働時間</dt><dd><?= htmlspecialchars(format_minutes_as_hours($wageSummary['night_minutes']), ENT_QUOTES, 'UTF-8') ?></dd></div>
+        <div><dt>基本給</dt><dd><?= number_format($wageSummary['base_wage']) ?>円</dd></div>
+        <div><dt>残業手当</dt><dd><?= number_format($wageSummary['overtime_wage']) ?>円</dd></div>
+        <div><dt>深夜手当</dt><dd><?= number_format($wageSummary['night_wage']) ?>円</dd></div>
+        <div><dt>交通費</dt><dd><?= number_format($displayCommuteTotal) ?>円</dd></div>
+        <div><dt>手当</dt><dd><?= number_format($displayAllowanceTotal) ?>円</dd></div>
+        <div><dt>合計</dt><dd class="grand-total"><?= number_format($displayGrandTotal) ?>円</dd></div>
+    </dl>
+
+    <div class="wage-table-scroll">
+        <table class="wage-breakdown">
+            <thead>
+                <tr>
+                    <th>区分</th>
+                    <th>出勤日数</th>
+                    <th>労働時間</th>
+                    <th>残業時間</th>
+                    <th>深夜労働時間</th>
+                    <th>時給</th>
+                    <th>基本給</th>
+                    <th>残業手当</th>
+                    <th>深夜手当</th>
+                    <th>合計</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($wageBreakdownRows as $breakdown): ?>
+                    <tr>
+                        <td><?= htmlspecialchars($breakdown['label'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= $breakdown['days'] ?>日</td>
+                        <td><?= htmlspecialchars(format_minutes_as_hours($breakdown['total_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars(format_minutes_as_hours($breakdown['overtime_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars(format_minutes_as_hours($breakdown['night_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= number_format($breakdown['hourly_wage']) ?>円</td>
+                        <td><?= number_format($breakdown['base_wage']) ?>円</td>
+                        <td><?= number_format($breakdown['overtime_wage']) ?>円</td>
+                        <td><?= number_format($breakdown['night_wage']) ?>円</td>
+                        <td><?= number_format($breakdown['total_wage']) ?>円</td>
+                    </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+    <p class="wage-note">退勤済みの打刻のみを集計しています（勤務中の打刻は含みません）。未確定の月は、打刻の修正などにより金額が変わることがあります。</p>
+</section>
 
 <table class="attendance-calendar">
     <thead>
