@@ -183,52 +183,32 @@ $dailyTotalsStmt = $pdo->prepare(
 $dailyTotalsStmt->execute([':start' => $start, ':end' => $end]);
 $dailyTotalsRows = $dailyTotalsStmt->fetchAll();
 
-// 作業氏名（重複なし）は、その日に洗濯代行の作業に関わった全従業員が対象——
-// collection_cycle_idの有無は問わない（2026-08-14修正、元の指示はcycle紐付きに限定していなかった）。
-// work_stage_records.record_dateを直接の日付キーとして使う（collection_cycles経由ではない）ため、
-// facility_typeによる絞り込みも不要（work_stage_records単体で完結する）。
-// stage='wash'は「洗濯代行」区分のレコードのみを対象にする既存の絞り込み（本ファイル上部の
-// $sessionStmtと同じ条件）——category='洗濯代行'は常にstage='wash'とペアになっている。
-$dailyParticipantStmt = $pdo->prepare(
-    "SELECT wsr.record_date, e.name AS employee_name
-     FROM work_stage_records wsr
-     INNER JOIN work_stage_record_employees wse ON wse.work_stage_record_id = wsr.id
-     INNER JOIN employees e ON e.id = wse.employee_id
-     WHERE wsr.deleted_at IS NULL AND wsr.stage = 'wash'
-           AND wsr.record_date BETWEEN :start AND :end"
-);
-$dailyParticipantStmt->execute([':start' => $start, ':end' => $end]);
-
-$dailyWorkStatsByDate = [];
-foreach ($dailyParticipantStmt->fetchAll() as $row) {
-    $date = $row['record_date'];
-    if (!isset($dailyWorkStatsByDate[$date])) {
-        $dailyWorkStatsByDate[$date] = ['names' => []];
-    }
-    $dailyWorkStatsByDate[$date]['names'][$row['employee_name']] = true;
-}
-
-// 作業時間（その日全体の稼働の幅）は、2026-08-14に
-// resolve_work_stage_started_at()ベース（work_stage_recordsの登録間隔）から、
-// その日の「洗濯代行」区分の出退勤打刻（attendance、客観的な実測値）ベースに変更。
-// 1サイクル単位のstarted_atは後からまとめて入力した際の登録間隔を拾ってしまう可能性があり、
-// また複数施設をまたぐ日には施設ごとの按分方法が無いため、打刻という日単位の客観的事実を
-// そのまま採用する。status = 'done'（clock_out_at確定済み）のみを対象にする。
+// 作業時間・作業氏名は、2026-09-28に「洗濯代行」区分の打刻（attendance）ベースに一本化した。
+// （以前は作業氏名＝退勤時の作業実績入力・人数確認画面の参加者（work_stage_record_employees）、
+// 作業時間＝その日の最も早い出勤〜最も遅い退勤の幅だった。退勤時の入力は同日に廃止）
+// - 作業時間: その日に洗濯代行で打刻し退勤済み（status = 'done'）の全従業員の実働時間
+//   （attendance.work_minutes、休憩控除後）の合計＝延べ時間。退勤前の人の分は含めない。
+// - 作業氏名: その日に洗濯代行で出勤した全従業員（退勤済みか否かを問わない）を重複なく列挙する。
+// 過去日付もこの集計で表示される（保存済みの値を読むだけで、再集計のためのデータ更新は不要）。
 $dailyAttendanceStmt = $pdo->prepare(
-    "SELECT DATE(clock_in_at) AS work_day, MIN(clock_in_at) AS earliest_clock_in, MAX(clock_out_at) AS latest_clock_out
-     FROM attendance
-     WHERE category = '洗濯代行' AND status = 'done' AND deleted_at IS NULL
-           AND DATE(clock_in_at) BETWEEN :start AND :end
-     GROUP BY DATE(clock_in_at)"
+    "SELECT DATE(a.clock_in_at) AS work_day, e.name AS employee_name, a.status, a.work_minutes
+     FROM attendance a
+     INNER JOIN employees e ON e.id = a.employee_id
+     WHERE a.category = '洗濯代行' AND a.deleted_at IS NULL
+           AND DATE(a.clock_in_at) BETWEEN :start AND :end"
 );
 $dailyAttendanceStmt->execute([':start' => $start, ':end' => $end]);
 
-$dailyAttendanceSpanByDate = [];
+$dailyWorkStatsByDate = [];
 foreach ($dailyAttendanceStmt->fetchAll() as $row) {
-    $dailyAttendanceSpanByDate[$row['work_day']] = [
-        'earliest_clock_in' => $row['earliest_clock_in'],
-        'latest_clock_out' => $row['latest_clock_out'],
-    ];
+    $date = $row['work_day'];
+    if (!isset($dailyWorkStatsByDate[$date])) {
+        $dailyWorkStatsByDate[$date] = ['names' => [], 'work_minutes' => null];
+    }
+    $dailyWorkStatsByDate[$date]['names'][$row['employee_name']] = true;
+    if ($row['status'] === 'done' && $row['work_minutes'] !== null) {
+        $dailyWorkStatsByDate[$date]['work_minutes'] = ($dailyWorkStatsByDate[$date]['work_minutes'] ?? 0) + (int) $row['work_minutes'];
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -356,10 +336,8 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
     <p class="notice">
         作業登録日（work_stage_records.record_date）ごとに、その日に作業登録した全施設・全サイクル（交付のみ＝
         pickup_bag_count・arrival_bag_countが両方NULLのサイクルを除く）を集約した1行です。
-        作業時間は、その日の「洗濯代行」区分の出退勤打刻（attendance）のうち最も早い出勤時刻〜
-        最も遅い退勤時刻という、その日全体の稼働の幅を示します（work_stage_records側の登録間隔では
-        なく、客観的な打刻実績を使用しています）。作業氏名は、その日に洗濯代行の作業
-        （work_stage_record_employees）に関わった全従業員を重複なく列挙しています。
+        作業時間は、その日に「洗濯代行」区分で打刻し退勤済みの全従業員の実働時間（休憩控除後）の合計
+        （延べ時間）です。作業氏名は、その日に「洗濯代行」区分で出勤した全従業員を重複なく列挙しています。
     </p>
     <?php endif; ?>
 
@@ -383,10 +361,7 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
                     $dayStats = $dailyWorkStatsByDate[$row['work_date']] ?? null;
                     $dayNames = $dayStats !== null ? array_keys($dayStats['names']) : [];
                     sort($dayNames);
-                    $dayAttendanceSpan = $dailyAttendanceSpanByDate[$row['work_date']] ?? null;
-                    $daySpanMinutes = $dayAttendanceSpan !== null
-                        ? intdiv(strtotime($dayAttendanceSpan['latest_clock_out']) - strtotime($dayAttendanceSpan['earliest_clock_in']), 60)
-                        : null;
+                    $dayWorkMinutes = $dayStats !== null ? $dayStats['work_minutes'] : null;
                     ?>
                     <tr>
                         <td><?= htmlspecialchars($row['work_date'], ENT_QUOTES, 'UTF-8') ?></td>
@@ -394,7 +369,7 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
                         <td><?= $row['pickup_bag_total'] !== null ? (int) $row['pickup_bag_total'] . '袋' : '-' ?></td>
                         <td><?= $row['net_total'] !== null ? (int) $row['net_total'] . '枚' : '-' ?></td>
                         <td class="total-col">
-                            <?= $daySpanMinutes !== null ? number_format($daySpanMinutes / 60, 2) . '時間' : '-' ?>
+                            <?= $dayWorkMinutes !== null ? number_format($dayWorkMinutes / 60, 2) . '時間' : '-' ?>
                         </td>
                         <td><?= !empty($dayNames) ? htmlspecialchars(implode('・', $dayNames), ENT_QUOTES, 'UTF-8') : '-' ?></td>
                     </tr>

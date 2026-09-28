@@ -5,15 +5,10 @@ require_once __DIR__ . '/../includes/functions.php';
 $staff = require_login('staff');
 $pdo = getPdo();
 
-// 集荷は集荷・配送記録簿（collection_cycles、staff/collection_entry.php）で管理するため、
-// 作業実績（work_stage_records）の対象からは外れた。洗濯・乾燥・畳みは2026-08-06に
-// 「洗濯」1工程へ統合した（stage ENUM自体は互換のため dry/fold を残しているが、以後は使わない）。
-$stageLabels = [
-    'wash' => '洗濯',
-];
-
-// 退勤時に入力必須となるのも洗濯代行区分のみ（集荷ドライバーはこの工程を必ずしも行わないため）。
-const CATEGORIES_REQUIRING_ALL_STAGES = ['洗濯代行'];
+// 退勤時の施設・参加従業員の入力（work_stage_records / work_stage_record_employeesへの保存）は
+// 2026-09-28に全区分で廃止した。作業速度分析（work_speed.php）の作業時間・作業氏名は
+// 洗濯代行区分の打刻（attendance）から直接集計するため、退勤は他の区分と同じく
+// 「退勤する」ボタンのみで確定する。過去に保存された作業実績データは削除せず残している。
 
 // 共用アカウントは「本人」という単一の状態を持たないため、employee_idではなくattendance_idで
 // 対象を明示的に指定させる（ダッシュボードの一覧からリンクされるほか、未指定・不正なIDの場合は
@@ -108,56 +103,10 @@ if ($isSharedAccount) {
     }
 }
 
-// work_stage_records.employee_id（「誰が記録したか」）と自動休憩補正ログのedited_byは、
-// 共用アカウントでは共用アカウント自身ではなく実際に退勤する従業員を記録する。
+// 自動休憩補正ログのedited_byは、共用アカウントでは共用アカウント自身ではなく実際に退勤する従業員を記録する。
 $recorderId = $isSharedAccount ? (int) $openRecord['employee_id'] : (int) $staff['id'];
 
-$defaultCategory = (string) ($openRecord['category'] ?? '');
-$stagesRequired = in_array($defaultCategory, CATEGORIES_REQUIRING_ALL_STAGES, true);
-
-$facilitiesStmt = $pdo->query("SELECT id, name FROM facilities WHERE is_active = 1 AND facility_type = '介護施設' ORDER BY name");
-$facilities = $facilitiesStmt->fetchAll();
-$validFacilityIds = array_map('intval', array_column($facilities, 'id'));
-
-$employeesStmt = $pdo->query("SELECT id, name FROM employees WHERE role = 'staff' AND is_shared_account = 0 ORDER BY name");
-$employees = $employeesStmt->fetchAll();
-$validEmployeeIds = array_map('intval', array_column($employees, 'id'));
-
 $errorMessage = '';
-
-/**
- * facility_idが未選択の行は「未入力」として単に無視する。参加者0人（誰も選択しない）は
- * 「実績なし」を明示的に記録するための有効な入力として扱う。
- * work_stage_recordsは洗濯代行の作業実績のみが対象のため、区分は常に「洗濯代行」で固定する。
- *
- * @param list<list<string>> $employeeIdGroups 行ごとの選択済み従業員IDリスト（同じ添字で対応）
- * @return list<array{stage:string, facility_id:int, employee_ids:list<int>, category:string}>
- */
-function collect_stage_rows(string $stage, array $facilityIds, array $employeeIdGroups, array $validFacilityIds, array $validEmployeeIds): array
-{
-    $rows = [];
-    foreach ($facilityIds as $index => $rawFacilityId) {
-        $facilityId = (int) $rawFacilityId;
-
-        if ($facilityId <= 0 || !in_array($facilityId, $validFacilityIds, true)) {
-            continue;
-        }
-
-        $rawEmployeeIds = $employeeIdGroups[$index] ?? [];
-        $employeeIds = [];
-        foreach ((array) $rawEmployeeIds as $rawEmployeeId) {
-            $employeeId = (int) $rawEmployeeId;
-            if (in_array($employeeId, $validEmployeeIds, true)) {
-                $employeeIds[] = $employeeId;
-            }
-        }
-        $employeeIds = array_values(array_unique($employeeIds));
-
-        $rows[] = ['stage' => $stage, 'facility_id' => $facilityId, 'employee_ids' => $employeeIds, 'category' => '洗濯代行'];
-    }
-
-    return $rows;
-}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
@@ -166,32 +115,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $lat = (isset($_POST['lat']) && $_POST['lat'] !== '') ? (float) $_POST['lat'] : null;
         $lng = (isset($_POST['lng']) && $_POST['lng'] !== '') ? (float) $_POST['lng'] : null;
 
-        $rows = [];
-        foreach (array_keys($stageLabels) as $stageKey) {
-            $stageRows = collect_stage_rows(
-                $stageKey,
-                $_POST[$stageKey . '_facility_id'] ?? [],
-                $_POST[$stageKey . '_employee_ids'] ?? [],
-                $validFacilityIds,
-                $validEmployeeIds
-            );
-            $rows = array_merge($rows, $stageRows);
-        }
-
-        $today = (new DateTime())->format('Y-m-d');
         $clockOutAt = new DateTime();
         $clockInAt = new DateTime($openRecord['clock_in_at']);
         $rawMinutes = max(0, (int) round(($clockOutAt->getTimestamp() - $clockInAt->getTimestamp()) / 60));
         $requiredBreakMinutes = calc_legal_break_minutes($rawMinutes);
-
-        if ($stagesRequired) {
-            $presentStages = array_unique(array_column($rows, 'stage'));
-            $missingStages = array_diff(array_keys($stageLabels), $presentStages);
-            if (!empty($missingStages)) {
-                $missingLabels = array_map(static fn (string $s): string => $stageLabels[$s], $missingStages);
-                $errorMessage = implode('・', $missingLabels) . 'の施設を入力してください（実績が無い場合も施設のみ選択し、参加者は未選択のままで構いません）。';
-            }
-        }
 
         // 休憩開始・終了を一度も手動打刻していない日（total_break_minutesがNULL）のみ、
         // 法定基準に基づき自動で休憩時間をセットする。手動打刻済み（0分含む）はその実測値を優先し上書きしない。
@@ -204,25 +131,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($errorMessage === '') {
         try {
             $pdo->beginTransaction();
-
-            $insertStmt = $pdo->prepare(
-                'INSERT INTO work_stage_records (employee_id, category, facility_id, stage, person_count, record_date, completed_at)
-                 VALUES (:employee_id, :category, :facility_id, :stage, :person_count, :record_date, :completed_at)'
-            );
-            foreach ($rows as $row) {
-                $insertStmt->execute([
-                    ':employee_id' => $recorderId,
-                    ':category' => $row['category'],
-                    ':facility_id' => $row['facility_id'],
-                    ':stage' => $row['stage'],
-                    ':person_count' => count($row['employee_ids']),
-                    ':record_date' => $today,
-                    ':completed_at' => $clockOutAt->format('Y-m-d H:i:s'),
-                ]);
-                if (!empty($row['employee_ids'])) {
-                    record_work_stage_employees($pdo, (int) $pdo->lastInsertId(), $row['employee_ids'], $clockOutAt);
-                }
-            }
 
             $updateStmt = $pdo->prepare(
                 "UPDATE attendance
@@ -256,7 +164,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $pdo->commit();
 
-            $message = '退勤を記録しました（作業実績 ' . count($rows) . '件）。';
+            $message = '退勤を記録しました。';
             if ($autoBreakApplied) {
                 $message .= ' 休憩の打刻がなかったため、労働基準法に基づき休憩' . $totalBreakMinutes . '分を自動で設定しました。';
             } elseif ($openRecord['category'] === '店舗' && $totalBreakMinutes < $requiredBreakMinutes) {
@@ -268,7 +176,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         } catch (PDOException $e) {
             $pdo->rollBack();
-            $errorMessage = '保存に失敗しました。入力内容をご確認のうえ、もう一度お試しください。';
+            $errorMessage = '保存に失敗しました。もう一度お試しください。';
         }
         }
     }
@@ -281,7 +189,7 @@ $csrfToken = csrf_token();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>退勤・作業実績入力 | シフト管理</title>
+    <title>退勤 | シフト管理</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 4px; }
@@ -289,17 +197,13 @@ $csrfToken = csrf_token();
         .message { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; }
         .message.error { background: #fdecea; color: #b3261e; }
         .notice { padding: 8px 12px; background: #fff3cd; color: #856404; border-radius: 4px; }
-        section { margin-bottom: 24px; border: 1px solid #ccc; border-radius: 6px; padding: 12px; }
-        table.rows-table { border-collapse: collapse; width: 100%; margin-bottom: 8px; }
-        table.rows-table th, table.rows-table td { border: 1px solid #ccc; padding: 6px; }
-        table.rows-table select { width: 100%; }
-        table.rows-table input[type="number"] { width: 80px; }
+        .clock-out-summary { margin: 16px 0; font-size: 1.1em; }
         #submit-button { font-size: 1.1em; padding: 12px 32px; border-radius: 6px; border: none; color: #fff; background: #b3261e; cursor: pointer; }
     </style>
 </head>
 <body>
 <header>
-    <h1>退勤・本日の作業実績入力<?= $isSharedAccount ? '（' . htmlspecialchars($openRecord['employee_name'], ENT_QUOTES, 'UTF-8') . '）' : '' ?></h1>
+    <h1>退勤<?= $isSharedAccount ? '（' . htmlspecialchars($openRecord['employee_name'], ENT_QUOTES, 'UTF-8') . '）' : '' ?></h1>
     <nav><a href="/staff/dashboard.php">ダッシュボードに戻る</a></nav>
 </header>
 
@@ -307,15 +211,10 @@ $csrfToken = csrf_token();
     <p class="message error"><?= htmlspecialchars($errorMessage, ENT_QUOTES, 'UTF-8') ?></p>
 <?php endif; ?>
 
-<?php if ($stagesRequired): ?>
-    <p class="notice">区分「<?= htmlspecialchars($defaultCategory, ENT_QUOTES, 'UTF-8') ?>」での退勤のため、洗濯の施設入力が必須です。実績が無い場合は施設のみ選択し、参加した従業員は未選択のままで送信してください。送信すると退勤が確定します。</p>
-<?php else: ?>
-    <p class="notice">退勤する前に、本日の洗濯の実績を入力してください（実績がなければ未入力のままで構いません）。送信すると退勤が確定します。</p>
-<?php endif; ?>
-
-<?php if (empty($facilities)): ?>
-    <p class="notice">有効な施設が登録されていません。管理者にお問い合わせください。</p>
-<?php endif; ?>
+<p class="clock-out-summary">
+    区分: <?= htmlspecialchars((string) ($openRecord['category'] ?? ''), ENT_QUOTES, 'UTF-8') ?> /
+    出勤: <?= htmlspecialchars(substr($openRecord['clock_in_at'], 11, 5), ENT_QUOTES, 'UTF-8') ?>
+</p>
 
 <form id="clock-out-form" method="post" action="/staff/clock_out.php">
     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
@@ -325,85 +224,10 @@ $csrfToken = csrf_token();
         <input type="hidden" name="attendance_id" value="<?= (int) $openRecord['id'] ?>">
     <?php endif; ?>
 
-    <?php foreach ($stageLabels as $stageKey => $stageLabel): ?>
-        <section>
-            <h2><?= htmlspecialchars($stageLabel, ENT_QUOTES, 'UTF-8') ?><?= $stagesRequired ? '（必須）' : '' ?></h2>
-            <table class="rows-table" id="rows-table-<?= htmlspecialchars($stageKey, ENT_QUOTES, 'UTF-8') ?>">
-                <thead>
-                    <tr>
-                        <th>施設</th>
-                        <th>参加した従業員（複数選択可）</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>
-                            <select name="<?= htmlspecialchars($stageKey, ENT_QUOTES, 'UTF-8') ?>_facility_id[]">
-                                <option value="">選択してください</option>
-                                <?php foreach ($facilities as $facility): ?>
-                                    <option value="<?= (int) $facility['id'] ?>"><?= htmlspecialchars($facility['name'], ENT_QUOTES, 'UTF-8') ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </td>
-                        <td>
-                            <select class="employee-select" multiple size="<?= max(2, min(6, count($employees))) ?>">
-                                <?php foreach ($employees as $employee): ?>
-                                    <option value="<?= (int) $employee['id'] ?>" <?= (int) $employee['id'] === $recorderId ? 'selected' : '' ?>><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </td>
-                        <td><button type="button" onclick="removeRow(this, '<?= htmlspecialchars($stageKey, ENT_QUOTES, 'UTF-8') ?>')">削除</button></td>
-                    </tr>
-                </tbody>
-            </table>
-            <button type="button" onclick="addRow('<?= htmlspecialchars($stageKey, ENT_QUOTES, 'UTF-8') ?>')">行を追加</button>
-        </section>
-    <?php endforeach; ?>
-
     <button type="submit" id="submit-button">退勤する</button>
 </form>
 
 <script>
-var stageKeys = <?= json_encode(array_keys($stageLabels)) ?>;
-
-// employee-select（複数選択）は行の追加・削除で位置がずれるため、送信直前にDOM上の並び順で
-// stage_employee_ids[行番号][] という名前を振り直す（nameを常に固定にすると、PHP側で
-// 同じ行のselectで選んだ複数値がバラバラの行として展開されてしまうため、行ごとに明示的な番号が必要）。
-function renumberEmployeeSelects() {
-    stageKeys.forEach(function (stage) {
-        var rows = document.querySelectorAll('#rows-table-' + stage + ' tbody tr');
-        rows.forEach(function (row, index) {
-            var select = row.querySelector('.employee-select');
-            if (select) {
-                select.name = stage + '_employee_ids[' + index + '][]';
-            }
-        });
-    });
-}
-
-function addRow(stage) {
-    var tbody = document.querySelector('#rows-table-' + stage + ' tbody');
-    var template = tbody.querySelector('tr');
-    var clone = template.cloneNode(true);
-    clone.querySelectorAll('select').forEach(function (el) {
-        if (el.multiple) {
-            Array.prototype.forEach.call(el.options, function (opt) { opt.selected = false; });
-        } else {
-            el.value = '';
-        }
-    });
-    clone.querySelectorAll('input').forEach(function (el) { el.value = ''; });
-    tbody.appendChild(clone);
-}
-
-function removeRow(button, stage) {
-    var tbody = document.querySelector('#rows-table-' + stage + ' tbody');
-    if (tbody.querySelectorAll('tr').length > 1) {
-        button.closest('tr').remove();
-    }
-}
-
 document.getElementById('clock-out-form').addEventListener('submit', function (e) {
     var form = this;
     var button = document.getElementById('submit-button');
@@ -413,7 +237,6 @@ document.getElementById('clock-out-form').addEventListener('submit', function (e
     }
 
     e.preventDefault();
-    renumberEmployeeSelects();
     button.disabled = true;
     button.textContent = '処理中...';
 
