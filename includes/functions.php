@@ -564,6 +564,23 @@ function calc_wage_breakdown_from_daily_minutes(PDO $pdo, array $employee, array
 const ATTENDANCE_CATEGORY_NONE_LABEL = '区分なし';
 
 /**
+ * 賃金確認（admin/wages.php）の区分別集計で、交通費・手当を全額計上する区分の対応表。
+ * キーは employees.id、値は SHIFT_CATEGORIES のいずれか。
+ * ここに載っていない従業員（今後入社する従業員を含む）は ALLOWANCE_CATEGORY_DEFAULT（店舗）に計上する。
+ * 割り当てを追加・変更する場合はこの表だけを直せばよい。
+ */
+const ALLOWANCE_CATEGORY_BY_EMPLOYEE_ID = [
+    17 => '集荷',     // 安廣洋輔
+    40 => '洗濯代行', // 山本真栄
+];
+const ALLOWANCE_CATEGORY_DEFAULT = '店舗';
+
+function allowance_category_for_employee(int $employeeId): string
+{
+    return ALLOWANCE_CATEGORY_BY_EMPLOYEE_ID[$employeeId] ?? ALLOWANCE_CATEGORY_DEFAULT;
+}
+
+/**
  * 指定従業員・指定月の退勤済み打刻（attendance）から、平日/土日祝・所定/残業・深夜の時間と賃金を集計する。
  * 管理者の賃金確認（admin/wages.php）の一覧・確定処理と、従業員の月間打刻実績
  * （staff/attendance_monthly.php）の月間集計の両方から呼ばれる（両画面で数値が一致するよう共通化）。

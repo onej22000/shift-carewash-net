@@ -442,6 +442,8 @@ foreach ($employees as $employee) {
                         <th>基本給</th>
                         <th>残業手当</th>
                         <th>深夜手当</th>
+                        <th>交通費</th>
+                        <th>手当</th>
                         <th>合計</th>
                     </tr>
                 </thead>
@@ -449,6 +451,13 @@ foreach ($employees as $employee) {
                     <?php foreach ($employees as $employee): ?>
                         <?php
                         $employeeId = (int) $employee['id'];
+                        $confirmed = $confirmedByEmployee[$employeeId] ?? null;
+                        $isAllowanceCategory = allowance_category_for_employee($employeeId) === $categoryLabel;
+                        // 交通費・手当は従業員一覧と同じく、確定済みの月は確定時の値を使う
+                        $categoryCommute = !$isAllowanceCategory ? 0
+                            : ($confirmed !== null ? (int) $confirmed['commute_allowance_total'] : $commuteTotalsByEmployee[$employeeId]);
+                        $categoryAllowance = !$isAllowanceCategory ? 0
+                            : ($confirmed !== null ? (int) $confirmed['allowance_total'] : $allowanceTotalsByEmployee[$employeeId]);
                         $categoryStats = $summaries[$employeeId]['category_breakdown'][$categoryLabel]
                             ?? ['attendance_days' => 0, 'total_minutes' => 0, 'overtime_minutes' => 0, 'night_minutes' => 0,
                                 'base_wage' => 0, 'overtime_wage' => 0, 'night_wage' => 0, 'total_wage' => 0];
@@ -462,7 +471,9 @@ foreach ($employees as $employee) {
                             <td><?= number_format($categoryStats['base_wage']) ?>円</td>
                             <td><?= number_format($categoryStats['overtime_wage']) ?>円</td>
                             <td><?= number_format($categoryStats['night_wage']) ?>円</td>
-                            <td><?= number_format($categoryStats['total_wage']) ?>円</td>
+                            <td><?= number_format($categoryCommute) ?>円</td>
+                            <td><?= number_format($categoryAllowance) ?>円</td>
+                            <td><?= number_format($categoryStats['total_wage'] + $categoryCommute + $categoryAllowance) ?>円</td>
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
@@ -471,7 +482,7 @@ foreach ($employees as $employee) {
     </section>
 <?php endforeach; ?>
 <?php if (!empty($employees)): ?>
-    <p class="notice">区分別集計の金額は、その日の適用時給（平日/土日祝）を区分別の時間に掛けて按分したものです（端数は各項目の合計が上の表と1円単位で一致するよう調整）。出勤日数は延べ日数で、同じ日に複数区分で打刻した日はそれぞれの区分に1日ずつ計上しています。交通費・手当は区分別に分けていません。</p>
+    <p class="notice">区分別集計の金額は、その日の適用時給（平日/土日祝）を区分別の時間に掛けて按分したものです（端数は各項目の合計が上の表と1円単位で一致するよう調整）。出勤日数は延べ日数で、同じ日に複数区分で打刻した日はそれぞれの区分に1日ずつ計上しています。交通費・手当は按分せず、従業員ごとに決めた1つの区分に全額計上しています（<?php foreach ($employees as $employee): ?><?php if (isset(ALLOWANCE_CATEGORY_BY_EMPLOYEE_ID[(int) $employee['id']])): ?><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?>さんは<?= htmlspecialchars(ALLOWANCE_CATEGORY_BY_EMPLOYEE_ID[(int) $employee['id']], ENT_QUOTES, 'UTF-8') ?>、<?php endif; ?><?php endforeach; ?>それ以外の従業員は<?= htmlspecialchars(ALLOWANCE_CATEGORY_DEFAULT, ENT_QUOTES, 'UTF-8') ?>）。</p>
 <?php endif; ?>
 
 <?php if ($selectedEmployee !== null): ?>
