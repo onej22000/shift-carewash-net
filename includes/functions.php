@@ -748,8 +748,8 @@ function calc_attendance_category_breakdown(array $records, ?array $summary = nu
 
 /**
  * 月間集計の表示用データ（calc_wage_summary() の結果＋交通費・手当・確定状態）をまとめて返す。
- * 従業員の月間打刻実績（staff/attendance_monthly.php）と管理者の月間打刻実績
- * （admin/attendance_monthly.php）の月間集計で共通に使う。表示専用で、確定・保存は行わない。
+ * 従業員の月間打刻実績（staff/attendance_monthly.php）の月間集計でのみ使う。表示専用で、確定・保存は行わない
+ * （admin/wages.php はこの関数を使わず、calc_wage_summary() 等から独自に同じ値を計算している）。
  * 交通費・手当・合計は admin/wages.php の従業員一覧と同じく、確定済み（monthly_wagesに行がある）月は
  * 確定時の値、未確定の月は現在の実績からの試算値を display_* に入れる。
  * $employee には id, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount が必要。

@@ -29,7 +29,7 @@ $workDayCount = count($attendanceByDate);
 $holidayDates = fetch_holiday_dates($pdo, $month['start_str'], $month['end_str']);
 
 // ---- 月間集計（管理者の賃金確認 admin/wages.php と同じ calc_wage_summary() で本人分のみ計算。表示専用） ----
-// 交通費・手当・合計・確定状態の扱いは build_monthly_wage_overview() で admin/attendance_monthly.php と共通化している。
+// 交通費・手当・合計・確定状態の扱いは build_monthly_wage_overview() で計算する（確定済みの月は admin/wages.php の一覧と同じく確定時の値）。
 $wageEmployeeStmt = $pdo->prepare(
     'SELECT id, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount
      FROM employees WHERE id = :id'
