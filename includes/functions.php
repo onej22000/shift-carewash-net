@@ -592,7 +592,8 @@ function allowance_category_for_employee(int $employeeId): string
  * 返り値には calc_wage_breakdown_from_daily_minutes() の結果に加え、打刻区分（attendance.category）別の
  * 時間・金額内訳 category_breakdown を含む（詳細は calc_attendance_category_breakdown()。
  * 金額内訳は admin/wages.php の区分別集計でのみ表示）と、交通費（日額）の計上回数 commute_trips
- * （出勤日数＋同じ日の退勤〜次の出勤が COMMUTE_SEPARATE_TRIP_GAP_MINUTES 以上空いた回数）を含む。
+ * （出勤日数＋同じ日の退勤〜次の出勤が COMMUTE_SEPARATE_TRIP_GAP_MINUTES 以上空いた回数）、
+ * その区分別の内訳 commute_trips_by_category（区分 => 回数。複数区分が混在するトリップは固定区分に計上）を含む。
  */
 function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
 {
@@ -613,6 +614,7 @@ function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
     $records = [];
     $commuteTrips = 0;
     $lastClockOutByDay = [];
+    $tripCategories = []; // トリップ番号 => [区分 => true]（区分NULLは ATTENDANCE_CATEGORY_NONE_LABEL）
     foreach ($stmt->fetchAll() as $row) {
         // 交通費の回数: 出勤日ごとに1回＋同じ日の退勤〜次の出勤が COMMUTE_SEPARATE_TRIP_GAP_MINUTES 以上空いた回数
         $lastClockOut = $lastClockOutByDay[$row['work_day']] ?? null;
@@ -620,6 +622,7 @@ function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
             || (strtotime($row['clock_in_at']) - strtotime($lastClockOut)) >= COMMUTE_SEPARATE_TRIP_GAP_MINUTES * 60) {
             $commuteTrips++;
         }
+        $tripCategories[$commuteTrips][$row['category'] ?? ATTENDANCE_CATEGORY_NONE_LABEL] = true;
         if ($lastClockOut === null || $row['clock_out_at'] > $lastClockOut) {
             $lastClockOutByDay[$row['work_day']] = $row['clock_out_at'];
         }
@@ -639,6 +642,16 @@ function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
     $summary = calc_wage_breakdown_from_daily_minutes($pdo, $employee, $dailyMinutes, $dailyNightMinutes);
     $summary['category_breakdown'] = calc_attendance_category_breakdown($records, $summary);
     $summary['commute_trips'] = $commuteTrips;
+
+    // トリップごとの区分: トリップ内の打刻がすべて同じ区分ならその区分、複数区分が混在するトリップは
+    // 手当と同じ固定区分（allowance_category_for_employee()）に寄せる
+    $summary['commute_trips_by_category'] = [];
+    foreach ($tripCategories as $categories) {
+        $tripCategory = count($categories) === 1
+            ? (string) array_key_first($categories)
+            : allowance_category_for_employee((int) $employee['id']);
+        $summary['commute_trips_by_category'][$tripCategory] = ($summary['commute_trips_by_category'][$tripCategory] ?? 0) + 1;
+    }
 
     return $summary;
 }
@@ -789,6 +802,30 @@ function calc_commute_allowance_total(array $employee, int $commuteTrips): int
     }
 
     return $amount * $commuteTrips;
+}
+
+/**
+ * 交通費の月間計上額を、トリップの区分別回数（calc_wage_summary() の commute_trips_by_category）の比率で区分に振り分ける。
+ * 日額区分で回数が変わっていなければ「日額×その区分の回数」と一致する。月額区分や確定済みの月の確定額など、
+ * 回数×日額にならない額も比率で按分し、端数は distribute_category_wage_rounding() で合計が $commuteTotal と一致するよう調整する。
+ * トリップが無いのに額がある場合（出勤なしの月額区分など）は固定区分（allowance_category_for_employee()）に全額計上する。
+ *
+ * @param array<string,int> $tripsByCategory
+ * @return array<string,int> 区分 => 交通費
+ */
+function distribute_commute_allowance_by_category(array $tripsByCategory, int $commuteTotal, int $employeeId): array
+{
+    $totalTrips = array_sum($tripsByCategory);
+    if ($totalTrips === 0) {
+        return $commuteTotal === 0 ? [] : [allowance_category_for_employee($employeeId) => $commuteTotal];
+    }
+
+    $accum = [];
+    foreach ($tripsByCategory as $category => $trips) {
+        $accum[$category] = $commuteTotal * $trips / $totalTrips;
+    }
+
+    return distribute_category_wage_rounding($accum, $commuteTotal);
 }
 
 function get_employee_allowances(PDO $pdo, int $employeeId): array

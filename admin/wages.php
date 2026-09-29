@@ -453,9 +453,13 @@ foreach ($employees as $employee) {
                         $employeeId = (int) $employee['id'];
                         $confirmed = $confirmedByEmployee[$employeeId] ?? null;
                         $isAllowanceCategory = allowance_category_for_employee($employeeId) === $categoryLabel;
-                        // 交通費・手当は従業員一覧と同じく、確定済みの月は確定時の値を使う
-                        $categoryCommute = !$isAllowanceCategory ? 0
-                            : ($confirmed !== null ? (int) $confirmed['commute_allowance_total'] : $commuteTotalsByEmployee[$employeeId]);
+                        // 交通費・手当は従業員一覧と同じく、確定済みの月は確定時の値を使う。
+                        // 交通費はトリップごとの区分の回数比で振り分け、手当は固定区分に全額計上する
+                        $categoryCommute = distribute_commute_allowance_by_category(
+                            $summaries[$employeeId]['commute_trips_by_category'],
+                            $confirmed !== null ? (int) $confirmed['commute_allowance_total'] : $commuteTotalsByEmployee[$employeeId],
+                            $employeeId
+                        )[$categoryLabel] ?? 0;
                         $categoryAllowance = !$isAllowanceCategory ? 0
                             : ($confirmed !== null ? (int) $confirmed['allowance_total'] : $allowanceTotalsByEmployee[$employeeId]);
                         $categoryStats = $summaries[$employeeId]['category_breakdown'][$categoryLabel]
@@ -482,7 +486,7 @@ foreach ($employees as $employee) {
     </section>
 <?php endforeach; ?>
 <?php if (!empty($employees)): ?>
-    <p class="notice">区分別集計の金額は、その日の適用時給（平日/土日祝）を区分別の時間に掛けて按分したものです（端数は各項目の合計が上の表と1円単位で一致するよう調整）。出勤日数は延べ日数で、同じ日に複数区分で打刻した日はそれぞれの区分に1日ずつ計上しています。交通費・手当は按分せず、従業員ごとに決めた1つの区分に全額計上しています（<?php foreach ($employees as $employee): ?><?php if (isset(ALLOWANCE_CATEGORY_BY_EMPLOYEE_ID[(int) $employee['id']])): ?><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?>さんは<?= htmlspecialchars(ALLOWANCE_CATEGORY_BY_EMPLOYEE_ID[(int) $employee['id']], ENT_QUOTES, 'UTF-8') ?>、<?php endif; ?><?php endforeach; ?>それ以外の従業員は<?= htmlspecialchars(ALLOWANCE_CATEGORY_DEFAULT, ENT_QUOTES, 'UTF-8') ?>）。</p>
+    <p class="notice">区分別集計の金額は、その日の適用時給（平日/土日祝）を区分別の時間に掛けて按分したものです（端数は各項目の合計が上の表と1円単位で一致するよう調整）。出勤日数は延べ日数で、同じ日に複数区分で打刻した日はそれぞれの区分に1日ずつ計上しています。交通費は通勤1回（同じ日でも退勤〜再出勤が<?= COMMUTE_SEPARATE_TRIP_GAP_MINUTES ?>分以上空けば別の1回）ごとに、その間に打刻した区分へ計上しています（1回の中で複数の区分に打刻した場合は、下記の手当と同じ区分に計上）。手当は按分せず、従業員ごとに決めた1つの区分に全額計上しています（<?php foreach ($employees as $employee): ?><?php if (isset(ALLOWANCE_CATEGORY_BY_EMPLOYEE_ID[(int) $employee['id']])): ?><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?>さんは<?= htmlspecialchars(ALLOWANCE_CATEGORY_BY_EMPLOYEE_ID[(int) $employee['id']], ENT_QUOTES, 'UTF-8') ?>、<?php endif; ?><?php endforeach; ?>それ以外の従業員は<?= htmlspecialchars(ALLOWANCE_CATEGORY_DEFAULT, ENT_QUOTES, 'UTF-8') ?>）。</p>
 <?php endif; ?>
 
 <?php if ($selectedEmployee !== null): ?>
