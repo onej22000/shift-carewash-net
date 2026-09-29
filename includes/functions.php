@@ -492,6 +492,8 @@ function calc_wage_breakdown_from_daily_minutes(PDO $pdo, array $employee, array
             'regular_minutes' => $regularMinutes,
             'overtime_minutes' => $overtimeMinutes,
             'night_minutes' => $dayNightMinutes,
+            'regular_wage' => $regularWage,
+            'overtime_wage' => $overtimeWage,
             'day_wage' => $dayWage,
             'night_wage' => $dayNightWage,
         ];
@@ -568,7 +570,8 @@ const ATTENDANCE_CATEGORY_NONE_LABEL = '区分なし';
  * $employee には id, hourly_wage_weekday, hourly_wage_holiday が必要。
  *
  * 返り値には calc_wage_breakdown_from_daily_minutes() の結果に加え、打刻区分（attendance.category）別の
- * 時間内訳 category_breakdown を含む（admin/wages.php は使用しない。詳細は calc_attendance_category_breakdown()）。
+ * 時間・金額内訳 category_breakdown を含む（詳細は calc_attendance_category_breakdown()。
+ * 金額内訳は admin/wages.php の区分別集計でのみ表示）。
  */
 function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
 {
@@ -601,23 +604,28 @@ function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
     }
 
     $summary = calc_wage_breakdown_from_daily_minutes($pdo, $employee, $dailyMinutes, $dailyNightMinutes);
-    $summary['category_breakdown'] = calc_attendance_category_breakdown($records);
+    $summary['category_breakdown'] = calc_attendance_category_breakdown($records, $summary);
 
     return $summary;
 }
 
 /**
- * 打刻区分（attendance.category）別の 出勤日数・労働時間・残業時間・深夜労働時間 を集計する（時間のみ、金額は扱わない）。
+ * 打刻区分（attendance.category）別の 出勤日数・労働時間・残業時間・深夜労働時間 と、その金額を集計する。
  * - 残業時間: 1日の打刻を出勤時刻順に積み上げ、REGULAR_WORK_MINUTES_PER_DAY（8時間）を超えた時点以降に
  *   働いていた区分へ割り当てる（例: 店舗376分→洗濯代行181分の日は、残業77分がすべて洗濯代行）。
  *   区分別残業の合計は、日単位で算出する既存の残業時間（overtime_minutes）と必ず一致する。
  * - 出勤日数: 延べ日数。同じ日に複数区分で打刻した日は、それぞれの区分に1日ずつ計上する。
  * - 区分がNULLの打刻（区分カラム導入前の2026年7月分など）は ATTENDANCE_CATEGORY_NONE_LABEL として計上し、
  *   区分別の労働・残業・深夜時間の合計が月合計と一致するようにする。
+ * - 金額（$summary を渡した場合のみ）: 区分ごとの時給は存在しないため、日ごとに算出済みの所定内賃金・残業賃金・
+ *   深夜手当（その日の適用時給＝平日/土日祝で計算済み）を、その日の区分別の所定内・残業・深夜時間の比率で按分し、
+ *   distribute_category_wage_rounding() で丸める。基本給・残業手当・深夜手当のそれぞれで区分別の合計が
+ *   月合計（base_wage / overtime_wage / night_wage）と1円単位で一致し、total_wage の合計も grand_total_wage と一致する。
  * $records は出勤時刻順に並んだ [work_day, category, work_minutes, night_minutes] の配列。
+ * $summary は同じ打刻から calc_wage_breakdown_from_daily_minutes() で求めた結果（省略時は時間のみ集計）。
  * 返り値は SHIFT_CATEGORIES の順（区分なしは該当打刻がある場合のみ末尾に追加）。
  */
-function calc_attendance_category_breakdown(array $records): array
+function calc_attendance_category_breakdown(array $records, ?array $summary = null): array
 {
     $breakdown = [];
     foreach (SHIFT_CATEGORIES as $category) {
@@ -626,6 +634,7 @@ function calc_attendance_category_breakdown(array $records): array
 
     $cumulativeMinutesByDay = [];
     $daysByCategory = [];
+    $dayCategoryMinutes = []; // 日付 => 区分 => [regular, overtime, night]
     foreach ($records as $record) {
         $category = $record['category'] ?? ATTENDANCE_CATEGORY_NONE_LABEL;
         if (!isset($breakdown[$category])) {
@@ -641,10 +650,50 @@ function calc_attendance_category_breakdown(array $records): array
         $breakdown[$category]['overtime_minutes'] += $record['work_minutes'] - $regularMinutes;
         $breakdown[$category]['night_minutes'] += $record['night_minutes'];
         $daysByCategory[$category][$day] = true;
+
+        $dayCategoryMinutes[$day][$category]['regular'] = ($dayCategoryMinutes[$day][$category]['regular'] ?? 0) + $regularMinutes;
+        $dayCategoryMinutes[$day][$category]['overtime'] = ($dayCategoryMinutes[$day][$category]['overtime'] ?? 0) + $record['work_minutes'] - $regularMinutes;
+        $dayCategoryMinutes[$day][$category]['night'] = ($dayCategoryMinutes[$day][$category]['night'] ?? 0) + $record['night_minutes'];
     }
 
     foreach ($daysByCategory as $category => $days) {
         $breakdown[$category]['attendance_days'] = count($days);
+    }
+
+    if ($summary === null) {
+        return $breakdown;
+    }
+
+    $wageAccum = [
+        'regular' => array_fill_keys(array_keys($breakdown), 0.0),
+        'overtime' => array_fill_keys(array_keys($breakdown), 0.0),
+        'night' => array_fill_keys(array_keys($breakdown), 0.0),
+    ];
+    foreach ($summary['daily'] as $dayRow) {
+        $day = $dayRow['work_day'];
+        $dayTotals = [
+            'regular' => [(int) $dayRow['regular_minutes'], (int) $dayRow['regular_wage']],
+            'overtime' => [(int) $dayRow['overtime_minutes'], (int) $dayRow['overtime_wage']],
+            'night' => [(int) $dayRow['night_minutes'], (int) $dayRow['night_wage']],
+        ];
+        foreach ($dayTotals as $kind => [$dayKindMinutes, $dayKindWage]) {
+            if ($dayKindMinutes <= 0) {
+                continue;
+            }
+            foreach ($dayCategoryMinutes[$day] ?? [] as $category => $minutesByKind) {
+                $wageAccum[$kind][$category] += $dayKindWage * $minutesByKind[$kind] / $dayKindMinutes;
+            }
+        }
+    }
+
+    $baseWage = distribute_category_wage_rounding($wageAccum['regular'], (int) $summary['base_wage']);
+    $overtimeWage = distribute_category_wage_rounding($wageAccum['overtime'], (int) $summary['overtime_wage']);
+    $nightWage = distribute_category_wage_rounding($wageAccum['night'], (int) $summary['night_wage']);
+    foreach (array_keys($breakdown) as $category) {
+        $breakdown[$category]['base_wage'] = $baseWage[$category];
+        $breakdown[$category]['overtime_wage'] = $overtimeWage[$category];
+        $breakdown[$category]['night_wage'] = $nightWage[$category];
+        $breakdown[$category]['total_wage'] = $baseWage[$category] + $overtimeWage[$category] + $nightWage[$category];
     }
 
     return $breakdown;

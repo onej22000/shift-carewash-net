@@ -177,6 +177,16 @@ foreach ($employees as $employee) {
     $allowanceTotalsByEmployee[$employeeId] = sum_allowance_amounts($allowancesByEmployee[$employeeId]);
 }
 
+// 区分別集計の表（店舗・洗濯代行・集荷は常に表示、区分なしは該当打刻がある月のみ）
+$categoryTableLabels = SHIFT_CATEGORIES;
+foreach ($summaries as $summary) {
+    foreach (array_keys($summary['category_breakdown']) as $categoryLabel) {
+        if (!in_array($categoryLabel, $categoryTableLabels, true)) {
+            $categoryTableLabels[] = $categoryLabel;
+        }
+    }
+}
+
 $selectedEmployeeId = isset($_GET['employee_id']) ? (int) $_GET['employee_id'] : null;
 $selectedEmployee = null;
 foreach ($employees as $employee) {
@@ -413,6 +423,56 @@ foreach ($employees as $employee) {
         </table>
     <?php endif; ?>
 </section>
+
+<?php foreach ($categoryTableLabels as $categoryLabel): ?>
+    <section class="category-summary">
+        <h2><?= htmlspecialchars($categoryLabel, ENT_QUOTES, 'UTF-8') ?>集計（<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>）</h2>
+
+        <?php if (empty($employees)): ?>
+            <p class="notice">従業員が登録されていません。</p>
+        <?php else: ?>
+            <table class="wages">
+                <thead>
+                    <tr>
+                        <th>氏名</th>
+                        <th>出勤日数</th>
+                        <th>労働時間</th>
+                        <th>残業時間</th>
+                        <th>深夜労働時間</th>
+                        <th>基本給</th>
+                        <th>残業手当</th>
+                        <th>深夜手当</th>
+                        <th>合計</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($employees as $employee): ?>
+                        <?php
+                        $employeeId = (int) $employee['id'];
+                        $categoryStats = $summaries[$employeeId]['category_breakdown'][$categoryLabel]
+                            ?? ['attendance_days' => 0, 'total_minutes' => 0, 'overtime_minutes' => 0, 'night_minutes' => 0,
+                                'base_wage' => 0, 'overtime_wage' => 0, 'night_wage' => 0, 'total_wage' => 0];
+                        ?>
+                        <tr>
+                            <td><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></td>
+                            <td><?= $categoryStats['attendance_days'] ?>日</td>
+                            <td><?= htmlspecialchars(format_minutes_as_hours($categoryStats['total_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                            <td><?= htmlspecialchars(format_minutes_as_hours($categoryStats['overtime_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                            <td><?= htmlspecialchars(format_minutes_as_hours($categoryStats['night_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                            <td><?= number_format($categoryStats['base_wage']) ?>円</td>
+                            <td><?= number_format($categoryStats['overtime_wage']) ?>円</td>
+                            <td><?= number_format($categoryStats['night_wage']) ?>円</td>
+                            <td><?= number_format($categoryStats['total_wage']) ?>円</td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        <?php endif; ?>
+    </section>
+<?php endforeach; ?>
+<?php if (!empty($employees)): ?>
+    <p class="notice">区分別集計の金額は、その日の適用時給（平日/土日祝）を区分別の時間に掛けて按分したものです（端数は各項目の合計が上の表と1円単位で一致するよう調整）。出勤日数は延べ日数で、同じ日に複数区分で打刻した日はそれぞれの区分に1日ずつ計上しています。交通費・手当は区分別に分けていません。</p>
+<?php endif; ?>
 
 <?php if ($selectedEmployee !== null): ?>
     <?php
