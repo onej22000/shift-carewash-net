@@ -25,7 +25,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $summary = calc_wage_summary($pdo, $employee, $postYearMonth);
                 $totalWage = $summary['grand_total_wage'];
-                $commuteAllowanceTotal = calc_commute_allowance_total($employee, $summary['attendance_days']);
+                $commuteAllowanceTotal = calc_commute_allowance_total($employee, $summary['commute_trips']);
                 $allowanceTotal = sum_allowance_amounts(get_employee_allowances($pdo, $employeeId));
 
                 $existingStmt = $pdo->prepare(
@@ -173,7 +173,7 @@ foreach ($employees as $employee) {
     $employeeId = (int) $employee['id'];
     $summaries[$employeeId] = calc_wage_summary($pdo, $employee, $yearMonth);
     $allowancesByEmployee[$employeeId] = get_employee_allowances($pdo, $employeeId);
-    $commuteTotalsByEmployee[$employeeId] = calc_commute_allowance_total($employee, $summaries[$employeeId]['attendance_days']);
+    $commuteTotalsByEmployee[$employeeId] = calc_commute_allowance_total($employee, $summaries[$employeeId]['commute_trips']);
     $allowanceTotalsByEmployee[$employeeId] = sum_allowance_amounts($allowancesByEmployee[$employeeId]);
 }
 
@@ -584,7 +584,7 @@ foreach ($employees as $employee) {
                         <?php if ($selectedEmployee['commute_allowance_type'] === 'monthly'): ?>
                             月額 <?= number_format((int) $selectedEmployee['commute_allowance_amount']) ?>円（固定）
                         <?php else: ?>
-                            日額 <?= number_format((int) $selectedEmployee['commute_allowance_amount']) ?>円 × 出勤<?= $summary['attendance_days'] ?>日
+                            日額 <?= number_format((int) $selectedEmployee['commute_allowance_amount']) ?>円 × <?= $summary['commute_trips'] ?>回（出勤<?= $summary['attendance_days'] ?>日）
                         <?php endif; ?>
                     </td>
                     <td><?= number_format($detailCommuteTotal) ?>円</td>

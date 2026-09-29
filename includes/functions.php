@@ -21,6 +21,9 @@ const OVERTIME_WAGE_MULTIPLIER = 1.25;
 const NIGHT_START_HOUR = 22;
 const NIGHT_END_HOUR = 5;
 const NIGHT_WAGE_PREMIUM_MULTIPLIER = 0.25;
+// 同じ日の「退勤〜次の出勤」の空き時間がこの分数以上なら、一度帰宅したものとして交通費（日額）をもう1回分計上する。
+// 1回の打刻の中の休憩（退勤していない）は対象外。calc_wage_summary() の commute_trips で使用。
+const COMMUTE_SEPARATE_TRIP_GAP_MINUTES = 60;
 
 const CALENDAR_BASE_URL = 'https://shift.carewash.net';
 const CALENDAR_TOKEN_BYTES = 32; // hex化で64文字
@@ -588,7 +591,8 @@ function allowance_category_for_employee(int $employeeId): string
  *
  * 返り値には calc_wage_breakdown_from_daily_minutes() の結果に加え、打刻区分（attendance.category）別の
  * 時間・金額内訳 category_breakdown を含む（詳細は calc_attendance_category_breakdown()。
- * 金額内訳は admin/wages.php の区分別集計でのみ表示）。
+ * 金額内訳は admin/wages.php の区分別集計でのみ表示）と、交通費（日額）の計上回数 commute_trips
+ * （出勤日数＋同じ日の退勤〜次の出勤が COMMUTE_SEPARATE_TRIP_GAP_MINUTES 以上空いた回数）を含む。
  */
 function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
 {
@@ -607,7 +611,19 @@ function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
     $dailyMinutes = [];
     $dailyNightMinutes = [];
     $records = [];
+    $commuteTrips = 0;
+    $lastClockOutByDay = [];
     foreach ($stmt->fetchAll() as $row) {
+        // 交通費の回数: 出勤日ごとに1回＋同じ日の退勤〜次の出勤が COMMUTE_SEPARATE_TRIP_GAP_MINUTES 以上空いた回数
+        $lastClockOut = $lastClockOutByDay[$row['work_day']] ?? null;
+        if ($lastClockOut === null
+            || (strtotime($row['clock_in_at']) - strtotime($lastClockOut)) >= COMMUTE_SEPARATE_TRIP_GAP_MINUTES * 60) {
+            $commuteTrips++;
+        }
+        if ($lastClockOut === null || $row['clock_out_at'] > $lastClockOut) {
+            $lastClockOutByDay[$row['work_day']] = $row['clock_out_at'];
+        }
+
         $workMinutes = (int) $row['work_minutes'];
         $nightMinutes = calc_record_night_work_minutes($row['clock_in_at'], $row['clock_out_at'], $workMinutes);
         $dailyMinutes[$row['work_day']] = ($dailyMinutes[$row['work_day']] ?? 0) + $workMinutes;
@@ -622,6 +638,7 @@ function calc_wage_summary(PDO $pdo, array $employee, string $yearMonth): array
 
     $summary = calc_wage_breakdown_from_daily_minutes($pdo, $employee, $dailyMinutes, $dailyNightMinutes);
     $summary['category_breakdown'] = calc_attendance_category_breakdown($records, $summary);
+    $summary['commute_trips'] = $commuteTrips;
 
     return $summary;
 }
@@ -728,7 +745,7 @@ function build_monthly_wage_overview(PDO $pdo, array $employee, string $yearMont
 {
     $employeeId = (int) $employee['id'];
     $summary = calc_wage_summary($pdo, $employee, $yearMonth);
-    $commuteTotal = calc_commute_allowance_total($employee, $summary['attendance_days']);
+    $commuteTotal = calc_commute_allowance_total($employee, $summary['commute_trips']);
     $allowanceTotal = sum_allowance_amounts(get_employee_allowances($pdo, $employeeId));
 
     $confirmedStmt = $pdo->prepare(
@@ -759,10 +776,11 @@ function build_monthly_wage_overview(PDO $pdo, array $employee, string $yearMont
 
 /**
  * 交通費の月間計上額を計算する。
- * 日額区分: その月の実際の出勤日数（attendanceの日数）× 日額
- * 月額区分: 出勤日数に関わらず固定額
+ * 日額区分: その月の交通費の計上回数（calc_wage_summary() の commute_trips。出勤日ごとに1回、
+ *           同じ日に退勤〜再出勤の空きが COMMUTE_SEPARATE_TRIP_GAP_MINUTES 以上あればその分追加）× 日額
+ * 月額区分: 出勤日数・回数に関わらず固定額
  */
-function calc_commute_allowance_total(array $employee, int $attendanceDays): int
+function calc_commute_allowance_total(array $employee, int $commuteTrips): int
 {
     $amount = (int) ($employee['commute_allowance_amount'] ?? 0);
 
@@ -770,7 +788,7 @@ function calc_commute_allowance_total(array $employee, int $attendanceDays): int
         return $amount;
     }
 
-    return $amount * $attendanceDays;
+    return $amount * $commuteTrips;
 }
 
 function get_employee_allowances(PDO $pdo, int $employeeId): array
