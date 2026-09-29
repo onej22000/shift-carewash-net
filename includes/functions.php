@@ -828,6 +828,35 @@ function distribute_commute_allowance_by_category(array $tripsByCategory, int $c
     return distribute_category_wage_rounding($accum, $commuteTotal);
 }
 
+/**
+ * 区分別集計の行（calc_wage_summary() の category_breakdown に交通費・手当・合計を加えたもの）を作る。
+ * 管理者の賃金確認（admin/wages.php）の区分別集計と、従業員の月間打刻実績（staff/attendance_monthly.php）の
+ * 区分別で共通に使う（両画面で数値が一致するよう共通化）。
+ * 交通費は distribute_commute_allowance_by_category() でトリップの区分別回数比に振り分け、
+ * 手当は固定区分（allowance_category_for_employee()）に全額計上する。
+ * $commuteTotal / $allowanceTotal は確定済みの月なら確定時の値、未確定なら現在の試算値を渡す。
+ *
+ * @return array<string, array> 区分 => category_breakdown の各値＋commute_allowance, allowance, grand_total
+ */
+function build_category_wage_rows(array $summary, int $commuteTotal, int $allowanceTotal, int $employeeId): array
+{
+    $commuteByCategory = distribute_commute_allowance_by_category($summary['commute_trips_by_category'], $commuteTotal, $employeeId);
+    $allowanceCategory = allowance_category_for_employee($employeeId);
+
+    $rows = [];
+    foreach ($summary['category_breakdown'] as $category => $stats) {
+        $commute = $commuteByCategory[$category] ?? 0;
+        $allowance = $category === $allowanceCategory ? $allowanceTotal : 0;
+        $rows[$category] = $stats + [
+            'commute_allowance' => $commute,
+            'allowance' => $allowance,
+            'grand_total' => $stats['total_wage'] + $commute + $allowance,
+        ];
+    }
+
+    return $rows;
+}
+
 function get_employee_allowances(PDO $pdo, int $employeeId): array
 {
     $stmt = $pdo->prepare(

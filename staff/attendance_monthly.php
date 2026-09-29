@@ -39,6 +39,14 @@ $wageEmployee = $wageEmployeeStmt->fetch();
 
 $wageOverview = build_monthly_wage_overview($pdo, $wageEmployee, $yearMonth);
 $wageSummary = $wageOverview['summary'];
+// 区分別（金額込み）: admin/wages.php の区分別集計と同じ build_category_wage_rows() で本人分のみ。
+// 交通費・手当は確定済みの月なら確定時の値（build_monthly_wage_overview() の display_*）を使う
+$categoryWageRows = build_category_wage_rows(
+    $wageSummary,
+    $wageOverview['display_commute_total'],
+    $wageOverview['display_allowance_total'],
+    $employeeId
+);
 $wageBreakdownRows = [
     [
         'label' => '平日',
@@ -223,10 +231,16 @@ $calendarWeeks = array_chunk($calendarCells, 7);
                     <th>労働時間</th>
                     <th>残業時間</th>
                     <th>深夜労働時間</th>
+                    <th>基本給</th>
+                    <th>残業手当</th>
+                    <th>深夜手当</th>
+                    <th>交通費</th>
+                    <th>手当</th>
+                    <th>合計</th>
                 </tr>
             </thead>
             <tbody>
-                <?php foreach ($wageSummary['category_breakdown'] as $categoryLabel => $categoryStats): ?>
+                <?php foreach ($categoryWageRows as $categoryLabel => $categoryStats): ?>
                     <tr>
                         <td>
                             <?php if (isset(CATEGORY_COLORS[$categoryLabel])): ?>
@@ -239,12 +253,19 @@ $calendarWeeks = array_chunk($calendarCells, 7);
                         <td><?= htmlspecialchars(format_minutes_as_hours($categoryStats['total_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(format_minutes_as_hours($categoryStats['overtime_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(format_minutes_as_hours($categoryStats['night_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= number_format($categoryStats['base_wage']) ?>円</td>
+                        <td><?= number_format($categoryStats['overtime_wage']) ?>円</td>
+                        <td><?= number_format($categoryStats['night_wage']) ?>円</td>
+                        <td><?= number_format($categoryStats['commute_allowance']) ?>円</td>
+                        <td><?= number_format($categoryStats['allowance']) ?>円</td>
+                        <td><?= number_format($categoryStats['grand_total']) ?>円</td>
                     </tr>
                 <?php endforeach; ?>
             </tbody>
         </table>
     </div>
     <p class="wage-note">区分別の出勤日数は延べ日数です（同じ日に複数の区分で打刻した日は、それぞれの区分に1日ずつ数えるため、合計が月の出勤日数より多くなることがあります）。1日8時間を超えた残業時間は、打刻の時刻順で8時間を超えた後に働いていた区分に計上しています。</p>
+    <p class="wage-note">区分別の基本給・残業手当・深夜手当は、その日の適用時給（平日/土日祝）を区分別の時間に掛けて按分したものです（端数は各項目の合計が上の月間集計と1円単位で一致するよう調整）。交通費は通勤1回（同じ日でも退勤〜再出勤が<?= COMMUTE_SEPARATE_TRIP_GAP_MINUTES ?>分以上空けば別の1回）ごとに、その間に打刻した区分へ計上しています（1回の中で複数の区分に打刻した場合は、手当と同じ区分に計上）。手当は按分せず、<?= htmlspecialchars(allowance_category_for_employee($employeeId), ENT_QUOTES, 'UTF-8') ?>に全額計上しています。</p>
     <p class="wage-note">退勤済みの打刻のみを集計しています（勤務中の打刻は含みません）。未確定の月は、打刻の修正などにより金額が変わることがあります。</p>
 </section>
 

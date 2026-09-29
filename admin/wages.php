@@ -452,19 +452,16 @@ foreach ($employees as $employee) {
                         <?php
                         $employeeId = (int) $employee['id'];
                         $confirmed = $confirmedByEmployee[$employeeId] ?? null;
-                        $isAllowanceCategory = allowance_category_for_employee($employeeId) === $categoryLabel;
-                        // 交通費・手当は従業員一覧と同じく、確定済みの月は確定時の値を使う。
-                        // 交通費はトリップごとの区分の回数比で振り分け、手当は固定区分に全額計上する
-                        $categoryCommute = distribute_commute_allowance_by_category(
-                            $summaries[$employeeId]['commute_trips_by_category'],
+                        // 交通費・手当は従業員一覧と同じく、確定済みの月は確定時の値を使う
+                        $categoryStats = build_category_wage_rows(
+                            $summaries[$employeeId],
                             $confirmed !== null ? (int) $confirmed['commute_allowance_total'] : $commuteTotalsByEmployee[$employeeId],
+                            $confirmed !== null ? (int) $confirmed['allowance_total'] : $allowanceTotalsByEmployee[$employeeId],
                             $employeeId
-                        )[$categoryLabel] ?? 0;
-                        $categoryAllowance = !$isAllowanceCategory ? 0
-                            : ($confirmed !== null ? (int) $confirmed['allowance_total'] : $allowanceTotalsByEmployee[$employeeId]);
-                        $categoryStats = $summaries[$employeeId]['category_breakdown'][$categoryLabel]
+                        )[$categoryLabel]
                             ?? ['attendance_days' => 0, 'total_minutes' => 0, 'overtime_minutes' => 0, 'night_minutes' => 0,
-                                'base_wage' => 0, 'overtime_wage' => 0, 'night_wage' => 0, 'total_wage' => 0];
+                                'base_wage' => 0, 'overtime_wage' => 0, 'night_wage' => 0, 'total_wage' => 0,
+                                'commute_allowance' => 0, 'allowance' => 0, 'grand_total' => 0];
                         ?>
                         <tr>
                             <td><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></td>
@@ -475,9 +472,9 @@ foreach ($employees as $employee) {
                             <td><?= number_format($categoryStats['base_wage']) ?>円</td>
                             <td><?= number_format($categoryStats['overtime_wage']) ?>円</td>
                             <td><?= number_format($categoryStats['night_wage']) ?>円</td>
-                            <td><?= number_format($categoryCommute) ?>円</td>
-                            <td><?= number_format($categoryAllowance) ?>円</td>
-                            <td><?= number_format($categoryStats['total_wage'] + $categoryCommute + $categoryAllowance) ?>円</td>
+                            <td><?= number_format($categoryStats['commute_allowance']) ?>円</td>
+                            <td><?= number_format($categoryStats['allowance']) ?>円</td>
+                            <td><?= number_format($categoryStats['grand_total']) ?>円</td>
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
