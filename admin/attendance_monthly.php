@@ -66,10 +66,7 @@ $nextMonth = $month['next_month'];
 $pageUrl = '/admin/attendance_monthly.php?month=' . $yearMonth;
 
 // ---- 従業員一覧（過去の実績を追える監査用画面のため、状態を問わず全staffを対象とする） ----
-$employeesStmt = $pdo->query(
-    "SELECT id, name, status, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount
-     FROM employees WHERE role = 'staff' AND is_shared_account = 0 ORDER BY name"
-);
+$employeesStmt = $pdo->query("SELECT id, name, status FROM employees WHERE role = 'staff' AND is_shared_account = 0 ORDER BY name");
 $employees = $employeesStmt->fetchAll();
 $validEmployeeIds = array_map('intval', array_column($employees, 'id'));
 
@@ -364,14 +361,6 @@ if (!empty($employees)) {
 }
 
 $holidayDates = fetch_holiday_dates($pdo, $monthStartStr, $monthEndStr);
-
-// ---- 月間集計（速報）: admin/wages.php・staff/attendance_monthly.php と同じ calc_wage_summary() を
-// build_monthly_wage_overview() 経由で従業員ごとに呼ぶだけで、独自の計算はしない。表示専用（確定は admin/wages.php で行う）。
-$wageOverviewsByEmployee = [];
-foreach ($employees as $employee) {
-    $wageOverviewsByEmployee[(int) $employee['id']] = build_monthly_wage_overview($pdo, $employee, $yearMonth);
-}
-$unconfirmedWageCount = count(array_filter($wageOverviewsByEmployee, static fn (array $o): bool => !$o['is_confirmed']));
 $weekdayLabels = ['月', '火', '水', '木', '金', '土', '日'];
 $csrfToken = csrf_token();
 ?>
@@ -417,21 +406,6 @@ $csrfToken = csrf_token();
         .working-badge { display: inline-block; font-size: 0.75em; background: #0b5ed7; color: #fff; border-radius: 3px; padding: 1px 5px; margin-left: 2px; }
         .category-badge { display: inline-block; font-size: 0.75em; color: #fff; border-radius: 3px; padding: 1px 4px; margin-left: 2px; }
         .summary-footer { margin-top: 16px; font-weight: bold; }
-        .wage-overview { margin-top: 24px; }
-        .wage-overview h2 { font-size: 1.1em; margin: 0 0 8px; }
-        .wage-overview-scroll { overflow-x: auto; max-width: 100%; }
-        table.wage-overview-table { border-collapse: collapse; width: 100%; font-size: 0.9em; }
-        table.wage-overview-table th, table.wage-overview-table td { border: 1px solid #ccc; padding: 6px 8px; text-align: right; white-space: nowrap; }
-        table.wage-overview-table th { background: #f5f5f5; }
-        table.wage-overview-table th:first-child, table.wage-overview-table td:first-child {
-            text-align: left; position: sticky; left: 0; background: #fff; z-index: 1;
-        }
-        table.wage-overview-table th:first-child { background: #f5f5f5; }
-        table.wage-overview-table td.status-col { text-align: center; }
-        table.wage-overview-table td.grand-total { font-weight: bold; }
-        .status-badge { display: inline-block; font-size: 0.85em; padding: 2px 8px; border-radius: 10px; }
-        .status-provisional { background: #fff3cd; color: #856404; }
-        .status-confirmed { background: #e6f4ea; color: #1e7e34; }
         .inline-form { display: inline; }
     </style>
 </head>
@@ -596,62 +570,6 @@ $csrfToken = csrf_token();
     <p class="summary-footer">
         <?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?> 全従業員合計実働時間: <?= htmlspecialchars(format_minutes_as_hours($totalWorkMinutes), ENT_QUOTES, 'UTF-8') ?>
     </p>
-
-    <section class="wage-overview">
-        <h2>月間集計（速報）<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?></h2>
-        <?php if ($unconfirmedWageCount > 0): ?>
-            <p class="notice">「未確定」の従業員は、現在の打刻実績から計算した試算値（速報）です。月末チェックや打刻修正の後に変わることがあります。賃金の確定は<a href="/admin/wages.php?month=<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>">賃金確認</a>で行います。</p>
-        <?php endif; ?>
-        <div class="wage-overview-scroll">
-            <table class="wage-overview-table">
-                <thead>
-                    <tr>
-                        <th>氏名</th>
-                        <th>状態</th>
-                        <th>出勤日数</th>
-                        <th>労働時間</th>
-                        <th>残業時間</th>
-                        <th>深夜労働時間</th>
-                        <th>基本給</th>
-                        <th>残業手当</th>
-                        <th>深夜手当</th>
-                        <th>交通費</th>
-                        <th>手当</th>
-                        <th>合計</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($employees as $employee): ?>
-                        <?php
-                        $employeeId = (int) $employee['id'];
-                        $wageOverview = $wageOverviewsByEmployee[$employeeId];
-                        $wageSummary = $wageOverview['summary'];
-                        ?>
-                        <tr>
-                            <td><a href="/admin/wages.php?month=<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>&employee_id=<?= $employeeId ?>"><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></a></td>
-                            <td class="status-col">
-                                <?php if ($wageOverview['is_confirmed']): ?>
-                                    <span class="status-badge status-confirmed">確定済み</span>
-                                <?php else: ?>
-                                    <span class="status-badge status-provisional">未確定（速報）</span>
-                                <?php endif; ?>
-                            </td>
-                            <td><?= $wageSummary['attendance_days'] ?>日</td>
-                            <td><?= htmlspecialchars(format_minutes_as_hours($wageSummary['total_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
-                            <td><?= htmlspecialchars(format_minutes_as_hours($wageSummary['overtime_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
-                            <td><?= htmlspecialchars(format_minutes_as_hours($wageSummary['night_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
-                            <td><?= number_format($wageSummary['base_wage']) ?>円</td>
-                            <td><?= number_format($wageSummary['overtime_wage']) ?>円</td>
-                            <td><?= number_format($wageSummary['night_wage']) ?>円</td>
-                            <td><?= number_format($wageOverview['display_commute_total']) ?>円</td>
-                            <td><?= number_format($wageOverview['display_allowance_total']) ?>円</td>
-                            <td class="grand-total"><?= number_format($wageOverview['display_grand_total']) ?>円</td>
-                        </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-        </div>
-    </section>
 <?php endif; ?>
 
 <script>
