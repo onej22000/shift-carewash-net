@@ -2041,6 +2041,78 @@ function calc_clock_out_needed_alerts(PDO $pdo, DateTime $now): array
 }
 
 /**
+ * 管理者ダッシュボード「打刻の注意喚起」の種類（attendance_alert_dismissals.alert_type）。
+ */
+const ATTENDANCE_ALERT_TYPES = ['clock_in' => '出勤忘れ', 'clock_out' => '退勤忘れ'];
+
+/**
+ * 注意喚起1行を識別するキー（種類|従業員ID|日付）。
+ */
+function attendance_alert_key(string $alertType, int $employeeId, string $targetDate): string
+{
+    return $alertType . '|' . $employeeId . '|' . $targetDate;
+}
+
+/**
+ * 管理者が確認済みにした注意喚起のキー一覧（キー => true）。
+ * 注意喚起の対象期間（MISSED_CLOCK_TRACKING_START_DATE以降）のみ読む。
+ *
+ * @return array<string,bool>
+ */
+function find_attendance_alert_dismissal_keys(PDO $pdo): array
+{
+    $stmt = $pdo->prepare(
+        'SELECT alert_type, employee_id, target_date FROM attendance_alert_dismissals WHERE target_date >= :cutoff'
+    );
+    $stmt->execute([':cutoff' => MISSED_CLOCK_TRACKING_START_DATE]);
+
+    $keys = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $keys[attendance_alert_key($row['alert_type'], (int) $row['employee_id'], $row['target_date'])] = true;
+    }
+    return $keys;
+}
+
+/**
+ * calc_clock_in_needed_alerts() / calc_clock_out_needed_alerts() の結果から、
+ * 確認済みの行を取り除く（管理者ダッシュボードの表示用。従業員側では使わない）。
+ */
+function filter_dismissed_attendance_alerts(array $alerts, string $alertType, array $dismissedKeys): array
+{
+    return array_values(array_filter(
+        $alerts,
+        static fn (array $a): bool => !isset($dismissedKeys[attendance_alert_key($alertType, $a['employee_id'], $a['work_date'])])
+    ));
+}
+
+/**
+ * 注意喚起を確認済みとして記録する。attendance / shifts は変更しない。
+ * 既に記録済みの行は無視する。
+ *
+ * @param array<int,array{alert_type:string,employee_id:int,target_date:string}> $items
+ * @return int 新たに記録した件数
+ */
+function dismiss_attendance_alerts(PDO $pdo, array $items, int $dismissedBy): int
+{
+    $stmt = $pdo->prepare(
+        'INSERT IGNORE INTO attendance_alert_dismissals (alert_type, employee_id, target_date, dismissed_by, dismissed_at)
+         VALUES (:alert_type, :employee_id, :target_date, :dismissed_by, NOW())'
+    );
+
+    $count = 0;
+    foreach ($items as $item) {
+        $stmt->execute([
+            ':alert_type' => $item['alert_type'],
+            ':employee_id' => $item['employee_id'],
+            ':target_date' => $item['target_date'],
+            ':dismissed_by' => $dismissedBy,
+        ]);
+        $count += $stmt->rowCount();
+    }
+    return $count;
+}
+
+/**
  * 共用アカウント画面に表示する、本日勤務中のスタッフを取得する。
  *
  * @return array<int,array<string,mixed>>

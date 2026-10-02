@@ -15,6 +15,49 @@ $pickupNeededAlerts = calc_pickup_needed_alerts($pdo, $now);
 $clockInNeededAlerts = calc_clock_in_needed_alerts($pdo, $now);
 $clockOutNeededAlerts = calc_clock_out_needed_alerts($pdo, $now);
 
+// 打刻の注意喚起の「確認済み」：管理者ダッシュボードの表示だけを消す（attendance・shiftsは変更しない）
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $action = (string) ($_POST['action'] ?? '');
+    if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
+        set_flash('error', '不正なリクエストです。再度お試しください。');
+    } elseif ($action === 'dismiss_clock_alert' || $action === 'dismiss_all_clock_alerts') {
+        // 今この時点で注意喚起の条件を満たしている行だけを対象にする
+        $currentAlerts = [];
+        foreach (['clock_in' => $clockInNeededAlerts, 'clock_out' => $clockOutNeededAlerts] as $alertType => $alerts) {
+            foreach ($alerts as $alert) {
+                $currentAlerts[attendance_alert_key($alertType, $alert['employee_id'], $alert['work_date'])] = [
+                    'alert_type' => $alertType,
+                    'employee_id' => $alert['employee_id'],
+                    'target_date' => $alert['work_date'],
+                ];
+            }
+        }
+
+        $postedKeys = $action === 'dismiss_clock_alert'
+            ? [(string) ($_POST['alert_key'] ?? '')]
+            : array_map('strval', (array) ($_POST['alert_keys'] ?? []));
+        $items = [];
+        foreach ($postedKeys as $key) {
+            if (isset($currentAlerts[$key])) {
+                $items[$key] = $currentAlerts[$key];
+            }
+        }
+
+        $dismissedCount = $items === [] ? 0 : dismiss_attendance_alerts($pdo, array_values($items), (int) $admin['id']);
+        if ($dismissedCount === 0) {
+            set_flash('error', '対象の注意喚起が見つかりませんでした（既に解消または確認済みの可能性があります）。');
+        } else {
+            set_flash('success', $dismissedCount . '件の打刻の注意喚起を確認済みにしました。');
+        }
+    }
+    header('Location: /admin/dashboard.php');
+    exit;
+}
+
+$dismissedAlertKeys = find_attendance_alert_dismissal_keys($pdo);
+$clockInNeededAlerts = filter_dismissed_attendance_alerts($clockInNeededAlerts, 'clock_in', $dismissedAlertKeys);
+$clockOutNeededAlerts = filter_dismissed_attendance_alerts($clockOutNeededAlerts, 'clock_out', $dismissedAlertKeys);
+
 $flash = pop_flash();
 $csrfToken = csrf_token();
 
@@ -64,6 +107,12 @@ $csrfToken = csrf_token();
         .clock-status-panel > ul > li { margin-bottom: 4px; }
         .clock-status-panel h3 { margin: 12px 0 6px; font-size: 0.95em; color: #4a4fb0; }
         .clock-status-panel h3:first-of-type { margin-top: 0; }
+        .clock-status-panel .panel-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+        .clock-status-panel .panel-head h2 { margin: 0; }
+        .clock-status-panel form { display: inline; margin: 0; }
+        .clock-status-panel li form { margin-left: 10px; }
+        .clock-status-panel button { font-size: 0.8em; padding: 2px 10px; border: 1px solid #8b93d6; border-radius: 4px; background: #fff; color: #33366e; cursor: pointer; }
+        .clock-status-panel button:hover { background: #eceeff; }
         .message { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; }
         .message.success { background: #e6f4ea; color: #1e7e34; }
         .message.error { background: #fdecea; color: #b3261e; }
@@ -128,12 +177,30 @@ $csrfToken = csrf_token();
 
 <?php if (!empty($clockInNeededAlerts) || !empty($clockOutNeededAlerts)): ?>
     <div class="clock-status-panel">
-        <h2>打刻の注意喚起</h2>
+        <div class="panel-head">
+            <h2>打刻の注意喚起</h2>
+            <form method="post" action="/admin/dashboard.php" onsubmit="return confirm('表示中の打刻の注意喚起をすべて確認済みにします。よろしいですか？\n（打刻・シフトのデータは変更されません）');">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                <input type="hidden" name="action" value="dismiss_all_clock_alerts">
+                <?php foreach ($clockInNeededAlerts as $alert): ?>
+                    <input type="hidden" name="alert_keys[]" value="<?= htmlspecialchars(attendance_alert_key('clock_in', $alert['employee_id'], $alert['work_date']), ENT_QUOTES, 'UTF-8') ?>">
+                <?php endforeach; ?>
+                <?php foreach ($clockOutNeededAlerts as $alert): ?>
+                    <input type="hidden" name="alert_keys[]" value="<?= htmlspecialchars(attendance_alert_key('clock_out', $alert['employee_id'], $alert['work_date']), ENT_QUOTES, 'UTF-8') ?>">
+                <?php endforeach; ?>
+                <button type="submit">すべて確認済みにする</button>
+            </form>
+        </div>
         <?php if (!empty($clockInNeededAlerts)): ?>
             <h3>出勤忘れ</h3>
             <ul>
                 <?php foreach ($clockInNeededAlerts as $alert): ?>
-                    <li><?= htmlspecialchars($alert['employee_name'], ENT_QUOTES, 'UTF-8') ?>：<?= htmlspecialchars($alert['work_date'], ENT_QUOTES, 'UTF-8') ?>（シフト開始 <?= htmlspecialchars($alert['shift_start_time'], ENT_QUOTES, 'UTF-8') ?>）</li>
+                    <li><?= htmlspecialchars($alert['employee_name'], ENT_QUOTES, 'UTF-8') ?>：<?= htmlspecialchars($alert['work_date'], ENT_QUOTES, 'UTF-8') ?>（シフト開始 <?= htmlspecialchars($alert['shift_start_time'], ENT_QUOTES, 'UTF-8') ?>）<form method="post" action="/admin/dashboard.php">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                            <input type="hidden" name="action" value="dismiss_clock_alert">
+                            <input type="hidden" name="alert_key" value="<?= htmlspecialchars(attendance_alert_key('clock_in', $alert['employee_id'], $alert['work_date']), ENT_QUOTES, 'UTF-8') ?>">
+                            <button type="submit">確認済み</button>
+                        </form></li>
                 <?php endforeach; ?>
             </ul>
         <?php endif; ?>
@@ -141,7 +208,12 @@ $csrfToken = csrf_token();
             <h3>退勤忘れ</h3>
             <ul>
                 <?php foreach ($clockOutNeededAlerts as $alert): ?>
-                    <li><?= htmlspecialchars($alert['employee_name'], ENT_QUOTES, 'UTF-8') ?>：<?= htmlspecialchars($alert['work_date'], ENT_QUOTES, 'UTF-8') ?>（シフト終了 <?= htmlspecialchars($alert['shift_end_time'], ENT_QUOTES, 'UTF-8') ?>）</li>
+                    <li><?= htmlspecialchars($alert['employee_name'], ENT_QUOTES, 'UTF-8') ?>：<?= htmlspecialchars($alert['work_date'], ENT_QUOTES, 'UTF-8') ?>（シフト終了 <?= htmlspecialchars($alert['shift_end_time'], ENT_QUOTES, 'UTF-8') ?>）<form method="post" action="/admin/dashboard.php">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                            <input type="hidden" name="action" value="dismiss_clock_alert">
+                            <input type="hidden" name="alert_key" value="<?= htmlspecialchars(attendance_alert_key('clock_out', $alert['employee_id'], $alert['work_date']), ENT_QUOTES, 'UTF-8') ?>">
+                            <button type="submit">確認済み</button>
+                        </form></li>
                 <?php endforeach; ?>
             </ul>
         <?php endif; ?>
