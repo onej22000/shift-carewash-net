@@ -155,6 +155,7 @@ $csrfToken = csrf_token();
         <a class="nav-card" href="/admin/shifts.php"><h2>シフト表作成</h2></a>
         <a class="nav-card" href="/admin/employees.php"><h2>従業員管理</h2></a>
         <a class="nav-card" href="/admin/wages.php"><h2>賃金確認</h2></a>
+        <a class="nav-card" href="/admin/payroll.php"><h2>給与計算</h2></a>
         <a class="nav-card" href="/admin/facilities.php"><h2>施設管理</h2></a>
         <a class="nav-card" href="/admin/attendance_monthly.php"><h2>月間打刻実績</h2></a>
     </div>
