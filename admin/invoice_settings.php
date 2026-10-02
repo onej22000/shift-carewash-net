@@ -317,7 +317,7 @@ $fv = fn (?array $row, string $key, string $default = ''): string => inv_h($row[
     </form>
 
 <?php else: ?>
-    <p class="muted">請求月の<strong>1日時点</strong>で有効な最新の適用開始日の単価が使われます（月の途中から受託開始する施設も、その月の1日以前の日付で登録してください）。単価は税込です。</p>
+    <p class="muted">請求月の末日時点で有効な最新の適用開始日の単価が使われます。受託開始日をそのまま適用開始日として登録して構いません。単価は税込です。</p>
     <table class="list">
         <thead><tr><th>施設</th><th>請求先</th><th>商品コード</th><th>商品名</th><th>単位</th><th class="num">単価（税込）</th><th>適用開始日</th><th>状態</th><th></th></tr></thead>
         <tbody>

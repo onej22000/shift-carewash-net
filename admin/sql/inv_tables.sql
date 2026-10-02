@@ -68,8 +68,8 @@ CREATE TABLE IF NOT EXISTS inv_invoice_lines (
   description VARCHAR(200) NOT NULL,
   quantity INT NOT NULL,                    -- 負数可（訂正）
   unit VARCHAR(10),
-  unit_price INT NOT NULL,                  -- 負数可（値引き）
-  amount INT NOT NULL,                      -- quantity * unit_price
+  unit_price INT NULL,                      -- 負数可（値引き）。NULL＝単価未登録（下書きのみ）
+  amount INT NULL,                          -- quantity * unit_price。単価未登録なら NULL
   tax_rate DECIMAL(4,1) NOT NULL DEFAULT 10.0,
   facility_id INT NULL,
   adjustment_id INT NULL,
@@ -91,6 +91,10 @@ CREATE TABLE IF NOT EXISTS inv_adjustments (
   applied_invoice_id INT NULL,              -- 確定した請求書ID（確定後は編集不可）
   created_at DATETIME
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 2026-10-02 追記：単価未登録の施設も下書きに行を作るため、明細の単価・金額を NULL 可にする
+-- （上の CREATE で作成済みの環境向け。何度実行しても同じ結果になる）
+ALTER TABLE inv_invoice_lines MODIFY unit_price INT NULL, MODIFY amount INT NULL;
 
 -- ---------------------------------------------------------------
 -- 初期データ（2026年8月分請求書 No.00000009 より）

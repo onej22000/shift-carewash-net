@@ -33,7 +33,8 @@ foreach ($lines as $line) {
     $rows[] = [
         'code' => (string) $line['product_code'], 'name' => (string) $line['description'],
         'quantity' => (int) $line['quantity'], 'unit' => (string) $line['unit'],
-        'unit_price' => (int) $line['unit_price'], 'amount' => (int) $line['amount'],
+        'unit_price' => $line['unit_price'] === null ? null : (int) $line['unit_price'],
+        'amount' => $line['amount'] === null ? null : (int) $line['amount'],
         'note' => '課' . $line['tax_rate'] . '%',
     ];
 }
@@ -86,6 +87,7 @@ $watermark = ['draft' => '下書き（未確定）', 'void' => '取消済'][$inv
         table.summary th, table.summary td { border: 0.75pt solid #000; height: 8mm; text-align: center; }
         table.summary th { font-weight: normal; background: #eee; }
         table.summary td { text-align: right; padding: 0 2mm; font-size: 11pt; }
+        .unpriced { color: #c00; font-family: sans-serif; font-size: 8pt; }
         .note { margin-top: 3mm; font-size: 9pt; line-height: 1.5; }
         .watermark { position: absolute; top: 120mm; left: 0; width: 100%; text-align: center; font-size: 48pt; color: rgba(200, 0, 0, 0.18); transform: rotate(-20deg); pointer-events: none; font-family: sans-serif; }
         @media print {
@@ -158,7 +160,7 @@ $watermark = ['draft' => '下書き（未確定）', 'void' => '取消済'][$inv
                         <td class="num"><?= $row['quantity'] !== null ? inv_yen($row['quantity']) : '' ?></td>
                         <td class="center"><?= inv_h($row['unit']) ?></td>
                         <td class="num"><?= $row['unit_price'] !== null ? inv_yen($row['unit_price']) : '' ?></td>
-                        <td class="num"><?= inv_yen($row['amount']) ?></td>
+                        <td class="num"><?= $row['amount'] !== null ? inv_yen($row['amount']) : '<span class="unpriced">単価未登録</span>' ?></td>
                         <td class="center"><?= inv_h($row['note']) ?></td>
                     <?php endif; ?>
                 </tr>

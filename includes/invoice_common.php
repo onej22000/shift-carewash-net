@@ -112,7 +112,8 @@ function inv_fetch_lines(PDO $pdo, int $invoiceId): array
     return $stmt->fetchAll();
 }
 
-// 請求対象になりうる施設（linen_trends.php と同じ条件）のうち、受託開始日が対象月の月末以前のもの。
+// 受託開始日が対象月の月末以前の施設（linen_trends.php と同じ条件）。入居者数の未入力チェックに使う
+// （明細行の作成対象はこの条件で絞らない。inv_collect_sources 参照）。
 function inv_eligible_facilities(PDO $pdo, string $month): array
 {
     $stmt = $pdo->prepare(
@@ -127,15 +128,15 @@ function inv_eligible_facilities(PDO $pdo, string $month): array
     return $stmt->fetchAll();
 }
 
-// 対象月の初日時点で有効な最新の単価。
+// 対象月の末日時点で有効な最新の単価（受託開始日を適用開始日として登録した単価も、その月から拾う）。
 function inv_effective_price(PDO $pdo, int $facilityId, string $month): ?array
 {
     $stmt = $pdo->prepare(
         'SELECT * FROM inv_unit_prices
-         WHERE facility_id = :facility_id AND is_active = 1 AND effective_from <= :first_day
+         WHERE facility_id = :facility_id AND is_active = 1 AND effective_from <= :month_end
          ORDER BY effective_from DESC LIMIT 1'
     );
-    $stmt->execute([':facility_id' => $facilityId, ':first_day' => inv_month_first_day($month)]);
+    $stmt->execute([':facility_id' => $facilityId, ':month_end' => inv_month_last_day($month)]);
     $row = $stmt->fetch();
     return $row === false ? null : $row;
 }
@@ -151,36 +152,90 @@ function inv_resident_count(PDO $pdo, int $facilityId, string $month): ?int
     return $value === false ? null : (int) $value;
 }
 
+// 対象月の月末入居者数が入力されている全施設（施設マスタ側の条件では絞らない）。
+function inv_resident_counts_for_month(PDO $pdo, string $month): array
+{
+    $stmt = $pdo->prepare(
+        'SELECT r.facility_id, r.resident_count, f.name
+         FROM facility_resident_counts r
+         INNER JOIN facilities f ON f.id = r.facility_id
+         WHERE r.month_end_date = :month_end
+         ORDER BY f.onboarding_start_date IS NULL, f.onboarding_start_date, f.id'
+    );
+    $stmt->execute([':month_end' => inv_month_last_day($month)]);
+    return $stmt->fetchAll();
+}
+
+function inv_default_item_name(string $facilityName): string
+{
+    return 'CareWash洗濯代行業務委託料（' . $facilityName . '）';
+}
+
+// 確定を止めるエラー。link があれば画面でエラー文の後ろにリンクを出す。
+function inv_error(string $text, ?string $link = null, string $linkLabel = ''): array
+{
+    return ['text' => $text, 'link' => $link, 'link_label' => $linkLabel];
+}
+
+function inv_error_texts(array $errors): array
+{
+    return array_map(fn (array $error) => $error['text'], $errors);
+}
+
 // 請求先・対象月の請求元データ（usage行の素材と、不足しているデータのエラー）。
-// 単価が別の請求先に登録されている施設は対象外。単価未登録の施設はエラーとして含める。
+// usage行は月末入居者数が入力されている全施設に作る。単価未登録なら unit_price を null にする
+// （行は除外しない）。単価が別の請求先に登録されている施設だけは、その請求先の請求書に回す。
 function inv_collect_sources(PDO $pdo, int $clientId, string $month): array
 {
     $usage = [];
     $errors = [];
-    foreach (inv_eligible_facilities($pdo, $month) as $facility) {
-        $facilityId = (int) $facility['id'];
+    $counted = [];
+    foreach (inv_resident_counts_for_month($pdo, $month) as $row) {
+        $facilityId = (int) $row['facility_id'];
+        $counted[$facilityId] = true;
         $price = inv_effective_price($pdo, $facilityId, $month);
         if ($price !== null && (int) $price['client_id'] !== $clientId) {
             continue;
         }
-        $count = inv_resident_count($pdo, $facilityId, $month);
-        if ($count === null) {
-            $errors[] = $facility['name'] . '：' . inv_month_label($month) . '末の入居者数が未入力です。';
+        $usage[] = [
+            'facility_id' => $facilityId,
+            'facility_name' => (string) $row['name'],
+            'product_code' => $price !== null ? $price['product_code'] : '004',
+            'description' => $price !== null ? $price['item_name'] : inv_default_item_name((string) $row['name']),
+            'quantity' => (int) $row['resident_count'],
+            'unit' => $price !== null ? $price['unit'] : '人',
+            'unit_price' => $price !== null ? (int) $price['unit_price'] : null,
+        ];
+    }
+
+    // 入居者数が未入力の施設はエラー（行は作らない）：受託開始日が対象月末以前の施設と、この請求先の単価が登録済みの施設。
+    $candidates = [];
+    foreach (inv_eligible_facilities($pdo, $month) as $facility) {
+        $candidates[(int) $facility['id']] = (string) $facility['name'];
+    }
+    $stmt = $pdo->prepare(
+        'SELECT DISTINCT p.facility_id, f.name
+         FROM inv_unit_prices p
+         INNER JOIN facilities f ON f.id = p.facility_id
+         WHERE p.client_id = :client_id AND p.is_active = 1 AND p.effective_from <= :month_end'
+    );
+    $stmt->execute([':client_id' => $clientId, ':month_end' => inv_month_last_day($month)]);
+    foreach ($stmt->fetchAll() as $row) {
+        $candidates[(int) $row['facility_id']] = (string) $row['name'];
+    }
+    foreach ($candidates as $facilityId => $facilityName) {
+        if (isset($counted[$facilityId])) {
+            continue;
         }
-        if ($price === null) {
-            $errors[] = $facility['name'] . '：' . inv_month_label($month) . '1日時点で有効な単価が未登録です。';
+        $price = inv_effective_price($pdo, $facilityId, $month);
+        if ($price !== null && (int) $price['client_id'] !== $clientId) {
+            continue;
         }
-        if ($count !== null && $price !== null) {
-            $usage[] = [
-                'facility_id' => $facilityId,
-                'facility_name' => (string) $facility['name'],
-                'product_code' => $price['product_code'],
-                'description' => $price['item_name'],
-                'quantity' => $count,
-                'unit' => $price['unit'],
-                'unit_price' => (int) $price['unit_price'],
-            ];
-        }
+        $errors[] = inv_error(
+            $facilityName . '：' . inv_month_label($month) . '末の入居者数が未入力です。',
+            '/admin/linen_trends.php?facility=' . $facilityId,
+            '推移予測で入力'
+        );
     }
 
     $stmt = $pdo->prepare(
@@ -211,28 +266,53 @@ function inv_draft_errors(PDO $pdo, array $invoice, array $lines): array
     }
     foreach ($sources['usage'] as $usage) {
         if (!isset($usageFacilityIds[$usage['facility_id']])) {
-            $errors[] = $usage['facility_name'] . '：明細行がありません（入居者数・単価の登録後に下書きを作り直してください）。';
+            $errors[] = inv_error($usage['facility_name'] . '：明細行がありません（入居者数の登録後に下書きを作り直してください）。');
+        }
+    }
+    $facilityNames = [];
+    foreach ($pdo->query('SELECT id, name FROM facilities') as $row) {
+        $facilityNames[(int) $row['id']] = (string) $row['name'];
+    }
+    foreach ($lines as $line) {
+        if ($line['unit_price'] === null) {
+            $name = $facilityNames[(int) $line['facility_id']] ?? $line['description'];
+            $errors[] = inv_error(
+                $name . '：' . inv_month_label((string) $invoice['billing_month']) . '末日時点で有効な単価が未登録です。'
+                    . '下書きの単価欄に入力して「保存して再計算」するか、施設別単価を登録して下書きを作り直してください。',
+                '/admin/invoice_settings.php?tab=prices',
+                '施設別単価'
+            );
         }
     }
     $pendingIds = [];
     foreach ($sources['adjustments'] as $adjustment) {
         $pendingIds[(int) $adjustment['id']] = true;
         if (!isset($adjustmentIds[(int) $adjustment['id']])) {
-            $errors[] = '訂正・値引き「' . $adjustment['description'] . '」が下書きに含まれていません（下書きを作り直してください）。';
+            $errors[] = inv_error('訂正・値引き「' . $adjustment['description'] . '」が下書きに含まれていません（下書きを作り直してください）。');
         }
     }
     foreach (array_keys($adjustmentIds) as $adjustmentId) {
         if (!isset($pendingIds[$adjustmentId])) {
-            $errors[] = '下書き内の訂正・値引き行（調整ID ' . $adjustmentId . '）が削除済みか反映月が変更されています（下書きを作り直してください）。';
+            $errors[] = inv_error('下書き内の訂正・値引き行（調整ID ' . $adjustmentId . '）が削除済みか反映月が変更されています（下書きを作り直してください）。');
         }
     }
     if (!$lines) {
-        $errors[] = '明細行がありません。';
+        $errors[] = inv_error('明細行がありません。');
     }
     return $errors;
 }
 
-// 明細の合計を再計算して請求書に保存する。
+function inv_has_unpriced_lines(array $lines): bool
+{
+    foreach ($lines as $line) {
+        if ($line['unit_price'] === null) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 明細の合計を再計算して請求書に保存する。単価未登録（amount が NULL）の行は SUM で除外される。
 function inv_recalc_invoice(PDO $pdo, int $invoiceId): array
 {
     $stmt = $pdo->prepare('SELECT COALESCE(SUM(amount), 0) FROM inv_invoice_lines WHERE invoice_id = :id');

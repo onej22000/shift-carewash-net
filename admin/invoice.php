@@ -76,7 +76,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':invoice_id' => $newId, ':sort_order' => $sort, ':line_type' => 'usage',
                     ':product_code' => $usage['product_code'], ':description' => $usage['description'],
                     ':quantity' => $usage['quantity'], ':unit' => $usage['unit'], ':unit_price' => $usage['unit_price'],
-                    ':amount' => $usage['quantity'] * $usage['unit_price'],
+                    ':amount' => $usage['unit_price'] === null ? null : $usage['quantity'] * $usage['unit_price'],
                     ':facility_id' => $usage['facility_id'], ':adjustment_id' => null,
                 ]);
             }
@@ -99,7 +99,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             set_flash('error', '下書きの作成に失敗しました。');
             invoice_redirect();
         }
-        set_flash('success', inv_month_label($month) . '分の下書きを作成しました。' . ($sources['errors'] ? '不足データがあるため確定できません。' : ''));
+        $hasUnpriced = in_array(null, array_column($sources['usage'], 'unit_price'), true);
+        set_flash('success', inv_month_label($month) . '分の下書きを作成しました。' . ($sources['errors'] || $hasUnpriced ? '不足データがあるため、このままでは確定できません。' : ''));
         invoice_redirect($newId);
     }
 
@@ -128,12 +129,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $deleteIds = array_map('intval', (array) ($_POST['delete'] ?? []));
         $postedLines = (array) ($_POST['lines'] ?? []);
         $updates = [];
-        $validateLine = function (array $input, string $label) use (&$errors): ?array {
+        // 利用（usage）行だけは単価の空欄＝単価未登録を許す（金額も NULL、確定は不可）。
+        $validateLine = function (array $input, string $label, bool $allowBlankPrice = false) use (&$errors): ?array {
             $description = trim((string) ($input['description'] ?? ''));
             $productCode = trim((string) ($input['product_code'] ?? ''));
             $unit = trim((string) ($input['unit'] ?? ''));
             $quantity = inv_parse_int($input['quantity'] ?? null);
-            $unitPrice = inv_parse_int($input['unit_price'] ?? null);
+            $priceBlank = $allowBlankPrice && trim((string) ($input['unit_price'] ?? '')) === '';
+            $unitPrice = $priceBlank ? null : inv_parse_int($input['unit_price'] ?? null);
             $lineErrors = [];
             if ($description === '' || mb_strlen($description) > 200) {
                 $lineErrors[] = '商品名は1〜200文字';
@@ -141,7 +144,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (mb_strlen($productCode) > 10 || mb_strlen($unit) > 10) {
                 $lineErrors[] = '商品コード・単位は10文字以内';
             }
-            if ($quantity === null || $unitPrice === null) {
+            if ($quantity === null || ($unitPrice === null && !$priceBlank)) {
                 $lineErrors[] = '数量・単価は整数';
             }
             if ($lineErrors) {
@@ -150,9 +153,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             return [
                 'description' => $description, 'product_code' => $productCode, 'unit' => $unit,
-                'quantity' => $quantity, 'unit_price' => $unitPrice, 'amount' => $quantity * $unitPrice,
+                'quantity' => $quantity, 'unit_price' => $unitPrice,
+                'amount' => $unitPrice === null ? null : $quantity * $unitPrice,
             ];
         };
+        $registerIds = array_map('intval', (array) ($_POST['register_price'] ?? []));
+        $registrations = [];
         $rowNo = 0;
         foreach ($existingLines as $lineId => $line) {
             $rowNo++;
@@ -163,9 +169,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = '明細の送信内容が不足しています。画面を再読み込みしてください。';
                 break;
             }
-            $validated = $validateLine($postedLines[$lineId], $rowNo . '行目');
+            $validated = $validateLine($postedLines[$lineId], $rowNo . '行目', $line['line_type'] === 'usage');
             if ($validated !== null) {
                 $updates[$lineId] = $validated;
+                if (in_array($lineId, $registerIds, true) && $line['line_type'] === 'usage' && $line['facility_id'] !== null) {
+                    if ($validated['unit_price'] === null) {
+                        $errors[] = $rowNo . '行目：施設別単価として登録するには単価を入力してください';
+                    } else {
+                        $registrations[$lineId] = (int) $line['facility_id'];
+                    }
+                }
             }
         }
         $newLine = null;
@@ -212,11 +225,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':unit_price' => $newLine['unit_price'], ':amount' => $newLine['amount'],
                 ]);
             }
+            // チェックありの行は施設別単価（適用開始＝対象月の1日）にも登録。同一施設・同一適用開始日が既にあれば登録しない。
+            $priceNotices = [];
+            $effectiveFrom = inv_month_first_day((string) $invoice['billing_month']);
+            $existsPrice = $pdo->prepare('SELECT COUNT(*) FROM inv_unit_prices WHERE facility_id = :facility_id AND effective_from = :effective_from');
+            $insertPrice = $pdo->prepare(
+                'INSERT INTO inv_unit_prices (client_id, facility_id, product_code, item_name, unit, unit_price, effective_from, is_active, created_at)
+                 VALUES (:client_id, :facility_id, :product_code, :item_name, :unit, :unit_price, :effective_from, 1, NOW())'
+            );
+            foreach ($registrations as $lineId => $facilityId) {
+                $values = $updates[$lineId];
+                $existsPrice->execute([':facility_id' => $facilityId, ':effective_from' => $effectiveFrom]);
+                if ((int) $existsPrice->fetchColumn() > 0) {
+                    $priceNotices[] = $values['description'] . '：適用開始 ' . $effectiveFrom . ' の施設別単価が既に登録されているため、登録しませんでした（この請求書だけの単価として保存しました）。';
+                    continue;
+                }
+                $insertPrice->execute([
+                    ':client_id' => (int) $invoice['client_id'], ':facility_id' => $facilityId,
+                    ':product_code' => $values['product_code'] === '' ? '004' : $values['product_code'],
+                    ':item_name' => $values['description'], ':unit' => $values['unit'] === '' ? '人' : $values['unit'],
+                    ':unit_price' => $values['unit_price'], ':effective_from' => $effectiveFrom,
+                ]);
+                $priceNotices[] = $values['description'] . '：単価 ' . inv_yen($values['unit_price']) . '円を施設別単価として登録しました（適用開始 ' . $effectiveFrom . '）。';
+            }
             $pdo->prepare('UPDATE inv_invoices SET issue_date = :issue_date, note = :note WHERE id = :id')
                 ->execute([':issue_date' => $issueDate, ':note' => $note === '' ? null : $note, ':id' => $invoiceId]);
             inv_recalc_invoice($pdo, $invoiceId);
             $pdo->commit();
-            set_flash('success', '下書きを保存しました（合計を再計算しました）。');
+            set_flash('success', '下書きを保存しました（合計を再計算しました）。' . implode(' ', $priceNotices));
         } catch (Throwable $e) {
             $pdo->rollBack();
             set_flash('error', '下書きの保存に失敗しました。');
@@ -249,7 +285,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $lines = inv_fetch_lines($pdo, $invoiceId);
             $errors = inv_draft_errors($pdo, $invoice, $lines);
             if ($errors) {
-                throw new RuntimeException('確定できません。' . implode(' ／ ', $errors));
+                throw new RuntimeException('確定できません。' . implode(' ／ ', inv_error_texts($errors)));
             }
             $stmt = $pdo->prepare(
                 "SELECT COUNT(*) FROM inv_invoices WHERE billing_month = :month AND client_id = :client_id AND status = 'issued'"
@@ -342,8 +378,27 @@ $viewId = (int) ($_GET['id'] ?? 0);
 $invoice = $viewId > 0 ? inv_fetch_invoice($pdo, $viewId) : null;
 $lines = $invoice !== null ? inv_fetch_lines($pdo, $viewId) : [];
 $draftErrors = ($invoice !== null && $invoice['status'] === 'draft') ? inv_draft_errors($pdo, $invoice, $lines) : [];
+$hasUnpriced = inv_has_unpriced_lines($lines);
+// 単価を手入力した利用行のうち、施設別単価が未登録の施設には「施設別単価として登録」チェックを出す。
+$registerCandidates = [];
+$manualCount = 0;
+if ($invoice !== null && $invoice['status'] === 'draft') {
+    foreach ($lines as $line) {
+        if ($line['line_type'] === 'manual') {
+            $manualCount++;
+        }
+        if ($line['line_type'] === 'usage' && $line['facility_id'] !== null && $line['unit_price'] !== null
+            && inv_effective_price($pdo, (int) $line['facility_id'], (string) $invoice['billing_month']) === null) {
+            $registerCandidates[(int) $line['id']] = true;
+        }
+    }
+}
 
 $invoices = $pdo->query('SELECT * FROM inv_invoices ORDER BY billing_month DESC, id DESC')->fetchAll();
+$unpricedInvoiceIds = [];
+foreach ($pdo->query('SELECT DISTINCT invoice_id FROM inv_invoice_lines WHERE unit_price IS NULL') as $row) {
+    $unpricedInvoiceIds[(int) $row['invoice_id']] = true;
+}
 $draftKeys = [];
 foreach ($invoices as $row) {
     if ($row['status'] === 'draft') {
@@ -368,6 +423,8 @@ $lineTypeLabels = ['usage' => '利用', 'adjustment' => '訂正・値引き', 'm
         .totals th, .totals td { border: 1px solid #ccc; padding: 6px 12px; }
         .totals td { text-align: right; min-width: 8em; }
         .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; margin: 16px 0; }
+        .unpriced { color: #b3261e; font-weight: bold; }
+        tr.register-row td { background: #f3f8ff; }
     </style>
 </head>
 <body>
@@ -399,7 +456,7 @@ $lineTypeLabels = ['usage' => '利用', 'adjustment' => '訂正・値引き', 'm
             <strong>確定できません：</strong>
             <ul>
                 <?php foreach ($draftErrors as $error): ?>
-                    <li><?= inv_h($error) ?></li>
+                    <li><?= inv_h($error['text']) ?><?php if ($error['link'] !== null): ?> <a href="<?= inv_h($error['link']) ?>"><?= inv_h($error['link_label']) ?></a><?php endif; ?></li>
                 <?php endforeach; ?>
             </ul>
             入居者数は <a href="/admin/linen_trends.php">推移予測（月末入居者数の入力）</a>、単価は <a href="/admin/invoice_settings.php?tab=prices">請求設定（施設別単価）</a> で登録してから、下書きを作り直してください。
@@ -437,7 +494,7 @@ $lineTypeLabels = ['usage' => '利用', 'adjustment' => '訂正・値引き', 'm
                             <td><input type="text" name="lines[<?= $lineId ?>][description]" value="<?= inv_h($line['description']) ?>" maxlength="200" required></td>
                             <td class="num"><input type="text" class="n" inputmode="numeric" name="lines[<?= $lineId ?>][quantity]" value="<?= (int) $line['quantity'] ?>" required></td>
                             <td><input type="text" class="s" name="lines[<?= $lineId ?>][unit]" value="<?= inv_h($line['unit']) ?>" maxlength="10"></td>
-                            <td class="num"><input type="text" class="n" inputmode="numeric" name="lines[<?= $lineId ?>][unit_price]" value="<?= (int) $line['unit_price'] ?>" required></td>
+                            <td class="num"><input type="text" class="n" inputmode="numeric" name="lines[<?= $lineId ?>][unit_price]" value="<?= $line['unit_price'] === null ? '' : (int) $line['unit_price'] ?>"<?= $line['line_type'] === 'usage' ? ' placeholder="未登録"' : ' required' ?>></td>
                         <?php else: ?>
                             <td><?= inv_h($line['product_code']) ?></td>
                             <td><?= inv_h($line['description']) ?></td>
@@ -445,12 +502,23 @@ $lineTypeLabels = ['usage' => '利用', 'adjustment' => '訂正・値引き', 'm
                             <td><?= inv_h($line['unit']) ?></td>
                             <td class="num"><?= inv_yen((int) $line['unit_price']) ?></td>
                         <?php endif; ?>
-                        <td class="num<?= (int) $line['amount'] < 0 ? ' neg' : '' ?>"><?= inv_yen((int) $line['amount']) ?></td>
+                        <?php if ($line['amount'] === null): ?>
+                            <td class="num unpriced">単価未登録</td>
+                        <?php else: ?>
+                            <td class="num<?= (int) $line['amount'] < 0 ? ' neg' : '' ?>"><?= inv_yen((int) $line['amount']) ?></td>
+                        <?php endif; ?>
                         <td>課<?= inv_h($line['tax_rate']) ?>%</td>
                         <?php if ($isDraft): ?>
                             <td><?php if ($line['line_type'] === 'manual'): ?><label><input type="checkbox" name="delete[]" value="<?= $lineId ?>"> 削除</label><?php endif; ?></td>
                         <?php endif; ?>
                     </tr>
+                    <?php if (isset($registerCandidates[$lineId])): ?>
+                        <tr class="register-row">
+                            <td></td>
+                            <td colspan="8"><label><input type="checkbox" name="register_price[]" value="<?= $lineId ?>"> この単価を施設別単価として登録（適用開始：<?= inv_h(inv_month_first_day((string) $invoice['billing_month'])) ?>）</label>
+                                <span class="muted">チェックなしの場合は、この請求書だけの単価として扱います。</span></td>
+                        </tr>
+                    <?php endif; ?>
                 <?php endforeach; ?>
                 <?php if ($isDraft): ?>
                     <tr>
@@ -470,6 +538,9 @@ $lineTypeLabels = ['usage' => '利用', 'adjustment' => '訂正・値引き', 'm
             <tr><th>【内消費税額】</th><td><?= inv_yen((int) $invoice['tax']) ?></td></tr>
             <tr><th>税抜額</th><td><?= inv_yen((int) $invoice['total_excl']) ?></td></tr>
             <tr><th>合計</th><td><strong><?= inv_yen((int) $invoice['total_incl']) ?></strong></td></tr>
+            <?php if ($hasUnpriced): ?>
+                <tr><td colspan="2" class="unpriced">※単価未登録の行があるため暫定</td></tr>
+            <?php endif; ?>
         </table>
         <p>
             備考（請求書の下部に印字）：<br>
@@ -495,6 +566,22 @@ $lineTypeLabels = ['usage' => '利用', 'adjustment' => '訂正・値引き', 'm
             <input type="hidden" name="action" value="delete_draft">
             <input type="hidden" name="id" value="<?= (int) $invoice['id'] ?>">
             <button type="submit" class="danger">下書きを削除</button>
+        </form>
+        <form method="post" action="/admin/invoice.php" onsubmit="return confirm(<?= inv_h(json_encode(
+            '入居者数（推移予測）と施設別単価を再取得して、この下書きを作り直します。' . "\n"
+            . '未反映の訂正・値引きは再度取り込まれます。' . "\n"
+            . '下書き上で修正した数量・単価・商品名は破棄され、'
+            . ($manualCount > 0 ? '手入力で追加した手動行（' . $manualCount . '行）も消えます。' : '手入力で追加した手動行がある場合は消えます。') . "\n"
+            . 'よろしいですか？',
+            JSON_UNESCAPED_UNICODE
+        )) ?>);">
+            <input type="hidden" name="csrf_token" value="<?= inv_h($csrfToken) ?>">
+            <input type="hidden" name="action" value="generate">
+            <input type="hidden" name="month" value="<?= inv_h($invoice['billing_month']) ?>">
+            <input type="hidden" name="client_id" value="<?= (int) $invoice['client_id'] ?>">
+            <input type="hidden" name="issue_date" value="<?= inv_h($invoice['issue_date']) ?>">
+            <input type="hidden" name="overwrite" value="1">
+            <button type="submit">入居者数・単価を再取得して下書きを作り直す</button>
         </form>
     </div>
     <p class="muted">未保存の編集内容は確定時に反映されません。編集した場合は先に「保存して再計算」を押してください。</p>
@@ -568,7 +655,7 @@ $lineTypeLabels = ['usage' => '利用', 'adjustment' => '訂正・値引き', 'm
                         <td><?= inv_h($clientNames[(int) $row['client_id']] ?? '') ?></td>
                         <td class="status-<?= inv_h($row['status']) ?>"><?= inv_h(inv_status_label($row['status'])) ?></td>
                         <td><?= inv_h($row['issue_date']) ?></td>
-                        <td class="num"><?= inv_yen((int) $row['total_incl']) ?></td>
+                        <td class="num"><?= inv_yen((int) $row['total_incl']) ?><?= isset($unpricedInvoiceIds[(int) $row['id']]) ? '<br><span class="unpriced">暫定（単価未登録あり）</span>' : '' ?></td>
                         <td class="num"><?= inv_yen((int) $row['tax']) ?></td>
                         <td><?= inv_h($row['issued_at'] ?? '') ?></td>
                         <td><a href="/admin/invoice.php?id=<?= (int) $row['id'] ?>"><?= $row['status'] === 'draft' ? '確認・修正' : '詳細' ?></a> | <a href="/admin/invoice_print.php?id=<?= (int) $row['id'] ?>" target="_blank" rel="noopener">印刷</a></td>
