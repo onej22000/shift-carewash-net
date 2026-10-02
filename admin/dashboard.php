@@ -37,6 +37,8 @@ $csrfToken = csrf_token();
         .work-related .nav-card::before { background: linear-gradient(90deg, #1687c8, #62c6f5); }
         .pickup-related .nav-card { background: linear-gradient(145deg, #fff9e8 0%, #ffedb0 100%); border-color: #e2bd52; }
         .pickup-related .nav-card::before { background: linear-gradient(90deg, #d89b00, #ffc83d); }
+        .wage-related .nav-card { background: linear-gradient(145deg, #f1faf4 0%, #d2efdc 100%); border-color: #7cc495; }
+        .wage-related .nav-card::before { background: linear-gradient(90deg, #1e8e4e, #5cc98a); }
         .nav-card:hover, .nav-card:focus-visible { border-color: #0b5ed7; box-shadow: 0 12px 24px rgba(30, 80, 140, 0.18), 0 4px 8px rgba(30, 55, 90, 0.12); transform: translateY(-3px); outline: none; }
         .nav-card:active { transform: translateY(1px); box-shadow: 0 3px 8px rgba(30, 55, 90, 0.16); }
         .nav-card h2 { font-size: 1.05em; margin: 0; color: #0b5ed7; }
@@ -154,13 +156,19 @@ $csrfToken = csrf_token();
         <a class="nav-card" href="/admin/boards.php"><h2>掲示板</h2></a>
         <a class="nav-card" href="/admin/shifts.php"><h2>シフト表作成</h2></a>
         <a class="nav-card" href="/admin/employees.php"><h2>従業員管理</h2></a>
+        <a class="nav-card" href="/admin/facilities.php"><h2>施設管理</h2></a>
+        <a class="nav-card" href="/admin/attendance_monthly.php"><h2>月間打刻実績</h2></a>
+    </div>
+</section>
+
+<section class="dashboard-section wage-related">
+    <h2>賃金</h2>
+    <div class="nav-cards">
         <a class="nav-card" href="/admin/wages.php"><h2>賃金確認</h2></a>
         <a class="nav-card" href="/admin/payroll.php"><h2>給与計算</h2></a>
         <a class="nav-card" href="/admin/payroll_employees.php"><h2>従業員の給与設定</h2></a>
         <a class="nav-card" href="/admin/payroll_settings.php"><h2>給与設定（税額表・料率・最低賃金）</h2></a>
         <a class="nav-card" href="/admin/payroll_ledger.php"><h2>賃金台帳</h2></a>
-        <a class="nav-card" href="/admin/facilities.php"><h2>施設管理</h2></a>
-        <a class="nav-card" href="/admin/attendance_monthly.php"><h2>月間打刻実績</h2></a>
     </div>
 </section>
 
