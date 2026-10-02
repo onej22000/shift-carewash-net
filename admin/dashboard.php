@@ -4,6 +4,8 @@ require_once __DIR__ . '/../includes/functions.php';
 
 $admin = require_login('admin');
 $pdo = getPdo();
+// 適用日を迎えた時給履歴（pay_wage_history）を employees の表示用時給に反映する
+sync_employee_wages_from_history($pdo);
 
 $now = new DateTime();
 $vehicleAlerts = calc_vehicle_alerts($pdo, $now->format('Y-m-d'));

@@ -20,6 +20,50 @@ function generate_temp_password(): string
     return $pw;
 }
 
+/**
+ * 時給の入力値を検証する。問題なければ null、あればエラーメッセージを返す。
+ * 給与計算対象（pay_employees.payroll_enabled=1、行が無い場合も対象）の従業員は、
+ * 適用日時点の就業地の最低賃金を平日時給が下回る場合は登録できない。
+ */
+function validate_wage_input(PDO $pdo, ?int $employeeId, int $wageWeekday, int $wageHoliday, string $effectiveFrom): ?string
+{
+    if ($wageWeekday < 0 || $wageHoliday < 0) {
+        return '時給は0以上で入力してください。';
+    }
+    $date = DateTime::createFromFormat('!Y-m-d', $effectiveFrom);
+    if ($date === false || $date->format('Y-m-d') !== $effectiveFrom) {
+        return '時給の適用日を正しく入力してください。';
+    }
+    if ($employeeId !== null && !employee_is_payroll_enabled($pdo, $employeeId)) {
+        return null;
+    }
+    $prefecture = employee_work_prefecture_on($pdo, $employeeId, $effectiveFrom);
+    $minWage = min_wage_on($pdo, $prefecture, $effectiveFrom);
+    if ($minWage !== null && $wageWeekday < $minWage) {
+        return '平日時給 ' . number_format($wageWeekday) . '円 は、' . $effectiveFrom . ' 時点の' . $prefecture . 'の最低賃金 '
+            . number_format($minWage) . '円 を下回るため登録できません。';
+    }
+    return null;
+}
+
+/**
+ * 適用日が確定済みの給与計算の期間に入っている場合の注意文（確定済みの明細は自動では変わらない）。無ければ空文字。
+ */
+function closed_payroll_notice(PDO $pdo, int $employeeId, string $effectiveFrom): string
+{
+    $stmt = $pdo->prepare(
+        "SELECT r.work_month FROM pay_runs r JOIN pay_slips s ON s.run_id = r.id
+         WHERE r.status = 'closed' AND s.employee_id = :employee_id AND r.period_end >= :effective_from
+         ORDER BY r.work_month"
+    );
+    $stmt->execute([':employee_id' => $employeeId, ':effective_from' => $effectiveFrom]);
+    $months = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    if (empty($months)) {
+        return '';
+    }
+    return '（注意: ' . implode('・', $months) . '分の給与は確定済みのため変わりません。反映するには給与計算画面で取消→再計算してください）';
+}
+
 $errorMessage = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -32,19 +76,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $name = trim((string) ($_POST['name'] ?? ''));
             $hourlyWageWeekday = (int) ($_POST['hourly_wage_weekday'] ?? -1);
             $hourlyWageHoliday = (int) ($_POST['hourly_wage_holiday'] ?? -1);
+            $wageEffectiveFrom = (string) ($_POST['wage_effective_from'] ?? '');
             $commuteAllowanceType = (string) ($_POST['commute_allowance_type'] ?? 'daily');
             $commuteAllowanceAmount = (int) ($_POST['commute_allowance_amount'] ?? -1);
 
             if ($name === '') {
                 $errorMessage = '氏名を入力してください。';
-            } elseif ($hourlyWageWeekday < 0 || $hourlyWageHoliday < 0) {
-                $errorMessage = '時給は0以上で入力してください。';
+            } elseif (($wageError = validate_wage_input($pdo, null, $hourlyWageWeekday, $hourlyWageHoliday, $wageEffectiveFrom)) !== null) {
+                $errorMessage = $wageError;
             } elseif (!in_array($commuteAllowanceType, ['daily', 'monthly'], true) || $commuteAllowanceAmount < 0) {
                 $errorMessage = '交通費の区分・金額を正しく入力してください。';
             } else {
                 $inviteCode = generate_invite_code();
                 $expiresAt = (new DateTime('+7 days'))->format('Y-m-d H:i:s');
 
+                $pdo->beginTransaction();
                 $stmt = $pdo->prepare(
                     "INSERT INTO employees (name, role, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount, status, invite_code, invite_code_expires_at)
                      VALUES (:name, 'staff', :hourly_wage_weekday, :hourly_wage_holiday, :commute_allowance_type, :commute_allowance_amount, 'invited', :invite_code, :expires_at)"
@@ -58,36 +104,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':invite_code' => $inviteCode,
                     ':expires_at' => $expiresAt,
                 ]);
+                $newEmployeeId = (int) $pdo->lastInsertId();
+                $pdo->prepare('INSERT INTO pay_employees (employee_id, payroll_enabled, updated_at) VALUES (:employee_id, 1, NOW())')
+                    ->execute([':employee_id' => $newEmployeeId]);
+                register_wage_history($pdo, $newEmployeeId, $wageEffectiveFrom, $hourlyWageWeekday, $hourlyWageHoliday, (int) $admin['id']);
+                $pdo->commit();
 
                 set_flash('success', htmlspecialchars($name, ENT_QUOTES, 'UTF-8') . 'さんを登録し、招待コードを発行しました。');
                 header('Location: /admin/employees.php');
                 exit;
             }
         } elseif ($action === 'update_wage') {
+            // 時給は pay_wage_history に適用日つきで登録し（employees の時給は今日時点の値を同期する表示用）、
+            // 交通費はこれまでどおり employees に保存する
             $employeeId = (int) ($_POST['employee_id'] ?? 0);
             $hourlyWageWeekday = (int) ($_POST['hourly_wage_weekday'] ?? -1);
             $hourlyWageHoliday = (int) ($_POST['hourly_wage_holiday'] ?? -1);
+            $wageEffectiveFrom = (string) ($_POST['wage_effective_from'] ?? '');
             $commuteAllowanceType = (string) ($_POST['commute_allowance_type'] ?? 'daily');
             $commuteAllowanceAmount = (int) ($_POST['commute_allowance_amount'] ?? -1);
 
-            if ($hourlyWageWeekday < 0 || $hourlyWageHoliday < 0) {
-                $errorMessage = '時給は0以上で入力してください。';
+            $empCheckStmt = $pdo->prepare("SELECT id FROM employees WHERE id = :id AND role = 'staff'");
+            $empCheckStmt->execute([':id' => $employeeId]);
+
+            if ($empCheckStmt->fetch() === false) {
+                $errorMessage = '対象の従業員が見つかりません。';
+            } elseif (($wageError = validate_wage_input($pdo, $employeeId, $hourlyWageWeekday, $hourlyWageHoliday, $wageEffectiveFrom)) !== null) {
+                $errorMessage = $wageError;
             } elseif (!in_array($commuteAllowanceType, ['daily', 'monthly'], true) || $commuteAllowanceAmount < 0) {
                 $errorMessage = '交通費の区分・金額を正しく入力してください。';
             } else {
+                $pdo->beginTransaction();
                 $stmt = $pdo->prepare(
-                    "UPDATE employees SET hourly_wage_weekday = :hourly_wage_weekday, hourly_wage_holiday = :hourly_wage_holiday,
-                     commute_allowance_type = :commute_allowance_type, commute_allowance_amount = :commute_allowance_amount
+                    "UPDATE employees SET commute_allowance_type = :commute_allowance_type, commute_allowance_amount = :commute_allowance_amount
                      WHERE id = :id AND role = 'staff'"
                 );
                 $stmt->execute([
-                    ':hourly_wage_weekday' => $hourlyWageWeekday,
-                    ':hourly_wage_holiday' => $hourlyWageHoliday,
                     ':commute_allowance_type' => $commuteAllowanceType,
                     ':commute_allowance_amount' => $commuteAllowanceAmount,
                     ':id' => $employeeId,
                 ]);
-                set_flash('success', '時給・交通費を更新しました。');
+
+                // 適用日時点の時給と同じ値なら履歴を増やさない（交通費だけを変更した場合など）
+                $currentRow = wage_history_row_on($pdo, $employeeId, $wageEffectiveFrom);
+                $wageChanged = $currentRow === null
+                    || $currentRow['wage_weekday'] !== $hourlyWageWeekday
+                    || $currentRow['wage_holiday'] !== $hourlyWageHoliday;
+                if ($wageChanged) {
+                    register_wage_history($pdo, $employeeId, $wageEffectiveFrom, $hourlyWageWeekday, $hourlyWageHoliday, (int) $admin['id']);
+                }
+                $pdo->commit();
+
+                set_flash('success', $wageChanged
+                    ? '時給（' . $wageEffectiveFrom . ' から適用）・交通費を更新しました。' . closed_payroll_notice($pdo, $employeeId, $wageEffectiveFrom)
+                    : '交通費を更新しました（時給は変更なし）。');
                 header('Location: /admin/employees.php');
                 exit;
             }
@@ -192,6 +262,9 @@ if (isset($_SESSION['temp_pw_display'])) {
     unset($_SESSION['temp_pw_display']);
 }
 
+// 適用日を迎えた時給履歴を employees（表示用）に反映してから一覧を出す
+sync_employee_wages_from_history($pdo);
+
 $employeesStmt = $pdo->query(
     "SELECT id, name, login_id, hourly_wage_weekday, hourly_wage_holiday, commute_allowance_type, commute_allowance_amount, status, invite_code, invite_code_expires_at
      FROM employees
@@ -201,9 +274,12 @@ $employeesStmt = $pdo->query(
 $employees = $employeesStmt->fetchAll();
 
 $allowancesByEmployee = [];
+$wageHistoryByEmployee = [];
 foreach ($employees as $employee) {
     $allowancesByEmployee[(int) $employee['id']] = get_employee_allowances($pdo, (int) $employee['id']);
+    $wageHistoryByEmployee[(int) $employee['id']] = wage_history_for_employee($pdo, (int) $employee['id']);
 }
+$todayStr = (new DateTime('today'))->format('Y-m-d');
 
 $statusLabels = [
     'invited' => '招待中',
@@ -252,6 +328,8 @@ $nowStr = (new DateTime())->format('Y-m-d H:i:s');
         .login-id { font-family: monospace; font-size: 0.9em; color: #444; }
         .reset-pw-btn { background: #e67e22; color: #fff; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 0.85em; margin-top: 4px; }
         .reset-pw-btn:hover { background: #c0392b; }
+        .wage-history { margin: 4px 0 0; padding-left: 1.1em; font-size: 0.8em; color: #555; }
+        .wage-history .future { color: #0b5ed7; }
     </style>
 </head>
 <body>
@@ -303,6 +381,11 @@ $nowStr = (new DateTime())->format('Y-m-d H:i:s');
             </div>
 
             <div class="form-row">
+                <label for="wage_effective_from">時給の適用日</label>
+                <input type="date" id="wage_effective_from" name="wage_effective_from" value="<?= htmlspecialchars((new DateTime('today'))->format('Y-m-d'), ENT_QUOTES, 'UTF-8') ?>" required>
+            </div>
+
+            <div class="form-row">
                 <label for="commute_allowance_type">交通費区分</label>
                 <select id="commute_allowance_type" name="commute_allowance_type">
                     <option value="daily">日額（1出勤あたり）</option>
@@ -351,7 +434,20 @@ $nowStr = (new DateTime())->format('Y-m-d H:i:s');
                                 <span style="color:#aaa;">未設定</span>
                             <?php endif; ?>
                         </td>
-                        <td><?= number_format((int) $employee['hourly_wage_weekday']) ?>円</td>
+                        <td>
+                            <?= number_format((int) $employee['hourly_wage_weekday']) ?>円
+                            <?php if (!empty($wageHistoryByEmployee[(int) $employee['id']])): ?>
+                                <ul class="wage-history">
+                                    <?php foreach (array_reverse($wageHistoryByEmployee[(int) $employee['id']]) as $historyRow): ?>
+                                        <li class="<?= $historyRow['effective_from'] > $todayStr ? 'future' : '' ?>">
+                                            <?= htmlspecialchars($historyRow['effective_from'], ENT_QUOTES, 'UTF-8') ?>〜
+                                            平日<?= number_format($historyRow['wage_weekday']) ?> / 土日祝<?= number_format($historyRow['wage_holiday']) ?>
+                                            <?= $historyRow['effective_from'] > $todayStr ? '（予定）' : '' ?>
+                                        </li>
+                                    <?php endforeach; ?>
+                                </ul>
+                            <?php endif; ?>
+                        </td>
                         <td><?= number_format((int) $employee['hourly_wage_holiday']) ?>円</td>
                         <td>
                             <?= $employee['commute_allowance_type'] === 'monthly' ? '月額' : '日額' ?>
@@ -411,6 +507,7 @@ $nowStr = (new DateTime())->format('Y-m-d H:i:s');
                                 <input type="hidden" name="employee_id" value="<?= (int) $employee['id'] ?>">
                                 平日<input type="number" name="hourly_wage_weekday" min="0" step="1" value="<?= (int) $employee['hourly_wage_weekday'] ?>">円
                                 土日祝<input type="number" name="hourly_wage_holiday" min="0" step="1" value="<?= (int) $employee['hourly_wage_holiday'] ?>">円
+                                適用日<input type="date" name="wage_effective_from" value="<?= htmlspecialchars($todayStr, ENT_QUOTES, 'UTF-8') ?>" required>
                                 <br>
                                 交通費
                                 <select name="commute_allowance_type">

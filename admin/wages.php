@@ -4,6 +4,7 @@ require_once __DIR__ . '/../includes/functions.php';
 
 $admin = require_login('admin');
 $pdo = getPdo();
+sync_employee_wages_from_history($pdo);
 
 $errorMessage = '';
 

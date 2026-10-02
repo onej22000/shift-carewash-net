@@ -25,7 +25,7 @@ function combine_time_parts(string $hour, string $minute): string
 }
 
 /**
- * calc_shift_wage_summary()等が返すcategory_wage（区分=>金額）を「店舗:1,000円 洗濯代行:500円 集荷:0円」
+ * calc_shift_wage_estimate()（includes/wage_calc.php）が返すcategory_wage（区分=>金額）を「店舗:1,000円 洗濯代行:500円 集荷:0円」
  * のような小さいテキストに整形する。category_wageが空（区分データ無し）の場合は空文字を返す。
  */
 function render_category_wage_breakdown_html(array $categoryWage): string
@@ -319,22 +319,8 @@ $employeeNamesByDate = $view === 'calendar' ? build_calendar_day_employee_names(
 $calendarWeeks = $view === 'calendar' ? build_calendar_weeks($monthStart, $dates) : [];
 
 // ---- 当月累計シフト時間・見込み賃金（表示中のビューに関わらず「当月」全体を対象に集計） ----
-$currentMonthStart = (clone $anchorDate)->modify('first day of this month')->format('Y-m-d');
-$currentMonthEnd = (clone $anchorDate)->modify('last day of this month')->format('Y-m-d');
-$currentMonthHolidayDates = fetch_holiday_dates($pdo, $currentMonthStart, $currentMonthEnd);
-
-$monthlyShiftsByEmployeeDate = [];
-if (!empty($employees)) {
-    $monthlyStmt = $pdo->prepare(
-        'SELECT employee_id, work_date, start_time, end_time, break_minutes, categories
-         FROM shifts
-         WHERE work_date BETWEEN :start AND :end'
-    );
-    $monthlyStmt->execute([':start' => $currentMonthStart, ':end' => $currentMonthEnd]);
-    foreach ($monthlyStmt->fetchAll() as $row) {
-        $monthlyShiftsByEmployeeDate[(int) $row['employee_id']][$row['work_date']][] = $row;
-    }
-}
+// 従業員ダッシュボードと同じ calc_shift_wage_estimate()（時給履歴・1日8時間/週40時間の割増・法定休憩を反映）で計算する
+$currentYearMonth = $anchorDate->format('Y-m');
 
 /**
  * シフトのコピー＆貼り付け（AJAX作成）用のレスポンスを組み立てる。
@@ -366,21 +352,7 @@ function build_paste_ajax_response(PDO $pdo, int $employeeId, string $workDate, 
     $employeeStmt->execute([':id' => $employeeId]);
     $employeeRow = $employeeStmt->fetch();
 
-    $monthStartStr = (clone $anchorDate)->modify('first day of this month')->format('Y-m-d');
-    $monthEndStr = (clone $anchorDate)->modify('last day of this month')->format('Y-m-d');
-    $monthHolidayDates = fetch_holiday_dates($pdo, $monthStartStr, $monthEndStr);
-
-    $monthlyStmt = $pdo->prepare(
-        'SELECT work_date, start_time, end_time, break_minutes, categories
-         FROM shifts WHERE employee_id = :employee_id AND work_date BETWEEN :start AND :end'
-    );
-    $monthlyStmt->execute([':employee_id' => $employeeId, ':start' => $monthStartStr, ':end' => $monthEndStr]);
-    $shiftsByDate = [];
-    foreach ($monthlyStmt->fetchAll() as $row) {
-        $shiftsByDate[$row['work_date']][] = $row;
-    }
-
-    $summary = calc_shift_wage_summary($shiftsByDate, $employeeRow, $monthHolidayDates);
+    $summary = calc_shift_wage_estimate($pdo, $employeeRow, $anchorDate->format('Y-m'));
     $monthSummaryHtml = '当月予定 ' . htmlspecialchars(format_minutes_as_hours($summary['total_minutes']), ENT_QUOTES, 'UTF-8') . '<br>'
         . '見込み' . number_format($summary['total_wage']) . '円'
         . render_category_wage_breakdown_html($summary['category_wage']);
@@ -881,11 +853,7 @@ function render_day_detail(
                     <?php foreach ($employees as $employee): ?>
                         <?php
                         $employeeId = (int) $employee['id'];
-                        $monthSummary = calc_shift_wage_summary(
-                            $monthlyShiftsByEmployeeDate[$employeeId] ?? [],
-                            $employee,
-                            $currentMonthHolidayDates
-                        );
+                        $monthSummary = calc_shift_wage_estimate($pdo, $employee, $currentYearMonth);
                         ?>
                         <tr>
                             <td class="employee-col">
