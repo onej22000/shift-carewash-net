@@ -156,6 +156,9 @@ $csrfToken = csrf_token();
         <a class="nav-card" href="/admin/employees.php"><h2>従業員管理</h2></a>
         <a class="nav-card" href="/admin/wages.php"><h2>賃金確認</h2></a>
         <a class="nav-card" href="/admin/payroll.php"><h2>給与計算</h2></a>
+        <a class="nav-card" href="/admin/payroll_employees.php"><h2>従業員の給与設定</h2></a>
+        <a class="nav-card" href="/admin/payroll_settings.php"><h2>給与設定（税額表・料率・最低賃金）</h2></a>
+        <a class="nav-card" href="/admin/payroll_ledger.php"><h2>賃金台帳</h2></a>
         <a class="nav-card" href="/admin/facilities.php"><h2>施設管理</h2></a>
         <a class="nav-card" href="/admin/attendance_monthly.php"><h2>月間打刻実績</h2></a>
     </div>

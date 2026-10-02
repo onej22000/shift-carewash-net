@@ -24,9 +24,14 @@ function pay_render_header(array $admin, string $title, string $current = ''): v
     $links = [
         'payroll' => ['/admin/payroll.php', '給与計算'],
         'employees' => ['/admin/payroll_employees.php', '従業員の給与設定'],
+        'settings' => ['/admin/payroll_settings.php', '給与設定'],
         'ledger' => ['/admin/payroll_ledger.php', '賃金台帳'],
-        'settings' => ['/admin/payroll_settings.php', '給与設定・税額表'],
     ];
+    $nav = 'ログイン中: ' . htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') . 'さん（管理者）';
+    foreach ($links as $key => [$href, $label]) {
+        $nav .= ' | ' . ($key === $current ? '<strong>' . htmlspecialchars($label, ENT_QUOTES, 'UTF-8') . '</strong>' : '<a href="' . $href . '">' . htmlspecialchars($label, ENT_QUOTES, 'UTF-8') . '</a>');
+    }
+    $nav .= ' | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a>';
     ?>
 <!DOCTYPE html>
 <html lang="ja">
@@ -36,13 +41,10 @@ function pay_render_header(array $admin, string $title, string $current = ''): v
     <title><?= htmlspecialchars($title, ENT_QUOTES, 'UTF-8') ?> | 管理者</title>
     <style>
         body { font-family: sans-serif; margin: 16px; color: #222; }
-        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
         h1 { font-size: 1.3em; margin: 0; }
         h2 { font-size: 1.1em; margin: 20px 0 8px; }
         h3 { font-size: 1em; margin: 16px 0 6px; }
-        .subnav { margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid #ddd; }
-        .subnav a { margin-right: 14px; }
-        .subnav a.current { font-weight: bold; text-decoration: none; color: #222; }
         .message { padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; white-space: pre-wrap; }
         .message.success { background: #e6f4ea; color: #1e7e34; }
         .message.error { background: #fdecea; color: #b3261e; }
@@ -73,13 +75,8 @@ function pay_render_header(array $admin, string $title, string $current = ''): v
 <body>
 <header>
     <h1><?= htmlspecialchars($title, ENT_QUOTES, 'UTF-8') ?></h1>
-    <nav>ログイン中: <?= htmlspecialchars($admin['name'], ENT_QUOTES, 'UTF-8') ?>さん（管理者） | <a href="/admin/dashboard.php">ダッシュボード</a> | <a href="/admin/logout.php">ログアウト</a></nav>
+    <nav><?= $nav ?></nav>
 </header>
-<div class="subnav">
-    <?php foreach ($links as $key => [$href, $label]): ?>
-        <a href="<?= $href ?>" class="<?= $key === $current ? 'current' : '' ?>"><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></a>
-    <?php endforeach; ?>
-</div>
     <?php
 }
 
