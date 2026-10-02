@@ -158,6 +158,15 @@ $csrfToken = csrf_token();
     </div>
 </section>
 
+<section class="dashboard-section">
+    <h2>請求</h2>
+    <div class="nav-cards">
+        <a class="nav-card" href="/admin/invoice.php"><h2>請求書</h2></a>
+        <a class="nav-card" href="/admin/invoice_adjustments.php"><h2>訂正・値引き</h2></a>
+        <a class="nav-card" href="/admin/invoice_settings.php"><h2>請求設定</h2></a>
+    </div>
+</section>
+
 <section class="dashboard-section work-related">
     <h2>作業関係</h2>
     <div class="nav-cards">
