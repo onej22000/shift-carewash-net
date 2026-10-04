@@ -80,19 +80,25 @@ function jp_date(string $date): string
     $paymentLines = pay_slip_payment_lines($slip);
     $deductionLines = pay_slip_deduction_lines($slip);
     $overtimeMinutes = (int) $slip['minutes_overtime_daily'] + (int) $slip['minutes_overtime_weekly'];
+    $isOfficer = $slip['employment_type'] === 'officer';
+    if ($isOfficer) {
+        // 役員は雇用保険の対象外のため控除欄に出さない
+        $deductionLines = array_values(array_filter($deductionLines, static fn (array $line): bool => $line[0] !== '雇用保険料'));
+    }
     ?>
     <div class="slip">
         <?php if ($slip['status'] === 'draft'): ?><div class="stamp">下書き（未確定）</div><?php elseif ($slip['status'] === 'void'): ?><div class="stamp">取消済み</div><?php endif; ?>
-        <h1>給与明細書</h1>
+        <h1><?= $isOfficer ? '役員報酬明細' : '給与明細書' ?></h1>
         <div class="head">
             <div class="name"><?= pay_h($name) ?> 様</div>
             <div class="meta">
-                <?= $workYear ?>年<?= $workMonthNumber ?>月分（計算期間 <?= pay_h(jp_date($slip['period_start'])) ?>〜<?= pay_h(jp_date($slip['period_end'])) ?>）<br>
+                <?= $workYear ?>年<?= $workMonthNumber ?>月分<?php if (!$isOfficer): ?>（計算期間 <?= pay_h(jp_date($slip['period_start'])) ?>〜<?= pay_h(jp_date($slip['period_end'])) ?>）<?php endif; ?><br>
                 支給日 <?= pay_h(jp_date($slip['pay_date'])) ?><br>
                 <?= pay_h($settings['company_name']) ?>
             </div>
         </div>
 
+        <?php if (!$isOfficer): ?>
         <table>
             <tr><th>出勤日数</th><th>うち土日祝</th><th>労働時間</th><th>洗濯代行</th><th>店舗</th><th>集荷</th><th>時間外</th><th>深夜</th></tr>
             <tr>
@@ -107,6 +113,7 @@ function jp_date(string $date): string
             </tr>
         </table>
         <p class="small">洗濯代行・店舗・集荷の時間は所定内（時間外を除く）。時間外は1日8時間超<?= (int) $slip['minutes_overtime_weekly'] > 0 ? '・週40時間超（うち週' . pay_h(pay_minutes_label((int) $slip['minutes_overtime_weekly'])) . '）' : '' ?>。</p>
+        <?php endif; ?>
 
         <div class="cols">
             <div>
@@ -128,7 +135,7 @@ function jp_date(string $date): string
                 </table>
                 <table>
                     <tr><td>課税対象額</td><td class="num"><?= number_format((int) $slip['taxable_amount']) ?>円</td></tr>
-                    <tr><td>非課税通勤手当</td><td class="num"><?= number_format((int) $slip['commute_nontax']) ?>円</td></tr>
+                    <?php if (!$isOfficer): ?><tr><td>非課税通勤手当</td><td class="num"><?= number_format((int) $slip['commute_nontax']) ?>円</td></tr><?php endif; ?>
                 </table>
             </div>
         </div>

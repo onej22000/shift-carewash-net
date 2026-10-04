@@ -18,6 +18,8 @@ const PAY_WITHHOLDING_TABLE_MAX = 740000; // 月額表の表引きで求めら�
 const PAY_WITHHOLDING_MAX_DEPENDENTS = 7;
 const PAY_DAYS_PER_WEEK = 7;
 const PAY_RESIDENT_TAX_MONTHS = [6, 7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5]; // 住民税の年度内の月順（6月始まり）
+const PAY_EMPLOYMENT_TYPE_LABELS = ['employee' => '従業員', 'officer' => '役員'];
+const PAY_OFFICER_REVISION_MONTHS = 3; // 定期同額給与: 事業年度開始から3か月以内の改定
 
 /** 給与計算画面の共通ヘッダー（管理者のみ。各ページで require_login('admin') 済みであること） */
 function pay_render_header(array $admin, string $title, string $current = ''): void
@@ -203,6 +205,52 @@ function pay_resident_tax_months(PDO $pdo, int $employeeId, int $fiscalYear): ar
     return $months;
 }
 
+/**
+ * 住民税の控除額（特別徴収なら支給日の属する月のマスの額）。
+ *
+ * @return array{0:int, 1:?array} [控除額, 明細スナップショット用の内訳]
+ */
+function pay_resident_tax_deduction(PDO $pdo, int $employeeId, ?array $terms, string $payDate, array &$warnings): array
+{
+    if ($terms === null || ($terms['resident_tax_method'] ?? 'ordinary') !== 'special') {
+        return [0, null];
+    }
+    $fiscalYear = pay_resident_tax_fiscal_year($payDate);
+    $residentMonths = pay_resident_tax_months($pdo, $employeeId, $fiscalYear);
+    if (empty($residentMonths)) {
+        $warnings[] = '住民税が特別徴収ですが、' . $fiscalYear . '年度の税額が未登録のため0円にしています。';
+        return [0, null];
+    }
+    // 支給日の属する月のマスの額を控除する（例: 7月10日支給 → 7月の額）
+    $payMonth = (int) substr($payDate, 5, 2);
+    return [$residentMonths[$payMonth], ['fiscal_year' => $fiscalYear, 'month' => $payMonth, 'months' => $residentMonths]];
+}
+
+/** 役員報酬の月額（$date＝支給日時点で有効な行）。登録が無ければ null */
+function pay_officer_compensation_on(PDO $pdo, int $employeeId, string $date): ?array
+{
+    $stmt = $pdo->prepare(
+        'SELECT * FROM pay_officer_compensation WHERE employee_id = :employee_id AND effective_from <= :date
+         ORDER BY effective_from DESC LIMIT 1'
+    );
+    $stmt->execute([':employee_id' => $employeeId, ':date' => $date]);
+    $row = $stmt->fetch();
+    return $row === false ? null : $row;
+}
+
+/**
+ * 役員報酬の適用開始日が、事業年度開始月から3か月以内（定期同額給与の改定期限内）か。
+ * 事業年度の開始月が未設定なら null。
+ */
+function pay_officer_revision_in_period(?int $fiscalYearStartMonth, string $effectiveFrom): ?bool
+{
+    if ($fiscalYearStartMonth === null) {
+        return null;
+    }
+    $month = (int) substr($effectiveFrom, 5, 2);
+    return ($month - $fiscalYearStartMonth + 12) % 12 < PAY_OFFICER_REVISION_MONTHS;
+}
+
 function pay_emp_insurance_rate_on(PDO $pdo, string $date): ?string
 {
     $stmt = $pdo->prepare('SELECT employee_rate FROM pay_emp_insurance_rates WHERE effective_from <= :date ORDER BY effective_from DESC LIMIT 1');
@@ -371,7 +419,7 @@ function pay_target_employees(PDO $pdo, string $periodStart, string $periodEnd):
 {
     $stmt = $pdo->prepare(
         "SELECT e.id, e.name, e.status, e.hourly_wage_weekday, e.hourly_wage_holiday,
-                e.commute_allowance_type, e.commute_allowance_amount
+                e.commute_allowance_type, e.commute_allowance_amount, COALESCE(p.employment_type, 'employee') AS employment_type
          FROM employees e
          LEFT JOIN pay_employees p ON p.employee_id = e.id
          WHERE COALESCE(p.payroll_enabled, 1) = 1
@@ -435,6 +483,9 @@ function pay_manual_defaults(): array
  */
 function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual): array
 {
+    if (($employee['employment_type'] ?? 'employee') === 'officer') {
+        return pay_calculate_officer_slip($pdo, $run, $employee, $manual);
+    }
     $settings = pay_settings($pdo);
     $employeeId = (int) $employee['id'];
     $periodStart = $run['period_start'];
@@ -480,6 +531,8 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
     // ---- 支給 ----
     $categoryColumns = ['洗濯代行' => 'laundry', '店舗' => 'store', '集荷' => 'pickup'];
     $row = [
+        'employment_type' => 'employee',
+        'pay_officer' => 0,
         'work_days' => $summary['attendance_days'],
         'holiday_work_days' => $summary['holiday_attendance_days'],
         'minutes_total' => $summary['total_minutes'],
@@ -559,20 +612,7 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
         $row['withholding_tax'] = $tax ?? 0;
     }
 
-    $row['resident_tax'] = 0;
-    $residentTaxDetail = null;
-    if ($terms !== null && ($terms['resident_tax_method'] ?? 'ordinary') === 'special') {
-        $fiscalYear = pay_resident_tax_fiscal_year($payDate);
-        $residentMonths = pay_resident_tax_months($pdo, $employeeId, $fiscalYear);
-        if (empty($residentMonths)) {
-            $warnings[] = '住民税が特別徴収ですが、' . $fiscalYear . '年度の税額が未登録のため0円にしています。';
-        } else {
-            // 支給日の属する月のマスの額を控除する（例: 7月10日支給 → 7月の額）
-            $payMonth = (int) substr($payDate, 5, 2);
-            $row['resident_tax'] = $residentMonths[$payMonth];
-            $residentTaxDetail = ['fiscal_year' => $fiscalYear, 'month' => $payMonth, 'months' => $residentMonths];
-        }
-    }
+    [$row['resident_tax'], $residentTaxDetail] = pay_resident_tax_deduction($pdo, $employeeId, $terms, $payDate, $warnings);
 
     $row['deduction_total'] = $row['emp_insurance'] + $row['withholding_tax'] + $row['resident_tax'] + (int) $row['other_deduction'];
     $row['net_pay'] = $row['gross_total'] - $row['deduction_total'];
@@ -584,6 +624,7 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
     $row['employee_snapshot'] = json_encode([
         'name' => $employee['name'],
         'status' => $employee['status'],
+        'employment_type' => 'employee',
         'wage_history' => $wageHistory,
         'terms' => $terms,
         'commute_allowance_type' => $employee['commute_allowance_type'],
@@ -609,8 +650,86 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
     return $row;
 }
 
+/**
+ * 役員1人分の明細を計算する（DBには書かない）。役員は労働者ではないため、勤怠・時給・時間外・深夜・交通費・手当は計算せず、
+ * 支給日時点の役員報酬（月額）＋手入力のその他支給だけを支給する。雇用保険は常に0、最低賃金のチェックはしない。
+ * 源泉所得税は pay_employee_terms の甲乙・扶養人数で月額表から、住民税は特別徴収なら月ごとのマスから控除する。
+ */
+function pay_calculate_officer_slip(PDO $pdo, array $run, array $employee, array $manual): array
+{
+    $employeeId = (int) $employee['id'];
+    $periodEnd = $run['period_end'];
+    $payDate = $run['pay_date'];
+    $errors = [];
+    $warnings = [];
+
+    $terms = pay_terms_on($pdo, $employeeId, $periodEnd);
+    $compensation = pay_officer_compensation_on($pdo, $employeeId, $payDate);
+    if ($compensation === null) {
+        $errors[] = '支給日 ' . $payDate . ' 時点の役員報酬（月額）が未登録です（従業員の給与設定）。';
+    }
+
+    $row = array_fill_keys([
+        'work_days', 'holiday_work_days', 'minutes_total', 'minutes_laundry', 'minutes_store', 'minutes_pickup',
+        'minutes_overtime_daily', 'minutes_overtime_weekly', 'minutes_night', 'commute_trips',
+        'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total',
+        'commute_total', 'parking_total', 'commute_nontax_limit', 'commute_nontax', 'commute_taxable',
+    ], 0);
+    $row['employment_type'] = 'officer';
+    $row['pay_officer'] = $compensation === null ? 0 : (int) $compensation['monthly_amount'];
+    $row['allowance_detail'] = json_encode([], JSON_UNESCAPED_UNICODE);
+
+    $manual = array_merge(pay_manual_defaults(), $manual);
+    foreach (pay_manual_defaults() as $key => $_) {
+        $row[$key] = $manual[$key];
+    }
+    // 役員に勤怠調整は無い
+    $row['attendance_adjust'] = 0;
+    $row['attendance_adjust_reason'] = null;
+
+    $row['gross_total'] = $row['pay_officer'] + (int) $row['other_taxable'] + (int) $row['other_nontax'];
+
+    if ($terms === null) {
+        $errors[] = '給与設定（甲乙・扶養人数・住民税の徴収方法など）が ' . $periodEnd . ' 時点で未登録です（従業員の給与設定）。';
+    }
+
+    $row['emp_insurance_rate'] = null;
+    $row['emp_insurance'] = 0;
+    $row['taxable_amount'] = $row['gross_total'] - (int) $row['other_nontax'];
+    $row['tax_table_year'] = (int) substr($payDate, 0, 4);
+    $row['withholding_tax'] = 0;
+    if ($terms !== null) {
+        $tax = pay_withholding_tax($pdo, $row['taxable_amount'], $terms['tax_column'], (int) $terms['dependents'], $row['tax_table_year'], $errors);
+        $row['withholding_tax'] = $tax ?? 0;
+    }
+
+    [$row['resident_tax'], $residentTaxDetail] = pay_resident_tax_deduction($pdo, $employeeId, $terms, $payDate, $warnings);
+
+    $row['deduction_total'] = $row['withholding_tax'] + $row['resident_tax'] + (int) $row['other_deduction'];
+    $row['net_pay'] = $row['gross_total'] - $row['deduction_total'];
+    if ($row['net_pay'] < 0) {
+        $errors[] = '差引支給額がマイナスです（' . pay_yen($row['net_pay']) . '）。';
+    }
+
+    $row['employee_snapshot'] = json_encode([
+        'name' => $employee['name'],
+        'status' => $employee['status'],
+        'employment_type' => 'officer',
+        'terms' => $terms,
+        'officer_compensation' => $compensation,
+        'resident_tax' => $residentTaxDetail,
+    ], JSON_UNESCAPED_UNICODE);
+    $row['calc_detail'] = json_encode([
+        'warnings' => $warnings,
+        'no_payment' => false,
+    ], JSON_UNESCAPED_UNICODE);
+    $row['errors'] = json_encode(array_values(array_unique($errors)), JSON_UNESCAPED_UNICODE);
+
+    return $row;
+}
+
 const PAY_SLIP_CALC_COLUMNS = [
-    'employee_snapshot', 'calc_detail', 'work_days', 'holiday_work_days', 'minutes_total',
+    'employment_type', 'pay_officer', 'employee_snapshot', 'calc_detail', 'work_days', 'holiday_work_days', 'minutes_total',
     'minutes_laundry', 'minutes_store', 'minutes_pickup', 'minutes_overtime_daily', 'minutes_overtime_weekly', 'minutes_night',
     'commute_trips', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night',
     'allowance_total', 'allowance_detail', 'commute_total', 'parking_total', 'commute_nontax_limit', 'commute_nontax', 'commute_taxable',
@@ -910,6 +1029,16 @@ function pay_minutes_label(int $minutes): string
 /** 明細の支給項目（表示順）。[ラベル, 金額, 補足] の配列 */
 function pay_slip_payment_lines(array $slip): array
 {
+    if (($slip['employment_type'] ?? 'employee') === 'officer') {
+        $lines = [['役員報酬', (int) $slip['pay_officer'], '']];
+        if ((int) $slip['other_taxable'] !== 0) {
+            $lines[] = [(string) ($slip['other_taxable_label'] ?: 'その他（課税）'), (int) $slip['other_taxable'], ''];
+        }
+        if ((int) $slip['other_nontax'] !== 0) {
+            $lines[] = [(string) ($slip['other_nontax_label'] ?: 'その他（非課税）'), (int) $slip['other_nontax'], ''];
+        }
+        return $lines;
+    }
     $lines = [
         ['洗濯代行', (int) $slip['pay_laundry'], pay_minutes_label((int) $slip['minutes_laundry'])],
         ['店舗', (int) $slip['pay_store'], pay_minutes_label((int) $slip['minutes_store'])],

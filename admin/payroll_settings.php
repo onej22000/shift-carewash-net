@@ -38,6 +38,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $overtimeRate = trim((string) ($_POST['overtime_rate'] ?? ''));
                 $nightRate = trim((string) ($_POST['night_rate'] ?? ''));
                 $publicLimit = parse_non_negative_int($_POST['public_transit_nontax_limit'] ?? '');
+                $fiscalStartInput = trim((string) ($_POST['fiscal_year_start_month'] ?? ''));
+                $fiscalStartMonth = $fiscalStartInput === '' ? null : parse_non_negative_int($fiscalStartInput);
 
                 if (mb_strlen($companyName) > 100) {
                     throw new InvalidArgumentException('会社名は100文字以内で入力してください。');
@@ -57,14 +59,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($publicLimit === null) {
                     throw new InvalidArgumentException('通勤手当の非課税限度（公共交通機関）を0以上の整数で入力してください。');
                 }
+                if ($fiscalStartInput !== '' && ($fiscalStartMonth === null || $fiscalStartMonth < 1 || $fiscalStartMonth > 12)) {
+                    throw new InvalidArgumentException('事業年度の開始月は1〜12で選択してください。');
+                }
                 $pdo->prepare(
                     'UPDATE pay_settings SET company_name = :company_name, closing_day = :closing_day, pay_month_offset = :pay_month_offset,
                      pay_day = :pay_day, week_start_dow = :week_start_dow, overtime_rate = :overtime_rate, night_rate = :night_rate,
-                     public_transit_nontax_limit = :public_limit, updated_at = NOW() WHERE id = 1'
+                     public_transit_nontax_limit = :public_limit, fiscal_year_start_month = :fiscal_start, updated_at = NOW() WHERE id = 1'
                 )->execute([
                     ':company_name' => $companyName, ':closing_day' => $closingDay, ':pay_month_offset' => $payMonthOffset,
                     ':pay_day' => $payDay, ':week_start_dow' => $weekStartDow, ':overtime_rate' => $overtimeRate,
-                    ':night_rate' => $nightRate, ':public_limit' => $publicLimit,
+                    ':night_rate' => $nightRate, ':public_limit' => $publicLimit, ':fiscal_start' => $fiscalStartMonth,
                 ]);
                 set_flash('success', '基本設定を保存しました。');
                 settings_redirect('basic');
@@ -241,6 +246,15 @@ pay_render_messages($flash, $errorMessage);
                 <input type="text" name="night_rate" size="6" value="<?= pay_h($settings['night_rate']) ?>">（22時〜5時の加算分）</div>
             <div class="form-row"><label class="caption">通勤手当 非課税限度（公共交通機関）</label>
                 <input type="number" name="public_transit_nontax_limit" min="0" value="<?= (int) $settings['public_transit_nontax_limit'] ?>"> 円／月（併用・駐車場加算の合計上限にも使用）</div>
+            <div class="form-row"><label class="caption">事業年度の開始月</label>
+                <select name="fiscal_year_start_month">
+                    <option value="">未設定</option>
+                    <?php for ($m = 1; $m <= 12; $m++): ?>
+                        <option value="<?= $m ?>" <?= $settings['fiscal_year_start_month'] !== null && (int) $settings['fiscal_year_start_month'] === $m ? 'selected' : '' ?>><?= $m ?>月</option>
+                    <?php endfor; ?>
+                </select>
+                <span class="small">役員報酬の改定時期のチェック（定期同額給与：事業年度開始から3か月以内の改定）に使います</span>
+                <?php if ($settings['fiscal_year_start_month'] === null): ?><span class="small" style="color:#b3261e;">未設定です</span><?php endif; ?></div>
             <p class="small">時間外・深夜の割増率と週の起算曜日は、賃金確認（wages.php）・シフト表の見込み額にも使われます。</p>
             <button type="submit">保存</button>
         </fieldset>

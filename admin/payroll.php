@@ -201,7 +201,7 @@ pay_render_messages($flash, $errorMessage);
     $slipsStmt->execute([':run_id' => $runId]);
     $slips = $slipsStmt->fetchAll();
     $errorCount = 0;
-    $totals = array_fill_keys(['pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'emp_insurance', 'withholding_tax', 'resident_tax', 'other_deduction', 'deduction_total', 'net_pay'], 0);
+    $totals = array_fill_keys(['pay_officer', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'emp_insurance', 'withholding_tax', 'resident_tax', 'other_deduction', 'deduction_total', 'net_pay'], 0);
     foreach ($slips as $s) {
         if (!empty(json_decode((string) $s['errors'], true))) {
             $errorCount++;
@@ -255,8 +255,8 @@ pay_render_messages($flash, $errorMessage);
         <table class="grid">
             <thead>
                 <tr>
-                    <th>氏名</th><th class="num">出勤</th><th class="num">労働時間</th>
-                    <th class="num">洗濯代行</th><th class="num">店舗</th><th class="num">集荷</th><th class="num">時間外</th><th class="num">深夜</th>
+                    <th>氏名</th><th>区分</th><th class="num">出勤</th><th class="num">労働時間</th>
+                    <th class="num">役員報酬</th><th class="num">洗濯代行</th><th class="num">店舗</th><th class="num">集荷</th><th class="num">時間外</th><th class="num">深夜</th>
                     <th class="num">手当</th><th class="num">交通費</th><th class="num">駐車場代</th><th class="num">調整・その他</th>
                     <th class="num">総支給</th><th class="num">雇用保険</th><th class="num">課税対象</th><th class="num">所得税</th><th class="num">住民税</th><th class="num">その他控除</th>
                     <th class="num">差引支給</th><th>エラー・注意</th><th></th>
@@ -268,7 +268,9 @@ pay_render_messages($flash, $errorMessage);
                 $errors = json_decode((string) $s['errors'], true) ?: [];
                 $detail = json_decode((string) $s['calc_detail'], true) ?: [];
                 $manualPay = (int) $s['attendance_adjust'] + (int) $s['other_taxable'] + (int) $s['other_nontax'];
+                $isOfficer = $s['employment_type'] === 'officer';
                 $row = [
+                    'pay_officer' => (int) $s['pay_officer'],
                     'pay_laundry' => (int) $s['pay_laundry'], 'pay_store' => (int) $s['pay_store'], 'pay_pickup' => (int) $s['pay_pickup'],
                     'pay_overtime' => (int) $s['pay_overtime'], 'pay_night' => (int) $s['pay_night'], 'allowance_total' => (int) $s['allowance_total'],
                     'commute_total' => (int) $s['commute_total'], 'parking_total' => (int) $s['parking_total'], 'manual_pay' => $manualPay,
@@ -282,8 +284,10 @@ pay_render_messages($flash, $errorMessage);
                 ?>
                 <tr>
                     <td><?= pay_h($s['name']) ?></td>
-                    <td class="num"><?= (int) $s['work_days'] ?>日</td>
-                    <td class="num"><?= pay_h(pay_minutes_label((int) $s['minutes_total'])) ?></td>
+                    <td><?= $isOfficer ? '<strong>役員</strong>' : '従業員' ?></td>
+                    <td class="num"><?= $isOfficer ? '—' : (int) $s['work_days'] . '日' ?></td>
+                    <td class="num"><?= $isOfficer ? '—' : pay_h(pay_minutes_label((int) $s['minutes_total'])) ?></td>
+                    <td class="num"><?= number_format($row['pay_officer']) ?></td>
                     <td class="num"><?= number_format($row['pay_laundry']) ?></td>
                     <td class="num"><?= number_format($row['pay_store']) ?></td>
                     <td class="num"><?= number_format($row['pay_pickup']) ?></td>
@@ -313,8 +317,8 @@ pay_render_messages($flash, $errorMessage);
                 </tr>
             <?php endforeach; ?>
                 <tr class="total">
-                    <td>合計（<?= count($slips) ?>名）</td><td></td><td></td>
-                    <?php foreach (['pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'emp_insurance'] as $key): ?>
+                    <td>合計（<?= count($slips) ?>名）</td><td></td><td></td><td></td>
+                    <?php foreach (['pay_officer', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'emp_insurance'] as $key): ?>
                         <td class="num"><?= number_format($totals[$key]) ?></td>
                     <?php endforeach; ?>
                     <td></td>
@@ -346,11 +350,15 @@ pay_render_messages($flash, $errorMessage);
                 <input type="hidden" name="run_id" value="<?= $runId ?>">
                 <input type="hidden" name="employee_id" value="<?= (int) $editSlip['employee_id'] ?>">
                 <fieldset>
+                    <?php if ($editSlip['employment_type'] === 'officer'): ?>
+                    <p class="small">役員報酬（月額）は従業員の給与設定で登録します。ここでは手入力のその他支給・控除だけを入力します。保存すると再計算します。</p>
+                    <?php else: ?>
                     <p class="small">勤怠の時間は打刻修正画面で直してください（修正履歴が残ります）。ここでは金額の調整だけを入力します。保存すると再計算します。</p>
                     <div class="form-row"><label class="caption">勤怠調整額（円、マイナス可）</label>
                         <input type="number" name="attendance_adjust" value="<?= (int) $editSlip['attendance_adjust'] ?>">
                         理由 <input type="text" name="attendance_adjust_reason" size="40" maxlength="255" value="<?= pay_h($editSlip['attendance_adjust_reason'] ?? '') ?>">
                         <span class="small">課税・雇用保険の対象。明細に「勤怠調整」と理由を表示</span></div>
+                    <?php endif; ?>
                     <div class="form-row"><label class="caption">その他課税支給</label>
                         <input type="number" name="other_taxable" min="0" value="<?= (int) $editSlip['other_taxable'] ?>">
                         項目名 <input type="text" name="other_taxable_label" maxlength="50" value="<?= pay_h($editSlip['other_taxable_label'] ?? '') ?>"></div>

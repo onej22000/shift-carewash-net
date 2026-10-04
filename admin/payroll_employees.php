@@ -32,13 +32,26 @@ function fetch_employee(PDO $pdo, int $employeeId): ?array
 {
     $stmt = $pdo->prepare(
         'SELECT e.id, e.name, e.role, e.status, e.hourly_wage_weekday, e.hourly_wage_holiday, e.commute_allowance_type, e.commute_allowance_amount,
-                COALESCE(p.payroll_enabled, 1) AS payroll_enabled, p.gender
+                COALESCE(p.payroll_enabled, 1) AS payroll_enabled, COALESCE(p.employment_type, \'employee\') AS employment_type, p.gender
          FROM employees e LEFT JOIN pay_employees p ON p.employee_id = e.id WHERE e.id = :id'
     );
     $stmt->execute([':id' => $employeeId]);
     $row = $stmt->fetch();
     return $row === false ? null : $row;
 }
+
+/** 定期同額給与の警告文（改定期限内なら空文字。事業年度の開始月が未設定ならその旨） */
+function officer_revision_warning(?int $fiscalYearStartMonth, string $effectiveFrom): string
+{
+    $inPeriod = pay_officer_revision_in_period($fiscalYearStartMonth, $effectiveFrom);
+    if ($inPeriod === null) {
+        return '事業年度の開始月が未設定のため、改定時期を確認できません（給与設定で入力してください）。';
+    }
+    return $inPeriod ? '' : '事業年度開始から3か月以内の改定以外は、定期同額給与として損金算入できない可能性があります。';
+}
+
+$fiscalYearStartMonth = pay_settings($pdo)['fiscal_year_start_month'];
+$fiscalYearStartMonth = $fiscalYearStartMonth === null ? null : (int) $fiscalYearStartMonth;
 
 $errorMessage = '';
 
@@ -54,15 +67,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($action === 'save_profile') {
                 $enabled = isset($_POST['payroll_enabled']) ? 1 : 0;
+                $employmentType = (string) ($_POST['employment_type'] ?? 'employee');
                 $gender = (string) ($_POST['gender'] ?? '');
+                if (!isset(PAY_EMPLOYMENT_TYPE_LABELS[$employmentType])) {
+                    throw new InvalidArgumentException('区分の指定が正しくありません。');
+                }
                 if ($gender !== '' && !isset(PAY_GENDER_LABELS[$gender])) {
                     throw new InvalidArgumentException('性別の指定が正しくありません。');
                 }
                 $pdo->prepare(
-                    'INSERT INTO pay_employees (employee_id, payroll_enabled, gender, updated_at) VALUES (:id, :enabled, :gender, NOW())
-                     ON DUPLICATE KEY UPDATE payroll_enabled = VALUES(payroll_enabled), gender = VALUES(gender), updated_at = NOW()'
-                )->execute([':id' => $employeeId, ':enabled' => $enabled, ':gender' => $gender === '' ? null : $gender]);
-                set_flash('success', '給与計算対象・性別を保存しました。');
+                    'INSERT INTO pay_employees (employee_id, payroll_enabled, employment_type, gender, updated_at) VALUES (:id, :enabled, :employment_type, :gender, NOW())
+                     ON DUPLICATE KEY UPDATE payroll_enabled = VALUES(payroll_enabled), employment_type = VALUES(employment_type), gender = VALUES(gender), updated_at = NOW()'
+                )->execute([':id' => $employeeId, ':enabled' => $enabled, ':employment_type' => $employmentType, ':gender' => $gender === '' ? null : $gender]);
+                set_flash('success', '給与計算対象・区分・性別を保存しました。');
                 employee_redirect($employeeId, 'profile');
             } elseif ($action === 'save_terms') {
                 $effectiveFrom = (string) ($_POST['effective_from'] ?? '');
@@ -193,6 +210,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->commit();
                 set_flash('success', $fiscalYear . '年度の住民税（年税額 ' . number_format(array_sum($amounts)) . '円）を保存しました。下書きの給与計算は「再計算」で反映されます。');
                 employee_redirect($employeeId, 'resident');
+            } elseif ($action === 'save_officer_comp') {
+                $effectiveFrom = (string) ($_POST['effective_from'] ?? '');
+                pay_assert_date($effectiveFrom, '適用開始日');
+                $monthlyAmount = optional_int($_POST['monthly_amount'] ?? '', '役員報酬の月額');
+                $note = trim((string) ($_POST['note'] ?? ''));
+                if ($monthlyAmount === null) {
+                    throw new InvalidArgumentException('役員報酬の月額を入力してください。');
+                }
+                if (mb_strlen($note) > 200) {
+                    throw new InvalidArgumentException('備考は200文字以内で入力してください。');
+                }
+                $pdo->prepare(
+                    'INSERT INTO pay_officer_compensation (employee_id, effective_from, monthly_amount, note, created_by)
+                     VALUES (:employee_id, :effective_from, :monthly_amount, :note, :created_by)
+                     ON DUPLICATE KEY UPDATE monthly_amount = VALUES(monthly_amount), note = VALUES(note),
+                        created_by = VALUES(created_by), created_at = CURRENT_TIMESTAMP'
+                )->execute([
+                    ':employee_id' => $employeeId, ':effective_from' => $effectiveFrom, ':monthly_amount' => $monthlyAmount,
+                    ':note' => $note === '' ? null : $note, ':created_by' => (int) $admin['id'],
+                ]);
+                $warning = officer_revision_warning($fiscalYearStartMonth, $effectiveFrom);
+                set_flash('success', '役員報酬（' . $effectiveFrom . ' から月額 ' . pay_yen($monthlyAmount) . '）を保存しました。下書きの給与計算は「再計算」で反映されます。'
+                    . ($warning !== '' ? "\n※ " . $warning : ''));
+                employee_redirect($employeeId, 'officer');
+            } elseif ($action === 'delete_officer_comp') {
+                $pdo->prepare('DELETE FROM pay_officer_compensation WHERE id = :id AND employee_id = :employee_id')
+                    ->execute([':id' => (int) ($_POST['officer_comp_id'] ?? 0), ':employee_id' => $employeeId]);
+                set_flash('success', '役員報酬の履歴を1件削除しました。');
+                employee_redirect($employeeId, 'officer');
             } elseif ($action === 'delete_resident_tax') {
                 $fiscalYear = (int) ($_POST['fiscal_year'] ?? 0);
                 $pdo->beginTransaction();
@@ -221,7 +267,7 @@ $currentFiscalYear = pay_resident_tax_fiscal_year($todayStr);
 
 $employees = $pdo->query(
     "SELECT e.id, e.name, e.role, e.status, e.hourly_wage_weekday, e.hourly_wage_holiday, e.commute_allowance_type, e.commute_allowance_amount,
-            COALESCE(p.payroll_enabled, 1) AS payroll_enabled, p.gender
+            COALESCE(p.payroll_enabled, 1) AS payroll_enabled, COALESCE(p.employment_type, 'employee') AS employment_type, p.gender
      FROM employees e LEFT JOIN pay_employees p ON p.employee_id = e.id
      ORDER BY COALESCE(p.payroll_enabled, 1) DESC, FIELD(e.status, 'active', 'invited', 'disabled'), e.id"
 )->fetchAll();
@@ -235,26 +281,30 @@ pay_render_messages($flash, $errorMessage);
     <div class="scroll">
     <table class="grid">
         <thead><tr>
-            <th>氏名</th><th>状態</th><th>給与計算</th><th>性別</th><th>甲乙・扶養</th><th>雇用保険</th><th>住民税</th>
+            <th>氏名</th><th>状態</th><th>給与計算</th><th>区分</th><th>性別</th><th>甲乙・扶養</th><th>雇用保険</th><th>住民税</th>
             <th>通勤手段</th><th>就業地</th><th class="num">平日時給</th><th>交通費</th><th>未設定</th><th></th>
         </tr></thead>
         <tbody>
         <?php foreach ($employees as $emp): ?>
             <?php
             $terms = pay_terms_on($pdo, (int) $emp['id'], $todayStr);
+            $isOfficer = $emp['employment_type'] === 'officer';
             $missing = [];
             if ((int) $emp['payroll_enabled'] === 1) {
+                if ($isOfficer && pay_officer_compensation_on($pdo, (int) $emp['id'], $todayStr) === null) {
+                    $missing[] = '役員報酬';
+                }
                 if ($terms === null) {
                     $missing[] = '給与設定';
                 } else {
-                    if ((int) $emp['commute_allowance_amount'] > 0 && $terms['commute_method'] === null) {
+                    if (!$isOfficer && (int) $emp['commute_allowance_amount'] > 0 && $terms['commute_method'] === null) {
                         $missing[] = '通勤手段';
                     }
                     if ($terms['resident_tax_method'] === 'special' && empty(pay_resident_tax_months($pdo, (int) $emp['id'], $currentFiscalYear))) {
                         $missing[] = $currentFiscalYear . '年度住民税';
                     }
                 }
-                if ($emp['gender'] === null) {
+                if (!$isOfficer && $emp['gender'] === null) {
                     $missing[] = '性別';
                 }
             }
@@ -263,14 +313,19 @@ pay_render_messages($flash, $errorMessage);
                 <td><?= pay_h($emp['name']) ?></td>
                 <td><?= pay_h(['active' => '有効', 'invited' => '招待中', 'disabled' => '無効'][$emp['status']] ?? $emp['status']) ?></td>
                 <td><?= (int) $emp['payroll_enabled'] === 1 ? '対象' : '対象外' ?></td>
+                <td><?= $isOfficer ? '<strong>役員</strong>' : '従業員' ?></td>
                 <td><?= pay_h(PAY_GENDER_LABELS[$emp['gender']] ?? '—') ?></td>
                 <td><?= $terms === null ? '—' : ($terms['tax_column'] === 'kou' ? '甲・扶養' . (int) $terms['dependents'] . '人' : '乙') ?></td>
-                <td><?= $terms === null ? '—' : ((int) $terms['emp_insurance'] === 1 ? '加入' : '—') ?></td>
+                <td><?= $terms === null || $isOfficer ? '—' : ((int) $terms['emp_insurance'] === 1 ? '加入' : '—') ?></td>
                 <td><?= $terms === null ? '—' : ($terms['resident_tax_method'] === 'special' ? '特別徴収' : '普通徴収') ?></td>
+                <?php if ($isOfficer): ?>
+                <td>—</td><td>—</td><td class="num">—</td><td>—</td>
+                <?php else: ?>
                 <td><?= $terms === null || $terms['commute_method'] === null ? '—' : pay_h(PAY_COMMUTE_METHOD_LABELS[$terms['commute_method']]) . ($terms['commute_distance_km'] !== null ? ' ' . pay_h($terms['commute_distance_km']) . 'km' : '') ?></td>
                 <td><?= $terms === null ? '—' : pay_h($terms['work_prefecture']) ?></td>
                 <td class="num"><?= pay_yen((int) $emp['hourly_wage_weekday']) ?></td>
                 <td><?= $emp['commute_allowance_type'] === 'monthly' ? '月額' : '日額' ?> <?= pay_yen((int) $emp['commute_allowance_amount']) ?></td>
+                <?php endif; ?>
                 <td style="color:#b3261e;"><?= pay_h(implode('・', $missing)) ?></td>
                 <td><a href="/admin/payroll_employees.php?employee_id=<?= (int) $emp['id'] ?>">設定</a></td>
             </tr>
@@ -278,7 +333,7 @@ pay_render_messages($flash, $errorMessage);
         </tbody>
     </table>
     </div>
-    <p class="small">時給・交通費（金額）・手当は <a href="/admin/employees.php">従業員管理</a> で登録します。給与計算対象外（オーナー・共用アカウント・検証用など）は給与計算に出ません。無効化済みでも、計算期間内に勤怠がある人は給与計算の対象になります。</p>
+    <p class="small">時給・交通費（金額）・手当は <a href="/admin/employees.php">従業員管理</a> で登録します。給与計算対象外（オーナー・共用アカウント・検証用など）は給与計算に出ません。無効化済みでも、計算期間内に勤怠がある人は給与計算の対象になります。役員は時給・勤怠によらず、ここで登録する役員報酬（月額）で計算します。</p>
 </section>
 
 <?php if ($selected !== null): ?>
@@ -319,18 +374,26 @@ pay_render_messages($flash, $errorMessage);
     }
     $wageHistory = wage_history_for_employee($pdo, (int) $selected['id']);
     $allowances = get_employee_allowances($pdo, (int) $selected['id']);
+    $selectedIsOfficer = $selected['employment_type'] === 'officer';
+    $officerComps = $pdo->prepare('SELECT * FROM pay_officer_compensation WHERE employee_id = :id ORDER BY effective_from DESC');
+    $officerComps->execute([':id' => $selected['id']]);
+    $officerComps = $officerComps->fetchAll();
     $v = static fn (string $key, $default = '') => $latest !== null && $latest[$key] !== null ? $latest[$key] : $default;
     ?>
     <section>
         <h2><?= pay_h($selected['name']) ?>さんの給与設定</h2>
 
         <fieldset id="profile">
-            <legend>給与計算対象・性別</legend>
+            <legend>給与計算対象・区分・性別</legend>
             <form method="post" action="/admin/payroll_employees.php">
                 <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>">
                 <input type="hidden" name="action" value="save_profile">
                 <input type="hidden" name="employee_id" value="<?= (int) $selected['id'] ?>">
                 <label><input type="checkbox" name="payroll_enabled" value="1" <?= (int) $selected['payroll_enabled'] === 1 ? 'checked' : '' ?>> 給与計算の対象にする</label>
+                　区分
+                <?php foreach (PAY_EMPLOYMENT_TYPE_LABELS as $key => $label): ?>
+                    <label><input type="radio" name="employment_type" value="<?= $key ?>" <?= $selected['employment_type'] === $key ? 'checked' : '' ?>> <?= pay_h($label) ?></label>
+                <?php endforeach; ?>
                 　性別
                 <select name="gender">
                     <option value="">未設定</option>
@@ -388,11 +451,17 @@ pay_render_messages($flash, $errorMessage);
                     <label><input type="radio" name="tax_column" value="kou" <?= $v('tax_column', 'kou') === 'kou' ? 'checked' : '' ?>> 甲欄（扶養控除等申告書の提出あり）</label>
                     <label><input type="radio" name="tax_column" value="otsu" <?= $v('tax_column') === 'otsu' ? 'checked' : '' ?>> 乙欄</label></div>
                 <div class="form-row"><label class="caption">源泉控除対象の扶養親族等の数</label><input type="number" name="dependents" min="0" max="20" value="<?= (int) $v('dependents', 0) ?>" required>人</div>
+                <?php if (!$selectedIsOfficer): ?>
                 <div class="form-row"><label class="caption">雇用保険</label><label><input type="checkbox" name="emp_insurance" value="1" <?= (int) $v('emp_insurance', 0) === 1 ? 'checked' : '' ?>> 被保険者</label></div>
+                <?php endif; ?>
                 <div class="form-row"><label class="caption">住民税</label>
                     <?php foreach (PAY_RESIDENT_TAX_METHOD_LABELS as $key => $label): ?>
                         <label><input type="radio" name="resident_tax_method" value="<?= $key ?>" <?= $v('resident_tax_method', 'ordinary') === $key ? 'checked' : '' ?>> <?= pay_h($label) ?></label>
                     <?php endforeach; ?></div>
+                <?php if ($selectedIsOfficer): ?>
+                <input type="hidden" name="work_prefecture" value="<?= pay_h($v('work_prefecture', PAY_DEFAULT_WORK_PREFECTURE)) ?>">
+                <p class="small">役員は雇用保険の対象外で、時給・通勤手当・最低賃金のチェックも行いません（源泉所得税と住民税だけを控除します）。</p>
+                <?php else: ?>
                 <div class="form-row"><label class="caption">通勤手段</label>
                     <select name="commute_method">
                         <option value="">未設定（交通費なし）</option>
@@ -419,6 +488,7 @@ pay_render_messages($flash, $errorMessage);
                     <input type="number" name="parking_fee_amount" min="0" value="<?= pay_h($v('parking_fee_amount')) ?>">円（税込。月額 or 1回あたり）
                     <label><input type="checkbox" name="parking_qualified" value="1" <?= (int) $v('parking_qualified', 0) === 1 ? 'checked' : '' ?>> 勤務場所または利用駅等の周辺の駐車場（自宅付近は対象外）</label></div>
                 <div class="form-row"><label class="caption">就業地（最低賃金の判定）</label><input type="text" name="work_prefecture" size="8" value="<?= pay_h($v('work_prefecture', PAY_DEFAULT_WORK_PREFECTURE)) ?>" required></div>
+                <?php endif; ?>
                 <button type="submit">登録</button>
             </form>
         </fieldset>
@@ -508,6 +578,44 @@ pay_render_messages($flash, $errorMessage);
             </script>
         </fieldset>
 
+        <?php if ($selectedIsOfficer): ?>
+        <fieldset id="officer">
+            <legend>役員報酬（月額。適用開始日ごとの履歴）</legend>
+            <?php if ($fiscalYearStartMonth === null): ?>
+                <p class="notice">事業年度の開始月が未設定です。定期同額給与の改定時期を確認するため、<a href="/admin/payroll_settings.php#basic">給与設定</a>で入力してください。</p>
+            <?php endif; ?>
+            <table class="grid">
+                <thead><tr><th>適用開始日（支給日ベース）</th><th class="num">月額</th><th>備考</th><th>改定時期</th><th></th></tr></thead>
+                <tbody>
+                <?php if (empty($officerComps)): ?><tr><td colspan="5">未登録（給与計算で確定するには登録が必要です）</td></tr><?php endif; ?>
+                <?php foreach ($officerComps as $oc): ?>
+                    <?php $warning = officer_revision_warning($fiscalYearStartMonth, $oc['effective_from']); ?>
+                    <tr>
+                        <td><?= pay_h($oc['effective_from']) ?></td>
+                        <td class="num"><?= pay_yen((int) $oc['monthly_amount']) ?></td>
+                        <td><?= pay_h($oc['note'] ?? '') ?></td>
+                        <td class="small" style="<?= $warning !== '' ? 'color:#856404;' : '' ?>"><?= $warning !== '' ? pay_h($warning) : '事業年度開始から3か月以内' ?></td>
+                        <td><form method="post" action="/admin/payroll_employees.php" class="inline-form" onsubmit="return confirm('この役員報酬の履歴を削除しますか？（確定済みの明細は変わりません）');">
+                            <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>"><input type="hidden" name="action" value="delete_officer_comp">
+                            <input type="hidden" name="employee_id" value="<?= (int) $selected['id'] ?>"><input type="hidden" name="officer_comp_id" value="<?= (int) $oc['id'] ?>">
+                            <button type="submit" class="danger">削除</button></form></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+            <h3>役員報酬を登録（同じ適用開始日なら上書き）</h3>
+            <form method="post" action="/admin/payroll_employees.php">
+                <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>"><input type="hidden" name="action" value="save_officer_comp">
+                <input type="hidden" name="employee_id" value="<?= (int) $selected['id'] ?>">
+                <div class="form-row"><label class="caption">月額</label><input type="number" name="monthly_amount" min="0" required>円</div>
+                <div class="form-row"><label class="caption">適用開始日</label><input type="date" name="effective_from" required>
+                    <span class="small">支給日ベース（給与計算では支給日時点で有効な月額を使います）</span></div>
+                <div class="form-row"><label class="caption">備考</label><input type="text" name="note" maxlength="200" size="40" placeholder="例: 2026-06-25 定時株主総会で決議"></div>
+                <button type="submit">登録</button>
+            </form>
+            <p class="small">事業年度開始から3か月以内の改定以外は、定期同額給与として損金算入できない可能性があります（該当する場合は警告を表示しますが、登録はできます）。<?= $fiscalYearStartMonth !== null ? '事業年度の開始月: ' . $fiscalYearStartMonth . '月' : '' ?></p>
+        </fieldset>
+        <?php else: ?>
         <fieldset>
             <legend>時給・交通費・手当（従業員管理で登録）</legend>
             <ul>
@@ -519,6 +627,7 @@ pay_render_messages($flash, $errorMessage);
             </ul>
             <a href="/admin/employees.php">従業員管理で変更する</a>
         </fieldset>
+        <?php endif; ?>
     </section>
 <?php endif; ?>
 </body>
