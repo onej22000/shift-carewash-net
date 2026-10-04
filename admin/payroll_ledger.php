@@ -107,7 +107,9 @@ $rows = [
     ['基本給（洗濯代行）', 'yen', static fn (array $s): int => (int) $s['pay_laundry']],
     ['基本給（店舗）', 'yen', static fn (array $s): int => (int) $s['pay_store']],
     ['基本給（集荷）', 'yen', static fn (array $s): int => (int) $s['pay_pickup']],
-    ['時間外手当', 'yen', static fn (array $s): int => (int) $s['pay_overtime']],
+    ['休日手当', 'yen', static fn (array $s): int => (int) $s['pay_holiday']],
+    ['普通残業手当', 'yen', static fn (array $s): int => (int) $s['pay_overtime']],
+    ['休日残業手当', 'yen', static fn (array $s): int => (int) $s['pay_overtime_holiday']],
     ['深夜手当', 'yen', static fn (array $s): int => (int) $s['pay_night']],
 ];
 foreach (array_keys($allowanceNames) as $name) {

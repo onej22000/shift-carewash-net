@@ -11,6 +11,8 @@
  * - 時間外は「1日8時間超」と「週40時間超（日単位で時間外になった分は除く）」。週の起算曜日は pay_settings.week_start_dow。
  *   月をまたぐ週は、月初より前の同じ週の日（$lookbackDailyMinutes）も40時間の判定に含め、割増は当月の日の分だけに付ける。
  * - 金額は整数演算で1日ごとに四捨五入する（rate×分÷60 等を浮動小数を使わずに計算）。
+ * - 給与明細の支給内訳（calc_payslip_pay_items()）は弥生給与と同じく、月の項目ごとに1円未満切上げで別に計算する。
+ *   給与計算（admin/payroll*.php）と賃金確認（admin/wages.php）の一覧・確定はこちらの金額を使う。
  */
 
 const WEEKLY_REGULAR_WORK_MINUTES = 40 * 60;
@@ -263,11 +265,14 @@ function calc_wage_breakdown_from_daily_minutes(PDO $pdo, array $employee, array
         $isHoliday = is_holiday_date($pdo, $date);
         $historyRow = wage_history_row_on($pdo, $employeeId, $date);
         if ($historyRow !== null) {
-            $rate = $isHoliday ? $historyRow['wage_holiday'] : $historyRow['wage_weekday'];
+            $rateWeekday = $historyRow['wage_weekday'];
+            $rateHoliday = $historyRow['wage_holiday'];
         } else {
-            $rate = $isHoliday ? (int) $employee['hourly_wage_holiday'] : (int) $employee['hourly_wage_weekday'];
+            $rateWeekday = (int) $employee['hourly_wage_weekday'];
+            $rateHoliday = (int) $employee['hourly_wage_holiday'];
             $wageHistoryMissingDates[] = $date;
         }
+        $rate = $isHoliday ? $rateHoliday : $rateWeekday;
 
         // 1日8時間超 → 日単位の時間外。週の累計（日単位の時間外を除く）が40時間を超えた分 → 週単位の時間外
         $weekKey = week_start_date($date, $settings['week_start_dow']);
@@ -291,6 +296,8 @@ function calc_wage_breakdown_from_daily_minutes(PDO $pdo, array $employee, array
             'day_minutes' => $dayMinutes,
             'is_holiday' => $isHoliday,
             'rate' => $rate,
+            'rate_weekday' => $rateWeekday,
+            'rate_holiday' => $rateHoliday,
             'regular_limit' => $regularLimit,
             'regular_minutes' => $regularMinutes,
             'overtime_minutes' => $overtimeMinutes,
@@ -486,6 +493,7 @@ function calc_wage_summary_for_period(PDO $pdo, array $employee, string $periodS
 
     $summary = calc_wage_breakdown_from_daily_minutes($pdo, $employee, $dailyMinutes, $dailyNightMinutes, [], $lookbackDailyMinutes);
     $summary['category_breakdown'] = calc_attendance_category_breakdown($records, $summary);
+    $summary['pay_items'] = calc_payslip_pay_items($pdo, $summary, $records);
     $summary['commute_trips'] = $commuteTrips;
     $summary['null_category_count'] = $nullCategoryCount;
 
@@ -500,6 +508,87 @@ function calc_wage_summary_for_period(PDO $pdo, array $employee, string $periodS
     }
 
     return $summary;
+}
+
+/** 整数 $numerator / 正の整数 $denominator の1未満切上げ（負の値は0に近い側＝切上げ） */
+function ceil_div(int $numerator, int $denominator): int
+{
+    $quotient = intdiv($numerator, $denominator);
+    return $numerator % $denominator > 0 ? $quotient + 1 : $quotient;
+}
+
+/**
+ * 給与明細の支給内訳（弥生給与の分け方をベースに、基本給だけ区分別にしたもの）。
+ *   洗濯代行／店舗／集荷 = その区分の全労働時間（時間外を含む）× 平日時給
+ *   休日手当             = 土日祝の労働時間（時間外を含む）×（土日祝時給 − 平日時給）
+ *   普通残業手当         = 平日の時間外時間 × 平日時給 × 割増分（pay_settings.overtime_rate − 1、通常0.25）
+ *   休日残業手当         = 土日祝の時間外時間 × 土日祝時給 × 割増分
+ *   深夜手当             = 深夜時間 × その日の時給 × pay_settings.night_rate（通常0.25）
+ * 時給は日ごと（pay_wage_history のその日の行）。月内で時給が変わった場合も、1か月分の端数のない額を
+ * 項目ごとに合計してから1円未満を切り上げる（弥生と同じく項目ごとに1回だけ切上げ）。
+ * 区分がNULLの打刻は ATTENDANCE_CATEGORY_NONE_LABEL の区分に計上する（給与計算では確定不可のエラー）。
+ * $summary は calc_wage_breakdown_from_daily_minutes() の結果、$records は calc_attendance_category_breakdown() と同じ打刻の配列。
+ *
+ * @return array{category: array<string, array{minutes:int, amount:int}>, holiday_minutes:int, holiday_allowance:int,
+ *               weekday_overtime_minutes:int, weekday_overtime_allowance:int, holiday_overtime_minutes:int,
+ *               holiday_overtime_allowance:int, night_minutes:int, night_allowance:int, total:int}
+ */
+function calc_payslip_pay_items(PDO $pdo, array $summary, array $records): array
+{
+    $settings = wage_calc_settings($pdo);
+    $premiumPct = $settings['overtime_rate_pct'] - 100;
+
+    $dayByDate = [];
+    foreach ($summary['daily'] as $dayRow) {
+        $dayByDate[$dayRow['work_day']] = $dayRow;
+    }
+
+    // 端数のない額は「円×60」（基本給・休日手当）または「円×6000」（割増）の単位で積み上げる
+    $categoryMinutes = array_fill_keys(SHIFT_CATEGORIES, 0);
+    $categoryNumerator = array_fill_keys(SHIFT_CATEGORIES, 0);
+    foreach ($records as $record) {
+        $category = $record['category'] ?? ATTENDANCE_CATEGORY_NONE_LABEL;
+        $dayRow = $dayByDate[$record['work_day']];
+        $categoryMinutes[$category] = ($categoryMinutes[$category] ?? 0) + $record['work_minutes'];
+        $categoryNumerator[$category] = ($categoryNumerator[$category] ?? 0) + $dayRow['rate_weekday'] * $record['work_minutes'];
+    }
+
+    $holidayMinutes = 0;
+    $holidayNumerator = 0;
+    $weekdayOvertimeNumerator = 0;
+    $holidayOvertimeNumerator = 0;
+    $nightNumerator = 0;
+    foreach ($summary['daily'] as $dayRow) {
+        if ($dayRow['is_holiday']) {
+            $holidayMinutes += $dayRow['day_minutes'];
+            $holidayNumerator += ($dayRow['rate_holiday'] - $dayRow['rate_weekday']) * $dayRow['day_minutes'];
+            $holidayOvertimeNumerator += $dayRow['rate_holiday'] * $dayRow['overtime_minutes'] * $premiumPct;
+        } else {
+            $weekdayOvertimeNumerator += $dayRow['rate_weekday'] * $dayRow['overtime_minutes'] * $premiumPct;
+        }
+        $nightNumerator += $dayRow['rate'] * $dayRow['night_minutes'] * $settings['night_rate_pct'];
+    }
+
+    $items = [
+        'category' => [],
+        'holiday_minutes' => $holidayMinutes,
+        'holiday_allowance' => ceil_div($holidayNumerator, 60),
+        'weekday_overtime_minutes' => $summary['weekday_overtime_minutes'],
+        'weekday_overtime_allowance' => ceil_div($weekdayOvertimeNumerator, 6000),
+        'holiday_overtime_minutes' => $summary['holiday_overtime_minutes'],
+        'holiday_overtime_allowance' => ceil_div($holidayOvertimeNumerator, 6000),
+        'night_minutes' => $summary['night_minutes'],
+        'night_allowance' => ceil_div($nightNumerator, 6000),
+    ];
+    $total = $items['holiday_allowance'] + $items['weekday_overtime_allowance'] + $items['holiday_overtime_allowance'] + $items['night_allowance'];
+    foreach ($categoryMinutes as $category => $minutes) {
+        $amount = ceil_div($categoryNumerator[$category], 60);
+        $items['category'][$category] = ['minutes' => $minutes, 'amount' => $amount];
+        $total += $amount;
+    }
+    $items['total'] = $total;
+
+    return $items;
 }
 
 /**

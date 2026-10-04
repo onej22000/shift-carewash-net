@@ -32,7 +32,8 @@ function fetch_employee(PDO $pdo, int $employeeId): ?array
 {
     $stmt = $pdo->prepare(
         'SELECT e.id, e.name, e.role, e.status, e.hourly_wage_weekday, e.hourly_wage_holiday, e.commute_allowance_type, e.commute_allowance_amount,
-                COALESCE(p.payroll_enabled, 1) AS payroll_enabled, COALESCE(p.employment_type, \'employee\') AS employment_type, p.gender, p.birth_date
+                COALESCE(p.payroll_enabled, 1) AS payroll_enabled, COALESCE(p.employment_type, \'employee\') AS employment_type, p.gender, p.birth_date,
+                p.employee_code, COALESCE(p.payment_method, \'cash\') AS payment_method, p.department
          FROM employees e LEFT JOIN pay_employees p ON p.employee_id = e.id WHERE e.id = :id'
     );
     $stmt->execute([':id' => $employeeId]);
@@ -70,6 +71,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $employmentType = (string) ($_POST['employment_type'] ?? 'employee');
                 $gender = (string) ($_POST['gender'] ?? '');
                 $birthDate = trim((string) ($_POST['birth_date'] ?? ''));
+                $employeeCode = trim((string) ($_POST['employee_code'] ?? ''));
+                $paymentMethod = (string) ($_POST['payment_method'] ?? 'cash');
+                $department = trim((string) ($_POST['department'] ?? ''));
+                if (mb_strlen($employeeCode) > PAY_EMPLOYEE_CODE_MAX_LENGTH) {
+                    throw new InvalidArgumentException('社員コードは' . PAY_EMPLOYEE_CODE_MAX_LENGTH . '文字以内で入力してください。');
+                }
+                if (!isset(PAY_PAYMENT_METHOD_LABELS[$paymentMethod])) {
+                    throw new InvalidArgumentException('支払方法の指定が正しくありません。');
+                }
+                if (mb_strlen($department) > PAY_DEPARTMENT_MAX_LENGTH) {
+                    throw new InvalidArgumentException('所属は' . PAY_DEPARTMENT_MAX_LENGTH . '文字以内で入力してください。');
+                }
                 if ($birthDate !== '') {
                     pay_assert_date($birthDate, '生年月日');
                     if ($birthDate < '1900-01-01' || $birthDate > $todayStr) {
@@ -83,15 +96,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     throw new InvalidArgumentException('性別の指定が正しくありません。');
                 }
                 $pdo->prepare(
-                    'INSERT INTO pay_employees (employee_id, payroll_enabled, employment_type, gender, birth_date, updated_at)
-                     VALUES (:id, :enabled, :employment_type, :gender, :birth_date, NOW())
+                    'INSERT INTO pay_employees (employee_id, payroll_enabled, employment_type, employee_code, payment_method, department, gender, birth_date, updated_at)
+                     VALUES (:id, :enabled, :employment_type, :employee_code, :payment_method, :department, :gender, :birth_date, NOW())
                      ON DUPLICATE KEY UPDATE payroll_enabled = VALUES(payroll_enabled), employment_type = VALUES(employment_type),
+                        employee_code = VALUES(employee_code), payment_method = VALUES(payment_method), department = VALUES(department),
                         gender = VALUES(gender), birth_date = VALUES(birth_date), updated_at = NOW()'
                 )->execute([
                     ':id' => $employeeId, ':enabled' => $enabled, ':employment_type' => $employmentType,
+                    ':employee_code' => $employeeCode === '' ? null : $employeeCode, ':payment_method' => $paymentMethod,
+                    ':department' => $department === '' ? null : $department,
                     ':gender' => $gender === '' ? null : $gender, ':birth_date' => $birthDate === '' ? null : $birthDate,
                 ]);
-                set_flash('success', '給与計算対象・区分・性別・生年月日を保存しました。');
+                set_flash('success', '給与計算対象・区分・社員コード・支払方法・所属・性別・生年月日を保存しました。下書きの給与計算は「再計算」で明細に反映されます。');
                 employee_redirect($employeeId, 'profile');
             } elseif ($action === 'save_terms') {
                 $effectiveFrom = (string) ($_POST['effective_from'] ?? '');
@@ -312,7 +328,8 @@ $currentSiMonth = substr($todayStr, 0, 7);
 
 $employees = $pdo->query(
     "SELECT e.id, e.name, e.role, e.status, e.hourly_wage_weekday, e.hourly_wage_holiday, e.commute_allowance_type, e.commute_allowance_amount,
-            COALESCE(p.payroll_enabled, 1) AS payroll_enabled, COALESCE(p.employment_type, 'employee') AS employment_type, p.gender, p.birth_date
+            COALESCE(p.payroll_enabled, 1) AS payroll_enabled, COALESCE(p.employment_type, 'employee') AS employment_type, p.gender, p.birth_date,
+            p.employee_code, COALESCE(p.payment_method, 'cash') AS payment_method
      FROM employees e LEFT JOIN pay_employees p ON p.employee_id = e.id
      ORDER BY COALESCE(p.payroll_enabled, 1) DESC, FIELD(e.status, 'active', 'invited', 'disabled'), e.id"
 )->fetchAll();
@@ -326,7 +343,7 @@ pay_render_messages($flash, $errorMessage);
     <div class="scroll">
     <table class="grid">
         <thead><tr>
-            <th>氏名</th><th>状態</th><th>給与計算</th><th>区分</th><th>性別</th><th>甲乙・扶養</th><th>社会保険</th><th>雇用保険</th><th>住民税</th>
+            <th>社員コード</th><th>氏名</th><th>状態</th><th>給与計算</th><th>区分</th><th>支払</th><th>性別</th><th>甲乙・扶養</th><th>社会保険</th><th>雇用保険</th><th>住民税</th>
             <th>通勤手段</th><th>就業地</th><th class="num">平日時給</th><th>交通費</th><th>未設定</th><th></th>
         </tr></thead>
         <tbody>
@@ -360,10 +377,12 @@ pay_render_messages($flash, $errorMessage);
             }
             ?>
             <tr class="<?= ((int) $emp['payroll_enabled'] === 0 || $emp['status'] === 'disabled') ? 'muted' : '' ?>">
+                <td><?= pay_h($emp['employee_code'] ?? '—') ?></td>
                 <td><?= pay_h($emp['name']) ?></td>
                 <td><?= pay_h(['active' => '有効', 'invited' => '招待中', 'disabled' => '無効'][$emp['status']] ?? $emp['status']) ?></td>
                 <td><?= (int) $emp['payroll_enabled'] === 1 ? '対象' : '対象外' ?></td>
                 <td><?= $isOfficer ? '<strong>役員</strong>' : '従業員' ?></td>
+                <td><?= pay_h(PAY_PAYMENT_METHOD_LABELS[$emp['payment_method']]) ?></td>
                 <td><?= pay_h(PAY_GENDER_LABELS[$emp['gender']] ?? '—') ?></td>
                 <td><?= $terms === null ? '—' : ($terms['tax_column'] === 'kou' ? '甲・扶養' . (int) $terms['dependents'] . '人' : '乙') ?></td>
                 <td><?= $siEnrolled ? '加入' : '—' ?></td>
@@ -438,7 +457,7 @@ pay_render_messages($flash, $errorMessage);
         <h2><?= pay_h($selected['name']) ?>さんの給与設定</h2>
 
         <fieldset id="profile">
-            <legend>給与計算対象・区分・性別・生年月日</legend>
+            <legend>給与計算対象・区分・社員コード・支払方法・所属・性別・生年月日</legend>
             <form method="post" action="/admin/payroll_employees.php">
                 <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>">
                 <input type="hidden" name="action" value="save_profile">
@@ -448,7 +467,13 @@ pay_render_messages($flash, $errorMessage);
                 <?php foreach (PAY_EMPLOYMENT_TYPE_LABELS as $key => $label): ?>
                     <label><input type="radio" name="employment_type" value="<?= $key ?>" <?= $selected['employment_type'] === $key ? 'checked' : '' ?>> <?= pay_h($label) ?></label>
                 <?php endforeach; ?>
-                　性別
+                <div class="form-row" style="margin-top:6px;">社員コード <input type="text" name="employee_code" maxlength="<?= PAY_EMPLOYEE_CODE_MAX_LENGTH ?>" size="6" value="<?= pay_h($selected['employee_code'] ?? '') ?>">
+                　支払方法
+                <?php foreach (PAY_PAYMENT_METHOD_LABELS as $key => $label): ?>
+                    <label><input type="radio" name="payment_method" value="<?= $key ?>" <?= $selected['payment_method'] === $key ? 'checked' : '' ?>> <?= pay_h($label) ?></label>
+                <?php endforeach; ?>
+                　所属 <input type="text" name="department" maxlength="<?= PAY_DEPARTMENT_MAX_LENGTH ?>" size="16" value="<?= pay_h($selected['department'] ?? '') ?>"></div>
+                性別
                 <select name="gender">
                     <option value="">未設定</option>
                     <?php foreach (PAY_GENDER_LABELS as $key => $label): ?>
@@ -458,7 +483,7 @@ pay_render_messages($flash, $errorMessage);
                 　生年月日 <input type="date" name="birth_date" value="<?= pay_h($selected['birth_date'] ?? '') ?>">
                 <button type="submit">保存</button>
             </form>
-            <p class="small">生年月日は、社会保険の介護保険料（40歳以上65歳未満）の判定に使います。社会保険の加入者は登録が必要です。</p>
+            <p class="small">社員コードは弥生の従業員コード（明細の「(004) 氏名 様」の部分）です。支払方法が振込なら差引支給額を明細の「振込支給額」に、現金なら「現金支給額」に出します。所属は明細に表示します（空欄可）。生年月日は、社会保険の介護保険料（40歳以上65歳未満）の判定に使います。社会保険の加入者は登録が必要です。</p>
         </fieldset>
 
         <fieldset id="terms">

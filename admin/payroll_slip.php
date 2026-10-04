@@ -2,6 +2,7 @@
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/functions.php';
 require_once __DIR__ . '/../includes/payroll.php';
+require_once __DIR__ . '/../includes/payslip_pdf_render.php';
 
 $admin = require_login('admin');
 $pdo = getPdo();
@@ -9,6 +10,7 @@ $pdo = getPdo();
 $settings = pay_settings($pdo);
 $slipId = isset($_GET['id']) ? (int) $_GET['id'] : 0;
 $runId = isset($_GET['run_id']) ? (int) $_GET['run_id'] : 0;
+$isPdf = ($_GET['format'] ?? '') === 'pdf';
 
 $sql = 'SELECT s.*, e.name AS current_name, r.work_month, r.period_start, r.period_end, r.pay_date, r.status
         FROM pay_slips s JOIN pay_runs r ON r.id = s.run_id JOIN employees e ON e.id = s.employee_id ';
@@ -16,10 +18,23 @@ if ($slipId > 0) {
     $stmt = $pdo->prepare($sql . 'WHERE s.id = :id');
     $stmt->execute([':id' => $slipId]);
 } else {
-    $stmt = $pdo->prepare($sql . 'WHERE s.run_id = :run_id ORDER BY s.employee_id');
+    $stmt = $pdo->prepare($sql . 'WHERE s.run_id = :run_id ORDER BY ' . ($isPdf ? 'e.name, s.employee_id' : 's.employee_id'));
     $stmt->execute([':run_id' => $runId]);
 }
 $slips = $stmt->fetchAll();
+
+// PDF（弥生形式、A5横・1人1ページ）。ファイル名は {支給年月}給与明細_{氏名}.pdf／一括は {支給年月}給与明細_全員.pdf
+if ($isPdf && !empty($slips)) {
+    $payMonthCode = payslip_pdf_pay_month_code($slips[0]['pay_date']);
+    if ($slipId > 0) {
+        $profile = payslip_pdf_profile($pdo, $slips[0]);
+        $filename = $payMonthCode . '給与明細_' . preg_replace('#[\\\\/:*?"<>|\s]+#u', '', $profile['name']) . '.pdf';
+    } else {
+        $filename = $payMonthCode . '給与明細_全員.pdf';
+    }
+    render_payslip_pdf($pdo, $slips, $settings, $filename);
+    exit;
+}
 
 function jp_date(string $date): string
 {
@@ -63,7 +78,8 @@ function jp_date(string $date): string
 </head>
 <body>
 <div class="toolbar">
-    <button type="button" onclick="window.print()">印刷・PDF保存</button>
+    <button type="button" onclick="window.print()">印刷</button>
+    <?php if (!empty($slips)): ?><a href="/admin/payroll_slip.php?<?= $slipId > 0 ? 'id=' . $slipId : 'run_id=' . $runId ?>&amp;format=pdf" target="_blank">PDF（弥生形式）</a><?php endif; ?>
     <a href="/admin/payroll.php<?= !empty($slips) ? '?run_id=' . (int) $slips[0]['run_id'] : '' ?>">給与計算に戻る</a>
     <?php if ($settings['company_name'] === ''): ?><span style="color:#b3261e;">会社名が未設定です（給与設定・税額表で入力してください）</span><?php endif; ?>
 </div>
@@ -79,12 +95,7 @@ function jp_date(string $date): string
     [$workYear, $workMonthNumber] = array_map('intval', explode('-', $slip['work_month']));
     $paymentLines = pay_slip_payment_lines($slip);
     $deductionLines = pay_slip_deduction_lines($slip);
-    $overtimeMinutes = (int) $slip['minutes_overtime_daily'] + (int) $slip['minutes_overtime_weekly'];
     $isOfficer = $slip['employment_type'] === 'officer';
-    if ($isOfficer) {
-        // 役員は雇用保険の対象外のため控除欄に出さない
-        $deductionLines = array_values(array_filter($deductionLines, static fn (array $line): bool => $line[0] !== '雇用保険料'));
-    }
     ?>
     <div class="slip">
         <?php if ($slip['status'] === 'draft'): ?><div class="stamp">下書き（未確定）</div><?php elseif ($slip['status'] === 'void'): ?><div class="stamp">取消済み</div><?php endif; ?>
@@ -100,19 +111,20 @@ function jp_date(string $date): string
 
         <?php if (!$isOfficer): ?>
         <table>
-            <tr><th>出勤日数</th><th>うち土日祝</th><th>労働時間</th><th>洗濯代行</th><th>店舗</th><th>集荷</th><th>時間外</th><th>深夜</th></tr>
+            <tr><th>出勤日数</th><th>実働時間</th><th>洗濯代行</th><th>店舗</th><th>集荷</th><th>休日勤務</th><th>普通残業</th><th>休日残業</th><th>深夜</th></tr>
             <tr>
                 <td class="num"><?= (int) $slip['work_days'] ?>日</td>
-                <td class="num"><?= (int) $slip['holiday_work_days'] ?>日</td>
                 <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_total'])) ?></td>
                 <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_laundry'])) ?></td>
                 <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_store'])) ?></td>
                 <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_pickup'])) ?></td>
-                <td class="num"><?= pay_h(pay_minutes_label($overtimeMinutes)) ?></td>
+                <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_holiday'])) ?></td>
+                <td class="num"><?= pay_h(pay_minutes_label(pay_slip_weekday_overtime_minutes($slip))) ?></td>
+                <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_overtime_holiday'])) ?></td>
                 <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_night'])) ?></td>
             </tr>
         </table>
-        <p class="small">洗濯代行・店舗・集荷の時間は所定内（時間外を除く）。時間外は1日8時間超<?= (int) $slip['minutes_overtime_weekly'] > 0 ? '・週40時間超（うち週' . pay_h(pay_minutes_label((int) $slip['minutes_overtime_weekly'])) . '）' : '' ?>。</p>
+        <p class="small">洗濯代行・店舗・集荷・休日勤務の時間は時間外を含む実時間。時間外は1日8時間超<?= (int) $slip['minutes_overtime_weekly'] > 0 ? '・週40時間超（うち週' . pay_h(pay_minutes_label((int) $slip['minutes_overtime_weekly'])) . '）' : '' ?>。</p>
         <?php endif; ?>
 
         <div class="cols">
@@ -135,7 +147,7 @@ function jp_date(string $date): string
                 </table>
                 <table>
                     <tr><td>課税対象額</td><td class="num"><?= number_format((int) $slip['taxable_amount']) ?>円</td></tr>
-                    <?php if (!$isOfficer): ?><tr><td>非課税通勤手当</td><td class="num"><?= number_format((int) $slip['commute_nontax']) ?>円</td></tr><?php endif; ?>
+                    <?php if (!$isOfficer): ?><tr><td>非課税通勤手当（駐車場代を含む）</td><td class="num"><?= number_format((int) $slip['commute_nontax']) ?>円</td></tr><?php endif; ?>
                 </table>
             </div>
         </div>

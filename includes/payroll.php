@@ -26,6 +26,9 @@ const PAY_SI_COLLECTION_LABELS = [
 ];
 const PAY_CARE_INSURANCE_START_AGE = 40; // 介護保険第2号被保険者（40歳以上65歳未満）
 const PAY_CARE_INSURANCE_END_AGE = 65;
+const PAY_PAYMENT_METHOD_LABELS = ['cash' => '現金', 'bank' => '振込'];
+const PAY_EMPLOYEE_CODE_MAX_LENGTH = 10;
+const PAY_DEPARTMENT_MAX_LENGTH = 50;
 
 /** 給与計算画面の共通ヘッダー（管理者のみ。各ページで require_login('admin') 済みであること） */
 function pay_render_header(array $admin, string $title, string $current = ''): void
@@ -573,6 +576,16 @@ function pay_withholding_tax(PDO $pdo, int $taxableAmount, string $taxColumn, in
 // 給与計算の対象者・明細の計算
 // ---------------------------------------------------------------------------
 
+/** 区分 => pay_slips の minutes_* / pay_* のカラム名の接尾辞 */
+const PAY_CATEGORY_COLUMNS = ['洗濯代行' => 'laundry', '店舗' => 'store', '集荷' => 'pickup'];
+
+/** 明細の時給分（洗濯代行＋店舗＋集荷＋休日手当＋普通残業手当＋休日残業手当＋深夜手当） */
+function pay_slip_wage_total(array $slip): int
+{
+    return (int) $slip['pay_laundry'] + (int) $slip['pay_store'] + (int) $slip['pay_pickup'] + (int) $slip['pay_holiday']
+        + (int) $slip['pay_overtime'] + (int) $slip['pay_overtime_holiday'] + (int) $slip['pay_night'];
+}
+
 /**
  * 給与計算の対象者: 給与計算対象（pay_employees.payroll_enabled=1、行が無い従業員も対象）で、
  * 有効なアカウント（無効化されていない）または無効化済みでも計算期間内に勤怠がある人。
@@ -581,7 +594,8 @@ function pay_target_employees(PDO $pdo, string $periodStart, string $periodEnd):
 {
     $stmt = $pdo->prepare(
         "SELECT e.id, e.name, e.status, e.hourly_wage_weekday, e.hourly_wage_holiday,
-                e.commute_allowance_type, e.commute_allowance_amount, COALESCE(p.employment_type, 'employee') AS employment_type
+                e.commute_allowance_type, e.commute_allowance_amount, COALESCE(p.employment_type, 'employee') AS employment_type,
+                p.employee_code, COALESCE(p.payment_method, 'cash') AS payment_method, p.department
          FROM employees e
          LEFT JOIN pay_employees p ON p.employee_id = e.id
          WHERE COALESCE(p.payroll_enabled, 1) = 1
@@ -690,25 +704,28 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
         }
     }
 
-    // ---- 支給 ----
-    $categoryColumns = ['洗濯代行' => 'laundry', '店舗' => 'store', '集荷' => 'pickup'];
+    // ---- 支給（弥生の分け方をベースに基本給だけ区分別。項目ごとに1円未満切上げ。calc_payslip_pay_items()） ----
+    $items = $summary['pay_items'];
     $row = [
         'employment_type' => 'employee',
         'pay_officer' => 0,
         'work_days' => $summary['attendance_days'],
         'holiday_work_days' => $summary['holiday_attendance_days'],
         'minutes_total' => $summary['total_minutes'],
+        'minutes_holiday' => $items['holiday_minutes'],
         'minutes_overtime_daily' => $summary['daily_overtime_minutes'],
         'minutes_overtime_weekly' => $summary['weekly_overtime_minutes'],
-        'minutes_night' => $summary['night_minutes'],
+        'minutes_overtime_holiday' => $items['holiday_overtime_minutes'],
+        'minutes_night' => $items['night_minutes'],
         'commute_trips' => $summary['commute_trips'],
-        'pay_overtime' => $summary['overtime_wage'],
-        'pay_night' => $summary['night_wage'],
+        'pay_holiday' => $items['holiday_allowance'],
+        'pay_overtime' => $items['weekday_overtime_allowance'],
+        'pay_overtime_holiday' => $items['holiday_overtime_allowance'],
+        'pay_night' => $items['night_allowance'],
     ];
-    foreach ($categoryColumns as $category => $column) {
-        $stats = $summary['category_breakdown'][$category] ?? ['total_minutes' => 0, 'overtime_minutes' => 0, 'base_wage' => 0];
-        $row['minutes_' . $column] = $stats['total_minutes'] - $stats['overtime_minutes'];
-        $row['pay_' . $column] = $stats['base_wage'] ?? 0;
+    foreach (PAY_CATEGORY_COLUMNS as $category => $column) {
+        $row['minutes_' . $column] = $items['category'][$category]['minutes'] ?? 0;
+        $row['pay_' . $column] = $items['category'][$category]['amount'] ?? 0;
     }
 
     $allowances = get_employee_allowances($pdo, $employeeId);
@@ -743,7 +760,7 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
         $row[$key] = $manual[$key];
     }
 
-    $row['gross_total'] = $row['pay_laundry'] + $row['pay_store'] + $row['pay_pickup'] + $row['pay_overtime'] + $row['pay_night']
+    $row['gross_total'] = pay_slip_wage_total($row)
         + $row['allowance_total'] + $row['commute_total'] + $row['parking_total']
         + (int) $row['attendance_adjust'] + (int) $row['other_taxable'] + (int) $row['other_nontax'];
 
@@ -792,6 +809,9 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
         'name' => $employee['name'],
         'status' => $employee['status'],
         'employment_type' => 'employee',
+        'employee_code' => $employee['employee_code'] ?? null,
+        'payment_method' => $employee['payment_method'] ?? 'cash',
+        'department' => $employee['department'] ?? null,
         'wage_history' => $wageHistory,
         'terms' => $terms,
         'commute_allowance_type' => $employee['commute_allowance_type'],
@@ -809,6 +829,7 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
     $row['calc_detail'] = json_encode([
         'daily' => $summary['daily'],
         'category_breakdown' => $summary['category_breakdown'],
+        'pay_items' => $items,
         'commute_limit' => $limitDetail,
         'warnings' => $warnings,
         'no_payment' => $noPayment,
@@ -839,9 +860,9 @@ function pay_calculate_officer_slip(PDO $pdo, array $run, array $employee, array
     }
 
     $row = array_fill_keys([
-        'work_days', 'holiday_work_days', 'minutes_total', 'minutes_laundry', 'minutes_store', 'minutes_pickup',
-        'minutes_overtime_daily', 'minutes_overtime_weekly', 'minutes_night', 'commute_trips',
-        'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total',
+        'work_days', 'holiday_work_days', 'minutes_total', 'minutes_laundry', 'minutes_store', 'minutes_pickup', 'minutes_holiday',
+        'minutes_overtime_daily', 'minutes_overtime_weekly', 'minutes_overtime_holiday', 'minutes_night', 'commute_trips',
+        'pay_laundry', 'pay_store', 'pay_pickup', 'pay_holiday', 'pay_overtime', 'pay_overtime_holiday', 'pay_night', 'allowance_total',
         'commute_total', 'parking_total', 'commute_nontax_limit', 'commute_nontax', 'commute_taxable',
     ], 0);
     $row['employment_type'] = 'officer';
@@ -888,6 +909,9 @@ function pay_calculate_officer_slip(PDO $pdo, array $run, array $employee, array
         'name' => $employee['name'],
         'status' => $employee['status'],
         'employment_type' => 'officer',
+        'employee_code' => $employee['employee_code'] ?? null,
+        'payment_method' => $employee['payment_method'] ?? 'cash',
+        'department' => $employee['department'] ?? null,
         'terms' => $terms,
         'officer_compensation' => $compensation,
         'resident_tax' => $residentTaxDetail,
@@ -904,8 +928,9 @@ function pay_calculate_officer_slip(PDO $pdo, array $run, array $employee, array
 
 const PAY_SLIP_CALC_COLUMNS = [
     'employment_type', 'pay_officer', 'employee_snapshot', 'calc_detail', 'work_days', 'holiday_work_days', 'minutes_total',
-    'minutes_laundry', 'minutes_store', 'minutes_pickup', 'minutes_overtime_daily', 'minutes_overtime_weekly', 'minutes_night',
-    'commute_trips', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night',
+    'minutes_laundry', 'minutes_store', 'minutes_pickup', 'minutes_holiday', 'minutes_overtime_daily', 'minutes_overtime_weekly',
+    'minutes_overtime_holiday', 'minutes_night', 'commute_trips',
+    'pay_laundry', 'pay_store', 'pay_pickup', 'pay_holiday', 'pay_overtime', 'pay_overtime_holiday', 'pay_night',
     'allowance_total', 'allowance_detail', 'commute_total', 'parking_total', 'commute_nontax_limit', 'commute_nontax', 'commute_taxable',
     'attendance_adjust', 'attendance_adjust_reason', 'other_taxable', 'other_taxable_label', 'other_nontax', 'other_nontax_label',
     'gross_total', 'si_month', 'si_health', 'si_care', 'si_child_support', 'si_pension',
@@ -1201,59 +1226,86 @@ function pay_minutes_label(int $minutes): string
     return format_minutes_as_hours($minutes);
 }
 
-/** 明細の支給項目（表示順）。[ラベル, 金額, 補足] の配列 */
+/**
+ * 通勤手当（交通費＋駐車場代）を明細の行に分ける。非課税限度額は交通費に先に充て、残りを駐車場代に充てる。
+ *
+ * @return array{commute_nontax:int, commute_taxable:int, parking:int}
+ */
+function pay_slip_commute_split(array $slip): array
+{
+    $commuteNontax = min((int) $slip['commute_total'], (int) $slip['commute_nontax']);
+    return [
+        'commute_nontax' => $commuteNontax,
+        'commute_taxable' => (int) $slip['commute_total'] - $commuteNontax,
+        'parking' => (int) $slip['parking_total'],
+    ];
+}
+
+/**
+ * 明細の支給項目（表示順）。[ラベル, 金額, 補足, 固定項目か] の配列。
+ * 固定項目は0円でも表示し、手当（名称ごと）・駐車場代・勤怠調整・その他支給は該当があるときだけ出す。
+ */
 function pay_slip_payment_lines(array $slip): array
 {
+    $lines = [];
     if (($slip['employment_type'] ?? 'employee') === 'officer') {
-        $lines = [['役員報酬', (int) $slip['pay_officer'], '']];
-        if ((int) $slip['other_taxable'] !== 0) {
-            $lines[] = [(string) ($slip['other_taxable_label'] ?: 'その他（課税）'), (int) $slip['other_taxable'], ''];
+        $lines[] = ['役員報酬', (int) $slip['pay_officer'], '', true];
+    } else {
+        $commute = pay_slip_commute_split($slip);
+        $lines[] = ['洗濯代行', (int) $slip['pay_laundry'], pay_minutes_label((int) $slip['minutes_laundry']), true];
+        $lines[] = ['店舗', (int) $slip['pay_store'], pay_minutes_label((int) $slip['minutes_store']), true];
+        $lines[] = ['集荷', (int) $slip['pay_pickup'], pay_minutes_label((int) $slip['minutes_pickup']), true];
+        $lines[] = ['休日手当', (int) $slip['pay_holiday'], pay_minutes_label((int) $slip['minutes_holiday']), true];
+        $lines[] = ['普通残業手当', (int) $slip['pay_overtime'], pay_minutes_label(pay_slip_weekday_overtime_minutes($slip)), true];
+        $lines[] = ['休日残業手当', (int) $slip['pay_overtime_holiday'], pay_minutes_label((int) $slip['minutes_overtime_holiday']), true];
+        $lines[] = ['深夜手当', (int) $slip['pay_night'], pay_minutes_label((int) $slip['minutes_night']), true];
+        foreach (json_decode((string) $slip['allowance_detail'], true) ?: [] as $allowance) {
+            $lines[] = [$allowance['name'], (int) $allowance['amount'], '', false];
         }
-        if ((int) $slip['other_nontax'] !== 0) {
-            $lines[] = [(string) ($slip['other_nontax_label'] ?: 'その他（非課税）'), (int) $slip['other_nontax'], ''];
+        if ((int) $slip['attendance_adjust'] !== 0) {
+            $lines[] = ['勤怠調整', (int) $slip['attendance_adjust'], (string) $slip['attendance_adjust_reason'], false];
         }
-        return $lines;
-    }
-    $lines = [
-        ['洗濯代行', (int) $slip['pay_laundry'], pay_minutes_label((int) $slip['minutes_laundry'])],
-        ['店舗', (int) $slip['pay_store'], pay_minutes_label((int) $slip['minutes_store'])],
-        ['集荷', (int) $slip['pay_pickup'], pay_minutes_label((int) $slip['minutes_pickup'])],
-        ['時間外手当', (int) $slip['pay_overtime'], pay_minutes_label((int) $slip['minutes_overtime_daily'] + (int) $slip['minutes_overtime_weekly'])],
-        ['深夜手当', (int) $slip['pay_night'], pay_minutes_label((int) $slip['minutes_night'])],
-    ];
-    foreach (json_decode((string) $slip['allowance_detail'], true) ?: [] as $allowance) {
-        $lines[] = [$allowance['name'], (int) $allowance['amount'], ''];
-    }
-    $lines[] = ['交通費', (int) $slip['commute_total'], ''];
-    if ((int) $slip['parking_total'] !== 0) {
-        $lines[] = ['駐車場代', (int) $slip['parking_total'], ''];
-    }
-    if ((int) $slip['attendance_adjust'] !== 0) {
-        $lines[] = ['勤怠調整', (int) $slip['attendance_adjust'], (string) $slip['attendance_adjust_reason']];
+        $lines[] = ['非課税通勤費', $commute['commute_nontax'], '', true];
+        $lines[] = ['課税通勤費', $commute['commute_taxable'], '', true];
+        if ($commute['parking'] !== 0) {
+            $lines[] = ['駐車場代', $commute['parking'], '', false];
+        }
     }
     if ((int) $slip['other_taxable'] !== 0) {
-        $lines[] = [(string) ($slip['other_taxable_label'] ?: 'その他（課税）'), (int) $slip['other_taxable'], ''];
+        $lines[] = [(string) ($slip['other_taxable_label'] ?: 'その他（課税）'), (int) $slip['other_taxable'], '', false];
     }
     if ((int) $slip['other_nontax'] !== 0) {
-        $lines[] = [(string) ($slip['other_nontax_label'] ?: 'その他（非課税）'), (int) $slip['other_nontax'], ''];
+        $lines[] = [(string) ($slip['other_nontax_label'] ?: 'その他（非課税）'), (int) $slip['other_nontax'], '', false];
     }
     return $lines;
 }
 
-/** 明細の控除項目（表示順）。社会保険料は0円の行を出さない */
+/** 平日の時間外（普通残業時間）＝時間外の合計 − 土日祝の時間外 */
+function pay_slip_weekday_overtime_minutes(array $slip): int
+{
+    return (int) $slip['minutes_overtime_daily'] + (int) $slip['minutes_overtime_weekly'] - (int) $slip['minutes_overtime_holiday'];
+}
+
+/**
+ * 明細の控除項目（表示順）。[ラベル, 金額] の配列。
+ * 健康保険料・介護保険料・厚生年金保険料・雇用保険料・所得税・住民税は0円でも表示する（役員は雇用保険料を出さない）。
+ * 子ども・子育て支援金とその他控除は該当があるときだけ出す。
+ */
 function pay_slip_deduction_lines(array $slip): array
 {
-    $lines = [];
-    foreach (['si_health' => '健康保険料', 'si_care' => '介護保険料', 'si_child_support' => '子ども・子育て支援金', 'si_pension' => '厚生年金保険料'] as $column => $label) {
-        if ((int) $slip[$column] !== 0) {
-            $lines[] = [$label, (int) $slip[$column]];
-        }
+    $lines = [
+        ['健康保険料', (int) $slip['si_health']],
+        ['介護保険料', (int) $slip['si_care']],
+    ];
+    if ((int) $slip['si_child_support'] !== 0) {
+        $lines[] = ['子ども・子育て支援金', (int) $slip['si_child_support']];
     }
-    $lines = array_merge($lines, [
-        ['雇用保険料', (int) $slip['emp_insurance']],
-        ['所得税', (int) $slip['withholding_tax']],
-        ['住民税', (int) $slip['resident_tax']],
-    ]);
+    $lines[] = ['厚生年金保険料', (int) $slip['si_pension']];
+    if (($slip['employment_type'] ?? 'employee') !== 'officer') {
+        $lines[] = ['雇用保険料', (int) $slip['emp_insurance']];
+    }
+    $lines[] = ['所得税', (int) $slip['withholding_tax']];
+    $lines[] = ['住民税', (int) $slip['resident_tax']];
     if ((int) $slip['other_deduction'] !== 0) {
         $lines[] = [(string) ($slip['other_deduction_label'] ?: 'その他控除'), (int) $slip['other_deduction']];
     }

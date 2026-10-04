@@ -25,7 +25,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errorMessage = '従業員が見つかりません。';
             } else {
                 $summary = calc_wage_summary($pdo, $employee, $postYearMonth);
-                $totalWage = $summary['grand_total_wage'];
+                // 時給分は給与明細と同じ支給内訳（calc_payslip_pay_items()、項目ごとに1円未満切上げ）の合計
+                $totalWage = $summary['pay_items']['total'];
                 $commuteAllowanceTotal = calc_commute_allowance_total($employee, $summary['commute_trips']);
                 $allowanceTotal = sum_allowance_amounts(get_employee_allowances($pdo, $employeeId));
 
@@ -267,8 +268,12 @@ foreach ($employees as $employee) {
                     <th>残業時間</th>
                     <th>深夜労働時間</th>
                     <th>時給</th>
-                    <th>基本給</th>
-                    <th>残業手当</th>
+                    <?php foreach (SHIFT_CATEGORIES as $category): ?>
+                        <th><?= htmlspecialchars($category, ENT_QUOTES, 'UTF-8') ?></th>
+                    <?php endforeach; ?>
+                    <th>休日手当</th>
+                    <th>普通残業手当</th>
+                    <th>休日残業手当</th>
                     <th>深夜手当</th>
                     <th>交通費</th>
                     <th>手当</th>
@@ -285,7 +290,8 @@ foreach ($employees as $employee) {
                     $confirmed = $confirmedByEmployee[$employeeId] ?? null;
                     $commutingAllowance = $commuteTotalsByEmployee[$employeeId];
                     $otherAllowance = $allowanceTotalsByEmployee[$employeeId];
-                    $provisionalTotal = $summary['grand_total_wage'] + $commutingAllowance + $otherAllowance;
+                    $payItems = $summary['pay_items'];
+                    $provisionalTotal = $payItems['total'] + $commutingAllowance + $otherAllowance;
                     ?>
                     <tr>
                         <td><?= htmlspecialchars($employee['name'], ENT_QUOTES, 'UTF-8') ?></td>
@@ -294,9 +300,13 @@ foreach ($employees as $employee) {
                         <td><?= htmlspecialchars(format_minutes_as_hours($summary['overtime_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars(format_minutes_as_hours($summary['night_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= number_format((int) $employee['hourly_wage_weekday']) ?>円</td>
-                        <td><?= number_format($summary['base_wage']) ?>円</td>
-                        <td><?= number_format($summary['overtime_wage']) ?>円</td>
-                        <td><?= number_format($summary['night_wage']) ?>円</td>
+                        <?php foreach (SHIFT_CATEGORIES as $category): ?>
+                            <td><?= number_format($payItems['category'][$category]['amount']) ?>円</td>
+                        <?php endforeach; ?>
+                        <td><?= number_format($payItems['holiday_allowance']) ?>円</td>
+                        <td><?= number_format($payItems['weekday_overtime_allowance']) ?>円</td>
+                        <td><?= number_format($payItems['holiday_overtime_allowance']) ?>円</td>
+                        <td><?= number_format($payItems['night_allowance']) ?>円</td>
                         <td>
                             <?php if ($confirmed !== null): ?>
                                 <?= number_format((int) $confirmed['commute_allowance_total']) ?>円
@@ -332,6 +342,7 @@ foreach ($employees as $employee) {
                 <?php endforeach; ?>
             </tbody>
         </table>
+        <p class="notice">区分（<?= htmlspecialchars(implode('・', SHIFT_CATEGORIES), ENT_QUOTES, 'UTF-8') ?>）の金額は、その区分の全労働時間（時間外を含む）×平日時給です。休日手当＝土日祝の労働時間×（土日祝時給−平日時給）、普通残業手当＝平日の時間外×平日時給×0.25、休日残業手当＝土日祝の時間外×土日祝時給×0.25、深夜手当＝深夜時間×その日の時給×0.25。給与計算（給与明細）と同じ計算で、端数は項目ごとに1円未満切上げです（弥生給与と同じ）。下の平日・土日祝・区分別の集計は、日ごとに四捨五入した参考値のため、合計が数円ずれることがあります。</p>
     <?php endif; ?>
 </section>
 
@@ -492,7 +503,7 @@ foreach ($employees as $employee) {
     $employeeId = (int) $selectedEmployee['id'];
     $summary = $summaries[$employeeId];
     $confirmed = $confirmedByEmployee[$employeeId] ?? null;
-    $provisionalWage = $summary['grand_total_wage'];
+    $provisionalWage = $summary['pay_items']['total'];
     $detailCommuteTotal = $commuteTotalsByEmployee[$employeeId];
     $detailAllowanceTotal = $allowanceTotalsByEmployee[$employeeId];
     $detailAllowances = $allowancesByEmployee[$employeeId];
@@ -531,7 +542,58 @@ foreach ($employees as $employee) {
 
         <p>月間合計実働: <strong><?= htmlspecialchars(format_minutes_as_hours($summary['total_minutes']), ENT_QUOTES, 'UTF-8') ?></strong>（平日時給<?= number_format((int) $selectedEmployee['hourly_wage_weekday']) ?>円 / 土日祝時給<?= number_format((int) $selectedEmployee['hourly_wage_holiday']) ?>円）</p>
 
-        <h3>残業・平日休日内訳</h3>
+        <h3>支給内訳（給与明細と同じ計算）</h3>
+        <table class="wages">
+            <thead>
+                <tr>
+                    <th>項目</th>
+                    <th>時間</th>
+                    <th>金額</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach (SHIFT_CATEGORIES as $category): ?>
+                    <tr>
+                        <td><?= htmlspecialchars($category, ENT_QUOTES, 'UTF-8') ?>（全時間×平日時給）</td>
+                        <td><?= htmlspecialchars(format_minutes_as_hours($summary['pay_items']['category'][$category]['minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= number_format($summary['pay_items']['category'][$category]['amount']) ?>円</td>
+                    </tr>
+                <?php endforeach; ?>
+                <?php if (isset($summary['pay_items']['category'][ATTENDANCE_CATEGORY_NONE_LABEL])): ?>
+                    <tr>
+                        <td><?= htmlspecialchars(ATTENDANCE_CATEGORY_NONE_LABEL, ENT_QUOTES, 'UTF-8') ?>（全時間×平日時給）</td>
+                        <td><?= htmlspecialchars(format_minutes_as_hours($summary['pay_items']['category'][ATTENDANCE_CATEGORY_NONE_LABEL]['minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= number_format($summary['pay_items']['category'][ATTENDANCE_CATEGORY_NONE_LABEL]['amount']) ?>円</td>
+                    </tr>
+                <?php endif; ?>
+                <tr>
+                    <td>休日手当（土日祝の時間×(土日祝時給−平日時給)）</td>
+                    <td><?= htmlspecialchars(format_minutes_as_hours($summary['pay_items']['holiday_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= number_format($summary['pay_items']['holiday_allowance']) ?>円</td>
+                </tr>
+                <tr>
+                    <td>普通残業手当（平日の時間外×平日時給×0.25）</td>
+                    <td><?= htmlspecialchars(format_minutes_as_hours($summary['pay_items']['weekday_overtime_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= number_format($summary['pay_items']['weekday_overtime_allowance']) ?>円</td>
+                </tr>
+                <tr>
+                    <td>休日残業手当（土日祝の時間外×土日祝時給×0.25）</td>
+                    <td><?= htmlspecialchars(format_minutes_as_hours($summary['pay_items']['holiday_overtime_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= number_format($summary['pay_items']['holiday_overtime_allowance']) ?>円</td>
+                </tr>
+                <tr>
+                    <td>深夜手当（深夜時間×その日の時給×0.25）</td>
+                    <td><?= htmlspecialchars(format_minutes_as_hours($summary['pay_items']['night_minutes']), ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= number_format($summary['pay_items']['night_allowance']) ?>円</td>
+                </tr>
+                <tr>
+                    <td colspan="2"><strong>時給分 合計</strong></td>
+                    <td><strong><?= number_format($summary['pay_items']['total']) ?>円</strong></td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>残業・平日休日内訳（日ごとに四捨五入した参考値）</h3>
         <table class="wages">
             <thead>
                 <tr>
@@ -634,7 +696,7 @@ foreach ($employees as $employee) {
 
         <?php if ($confirmed !== null): ?>
             <?php $confirmedGrandTotal = (int) $confirmed['total_wage'] + (int) $confirmed['commute_allowance_total'] + (int) $confirmed['allowance_total']; ?>
-            <p>確定支給額（時給分・基本給+残業+深夜）: <?= number_format((int) $confirmed['total_wage']) ?>円</p>
+            <p>確定支給額（時給分）: <?= number_format((int) $confirmed['total_wage']) ?>円</p>
             <p>確定時の交通費: <?= number_format((int) $confirmed['commute_allowance_total']) ?>円 / 確定時の手当合計: <?= number_format((int) $confirmed['allowance_total']) ?>円</p>
             <p class="amount confirmed">確定支給合計額（時給分+交通費+手当）: <?= number_format($confirmedGrandTotal) ?>円</p>
             <p class="confirmed-meta">
@@ -670,7 +732,7 @@ foreach ($employees as $employee) {
                 <button type="submit">再確定する</button>
             </form>
         <?php else: ?>
-            <p>暫定支給額（時給分・基本給+残業+深夜）: <?= number_format($provisionalWage) ?>円</p>
+            <p>暫定支給額（時給分）: <?= number_format($provisionalWage) ?>円</p>
             <p>交通費: <?= number_format($detailCommuteTotal) ?>円 / 手当合計: <?= number_format($detailAllowanceTotal) ?>円</p>
             <p class="amount provisional">暫定支給合計額（時給分+交通費+手当）: <?= number_format($provisionalGrandTotal) ?>円（未確定）</p>
 

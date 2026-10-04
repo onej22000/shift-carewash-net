@@ -201,7 +201,7 @@ pay_render_messages($flash, $errorMessage);
     $slipsStmt->execute([':run_id' => $runId]);
     $slips = $slipsStmt->fetchAll();
     $errorCount = 0;
-    $totals = array_fill_keys(['pay_officer', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'si_total', 'emp_insurance', 'withholding_tax', 'resident_tax', 'other_deduction', 'deduction_total', 'net_pay'], 0);
+    $totals = array_fill_keys(['pay_officer', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_holiday', 'pay_overtime', 'pay_overtime_holiday', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'si_total', 'emp_insurance', 'withholding_tax', 'resident_tax', 'other_deduction', 'deduction_total', 'net_pay'], 0);
     foreach ($slips as $s) {
         if (!empty(json_decode((string) $s['errors'], true))) {
             $errorCount++;
@@ -247,7 +247,8 @@ pay_render_messages($flash, $errorMessage);
                 <button type="submit" class="danger">取消</button>
             </form>
         <?php endif; ?>
-        <p><a href="/admin/payroll_slip.php?run_id=<?= $runId ?>" target="_blank">全員の給与明細を表示・印刷</a></p>
+        <p><a href="/admin/payroll_slip.php?run_id=<?= $runId ?>" target="_blank">全員の給与明細を表示・印刷</a>
+            | <a href="/admin/payroll_slip.php?run_id=<?= $runId ?>&amp;format=pdf" target="_blank">全員の給与明細PDF（弥生形式・氏名順）</a></p>
     </section>
 
     <section>
@@ -256,7 +257,7 @@ pay_render_messages($flash, $errorMessage);
             <thead>
                 <tr>
                     <th>氏名</th><th>区分</th><th class="num">出勤</th><th class="num">労働時間</th>
-                    <th class="num">役員報酬</th><th class="num">洗濯代行</th><th class="num">店舗</th><th class="num">集荷</th><th class="num">時間外</th><th class="num">深夜</th>
+                    <th class="num">役員報酬</th><th class="num">洗濯代行</th><th class="num">店舗</th><th class="num">集荷</th><th class="num">休日手当</th><th class="num">普通残業</th><th class="num">休日残業</th><th class="num">深夜</th>
                     <th class="num">手当</th><th class="num">交通費</th><th class="num">駐車場代</th><th class="num">調整・その他</th>
                     <th class="num">総支給</th><th class="num">社会保険</th><th class="num">雇用保険</th><th class="num">課税対象</th><th class="num">所得税</th><th class="num">住民税</th><th class="num">その他控除</th>
                     <th class="num">差引支給</th><th>エラー・注意</th><th></th>
@@ -272,7 +273,8 @@ pay_render_messages($flash, $errorMessage);
                 $row = [
                     'pay_officer' => (int) $s['pay_officer'],
                     'pay_laundry' => (int) $s['pay_laundry'], 'pay_store' => (int) $s['pay_store'], 'pay_pickup' => (int) $s['pay_pickup'],
-                    'pay_overtime' => (int) $s['pay_overtime'], 'pay_night' => (int) $s['pay_night'], 'allowance_total' => (int) $s['allowance_total'],
+                    'pay_holiday' => (int) $s['pay_holiday'], 'pay_overtime' => (int) $s['pay_overtime'], 'pay_overtime_holiday' => (int) $s['pay_overtime_holiday'],
+                    'pay_night' => (int) $s['pay_night'], 'allowance_total' => (int) $s['allowance_total'],
                     'commute_total' => (int) $s['commute_total'], 'parking_total' => (int) $s['parking_total'], 'manual_pay' => $manualPay,
                     'gross_total' => (int) $s['gross_total'], 'si_total' => pay_si_total($s), 'emp_insurance' => (int) $s['emp_insurance'], 'withholding_tax' => (int) $s['withholding_tax'],
                     'resident_tax' => (int) $s['resident_tax'], 'other_deduction' => (int) $s['other_deduction'],
@@ -291,7 +293,9 @@ pay_render_messages($flash, $errorMessage);
                     <td class="num"><?= number_format($row['pay_laundry']) ?></td>
                     <td class="num"><?= number_format($row['pay_store']) ?></td>
                     <td class="num"><?= number_format($row['pay_pickup']) ?></td>
+                    <td class="num"><?= number_format($row['pay_holiday']) ?></td>
                     <td class="num"><?= number_format($row['pay_overtime']) ?></td>
+                    <td class="num"><?= number_format($row['pay_overtime_holiday']) ?></td>
                     <td class="num"><?= number_format($row['pay_night']) ?></td>
                     <td class="num"><?= number_format($row['allowance_total']) ?></td>
                     <td class="num"><?= number_format($row['commute_total']) ?></td>
@@ -313,13 +317,14 @@ pay_render_messages($flash, $errorMessage);
                     </td>
                     <td>
                         <a href="/admin/payroll_slip.php?id=<?= (int) $s['id'] ?>" target="_blank">明細</a>
+                        | <a href="/admin/payroll_slip.php?id=<?= (int) $s['id'] ?>&amp;format=pdf" target="_blank">PDF</a>
                         <?php if ($isDraft): ?> | <a href="/admin/payroll.php?run_id=<?= $runId ?>&edit=<?= (int) $s['employee_id'] ?>#edit">修正</a><?php endif; ?>
                     </td>
                 </tr>
             <?php endforeach; ?>
                 <tr class="total">
                     <td>合計（<?= count($slips) ?>名）</td><td></td><td></td><td></td>
-                    <?php foreach (['pay_officer', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'si_total', 'emp_insurance'] as $key): ?>
+                    <?php foreach (['pay_officer', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_holiday', 'pay_overtime', 'pay_overtime_holiday', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'si_total', 'emp_insurance'] as $key): ?>
                         <td class="num"><?= number_format($totals[$key]) ?></td>
                     <?php endforeach; ?>
                     <td></td>
