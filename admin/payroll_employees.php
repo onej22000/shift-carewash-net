@@ -162,32 +162,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 employee_redirect($employeeId, 'terms');
             } elseif ($action === 'save_resident_tax') {
                 $fiscalYear = optional_int($_POST['fiscal_year'] ?? '', '年度');
-                $juneAmount = optional_int($_POST['june_amount'] ?? '', '6月分');
-                $monthlyAmount = optional_int($_POST['monthly_amount'] ?? '', '7月〜翌5月分');
                 $municipality = trim((string) ($_POST['municipality'] ?? ''));
-                if ($fiscalYear === null || $fiscalYear < 2020 || $fiscalYear > 2100 || $juneAmount === null || $monthlyAmount === null) {
-                    throw new InvalidArgumentException('年度・6月分・7月〜翌5月分を入力してください。');
+                if ($fiscalYear === null || $fiscalYear < 2020 || $fiscalYear > 2100) {
+                    throw new InvalidArgumentException('年度を入力してください。');
                 }
                 if (mb_strlen($municipality) > 50) {
                     throw new InvalidArgumentException('市区町村名は50文字以内で入力してください。');
                 }
+                $postedAmounts = is_array($_POST['month_amount'] ?? null) ? $_POST['month_amount'] : [];
+                $amounts = [];
+                foreach (PAY_RESIDENT_TAX_MONTHS as $month) {
+                    $amount = optional_int($postedAmounts[$month] ?? '', $month . '月分');
+                    if ($amount === null) {
+                        throw new InvalidArgumentException('6月〜翌5月の12か月分をすべて入力してください（徴収しない月は0円）。');
+                    }
+                    $amounts[$month] = $amount;
+                }
+                $pdo->beginTransaction();
                 $pdo->prepare(
-                    'INSERT INTO pay_resident_tax (employee_id, fiscal_year, june_amount, monthly_amount, municipality)
-                     VALUES (:employee_id, :fiscal_year, :june, :monthly, :municipality)
-                     ON DUPLICATE KEY UPDATE june_amount = VALUES(june_amount), monthly_amount = VALUES(monthly_amount), municipality = VALUES(municipality)'
-                )->execute([
-                    ':employee_id' => $employeeId, ':fiscal_year' => $fiscalYear, ':june' => $juneAmount,
-                    ':monthly' => $monthlyAmount, ':municipality' => $municipality === '' ? null : $municipality,
-                ]);
-                set_flash('success', $fiscalYear . '年度の住民税を保存しました。');
+                    'INSERT INTO pay_resident_tax (employee_id, fiscal_year, municipality) VALUES (:employee_id, :fiscal_year, :municipality)
+                     ON DUPLICATE KEY UPDATE municipality = VALUES(municipality)'
+                )->execute([':employee_id' => $employeeId, ':fiscal_year' => $fiscalYear, ':municipality' => $municipality === '' ? null : $municipality]);
+                $monthStmt = $pdo->prepare(
+                    'INSERT INTO pay_resident_tax_months (employee_id, fiscal_year, month, amount) VALUES (:employee_id, :fiscal_year, :month, :amount)
+                     ON DUPLICATE KEY UPDATE amount = VALUES(amount)'
+                );
+                foreach ($amounts as $month => $amount) {
+                    $monthStmt->execute([':employee_id' => $employeeId, ':fiscal_year' => $fiscalYear, ':month' => $month, ':amount' => $amount]);
+                }
+                $pdo->commit();
+                set_flash('success', $fiscalYear . '年度の住民税（年税額 ' . number_format(array_sum($amounts)) . '円）を保存しました。下書きの給与計算は「再計算」で反映されます。');
                 employee_redirect($employeeId, 'resident');
             } elseif ($action === 'delete_resident_tax') {
-                $pdo->prepare('DELETE FROM pay_resident_tax WHERE id = :id AND employee_id = :employee_id')
-                    ->execute([':id' => (int) ($_POST['resident_tax_id'] ?? 0), ':employee_id' => $employeeId]);
-                set_flash('success', '住民税の登録を1件削除しました。');
+                $fiscalYear = (int) ($_POST['fiscal_year'] ?? 0);
+                $pdo->beginTransaction();
+                $pdo->prepare('DELETE FROM pay_resident_tax_months WHERE employee_id = :employee_id AND fiscal_year = :fiscal_year')
+                    ->execute([':employee_id' => $employeeId, ':fiscal_year' => $fiscalYear]);
+                $pdo->prepare('DELETE FROM pay_resident_tax WHERE employee_id = :employee_id AND fiscal_year = :fiscal_year')
+                    ->execute([':employee_id' => $employeeId, ':fiscal_year' => $fiscalYear]);
+                $pdo->commit();
+                set_flash('success', $fiscalYear . '年度の住民税を削除しました。');
                 employee_redirect($employeeId, 'resident');
             }
         } catch (InvalidArgumentException $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
             $errorMessage = $e->getMessage();
         }
     }
@@ -230,7 +250,7 @@ pay_render_messages($flash, $errorMessage);
                     if ((int) $emp['commute_allowance_amount'] > 0 && $terms['commute_method'] === null) {
                         $missing[] = '通勤手段';
                     }
-                    if ($terms['resident_tax_method'] === 'special' && pay_resident_tax_row($pdo, (int) $emp['id'], $currentFiscalYear) === null) {
+                    if ($terms['resident_tax_method'] === 'special' && empty(pay_resident_tax_months($pdo, (int) $emp['id'], $currentFiscalYear))) {
                         $missing[] = $currentFiscalYear . '年度住民税';
                     }
                 }
@@ -267,9 +287,36 @@ pay_render_messages($flash, $errorMessage);
     $termsHistory->execute([':id' => $selected['id']]);
     $termsHistory = $termsHistory->fetchAll();
     $latest = $termsHistory[0] ?? null;
-    $residentRows = $pdo->prepare('SELECT * FROM pay_resident_tax WHERE employee_id = :id ORDER BY fiscal_year DESC');
-    $residentRows->execute([':id' => $selected['id']]);
+    $residentRows = $pdo->prepare(
+        'SELECT y.fiscal_year, r.municipality
+         FROM (SELECT DISTINCT fiscal_year FROM pay_resident_tax_months WHERE employee_id = :id) y
+         LEFT JOIN pay_resident_tax r ON r.employee_id = :id2 AND r.fiscal_year = y.fiscal_year
+         ORDER BY y.fiscal_year DESC'
+    );
+    $residentRows->execute([':id' => $selected['id'], ':id2' => $selected['id']]);
     $residentRows = $residentRows->fetchAll();
+    foreach ($residentRows as &$rt) {
+        $rt['months'] = pay_resident_tax_months($pdo, (int) $selected['id'], (int) $rt['fiscal_year']);
+    }
+    unset($rt);
+    // 入力欄の初期値: 入力エラー時は送信内容、?resident_fy= 指定時はその年度、それ以外は当年度の登録内容
+    $residentFormYear = isset($_GET['resident_fy']) ? (int) $_GET['resident_fy'] : $currentFiscalYear;
+    $residentFormMunicipality = '';
+    $residentFormMonths = array_fill_keys(PAY_RESIDENT_TAX_MONTHS, '');
+    if ($errorMessage !== '' && ($_POST['action'] ?? '') === 'save_resident_tax') {
+        $residentFormYear = (int) ($_POST['fiscal_year'] ?? $currentFiscalYear);
+        $residentFormMunicipality = (string) ($_POST['municipality'] ?? '');
+        foreach (PAY_RESIDENT_TAX_MONTHS as $month) {
+            $residentFormMonths[$month] = is_array($_POST['month_amount'] ?? null) ? (string) ($_POST['month_amount'][$month] ?? '') : '';
+        }
+    } else {
+        foreach ($residentRows as $rt) {
+            if ((int) $rt['fiscal_year'] === $residentFormYear) {
+                $residentFormMunicipality = (string) ($rt['municipality'] ?? '');
+                $residentFormMonths = $rt['months'];
+            }
+        }
+    }
     $wageHistory = wage_history_for_employee($pdo, (int) $selected['id']);
     $allowances = get_employee_allowances($pdo, (int) $selected['id']);
     $v = static fn (string $key, $default = '') => $latest !== null && $latest[$key] !== null ? $latest[$key] : $default;
@@ -377,31 +424,88 @@ pay_render_messages($flash, $errorMessage);
         </fieldset>
 
         <fieldset id="resident">
-            <legend>住民税（特別徴収の月割額。6月〜翌5月）</legend>
+            <legend>住民税（特別徴収の月別額。6月〜翌5月）</legend>
+            <div class="scroll">
             <table class="grid">
-                <thead><tr><th>年度</th><th class="num">6月分</th><th class="num">7月〜翌5月分</th><th>市区町村</th><th></th></tr></thead>
+                <thead><tr><th>年度</th><?php foreach (PAY_RESIDENT_TAX_MONTHS as $month): ?><th class="num"><?= $month ?>月</th><?php endforeach; ?><th class="num">年税額</th><th>市区町村</th><th></th></tr></thead>
                 <tbody>
-                <?php if (empty($residentRows)): ?><tr><td colspan="5">未登録</td></tr><?php endif; ?>
+                <?php if (empty($residentRows)): ?><tr><td colspan="<?= count(PAY_RESIDENT_TAX_MONTHS) + 4 ?>">未登録</td></tr><?php endif; ?>
                 <?php foreach ($residentRows as $rt): ?>
-                    <tr><td><?= (int) $rt['fiscal_year'] ?>年度（<?= (int) $rt['fiscal_year'] ?>年6月〜<?= (int) $rt['fiscal_year'] + 1 ?>年5月）</td>
-                        <td class="num"><?= pay_yen((int) $rt['june_amount']) ?></td><td class="num"><?= pay_yen((int) $rt['monthly_amount']) ?></td><td><?= pay_h($rt['municipality'] ?? '') ?></td>
-                        <td><form method="post" action="/admin/payroll_employees.php" class="inline-form" onsubmit="return confirm('この年度の住民税を削除しますか？');">
+                    <tr><td><?= (int) $rt['fiscal_year'] ?>年度</td>
+                        <?php foreach ($rt['months'] as $amount): ?><td class="num"><?= number_format($amount) ?></td><?php endforeach; ?>
+                        <td class="num"><strong><?= pay_yen(array_sum($rt['months'])) ?></strong></td>
+                        <td><?= pay_h($rt['municipality'] ?? '') ?></td>
+                        <td><a href="/admin/payroll_employees.php?employee_id=<?= (int) $selected['id'] ?>&amp;resident_fy=<?= (int) $rt['fiscal_year'] ?>#resident">修正</a>
+                            <form method="post" action="/admin/payroll_employees.php" class="inline-form" onsubmit="return confirm('<?= (int) $rt['fiscal_year'] ?>年度の住民税を削除しますか？');">
                             <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>"><input type="hidden" name="action" value="delete_resident_tax">
-                            <input type="hidden" name="employee_id" value="<?= (int) $selected['id'] ?>"><input type="hidden" name="resident_tax_id" value="<?= (int) $rt['id'] ?>">
+                            <input type="hidden" name="employee_id" value="<?= (int) $selected['id'] ?>"><input type="hidden" name="fiscal_year" value="<?= (int) $rt['fiscal_year'] ?>">
                             <button type="submit" class="danger">削除</button></form></td></tr>
                 <?php endforeach; ?>
                 </tbody>
             </table>
-            <form method="post" action="/admin/payroll_employees.php">
+            </div>
+
+            <h3>登録・修正（同じ年度なら上書き）</h3>
+            <form method="post" action="/admin/payroll_employees.php" id="resident-tax-form">
                 <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>"><input type="hidden" name="action" value="save_resident_tax">
                 <input type="hidden" name="employee_id" value="<?= (int) $selected['id'] ?>">
-                <input type="number" name="fiscal_year" min="2020" max="2100" value="<?= $currentFiscalYear ?>" style="width:70px;" required>年度
-                6月分 <input type="number" name="june_amount" min="0" required>円
-                7月〜翌5月分 <input type="number" name="monthly_amount" min="0" required>円
-                市区町村 <input type="text" name="municipality" maxlength="50" size="12">
+                <div class="form-row"><label class="caption">年度</label>
+                    <input type="number" name="fiscal_year" min="2020" max="2100" value="<?= $residentFormYear ?>" style="width:70px;" required>年度（6月〜翌5月）
+                    　市区町村 <input type="text" name="municipality" maxlength="50" size="12" value="<?= pay_h($residentFormMunicipality) ?>"></div>
+                <div class="form-row"><label class="caption">通知書から自動入力</label>
+                    開始月 <select id="rt-start-month">
+                        <?php foreach (PAY_RESIDENT_TAX_MONTHS as $month): ?><option value="<?= $month ?>"><?= $month ?>月</option><?php endforeach; ?>
+                    </select>
+                    初回の額 <input type="number" id="rt-first-amount" min="0" style="width:90px;">円
+                    2回目以降の額 <input type="number" id="rt-rest-amount" min="0" style="width:90px;">円
+                    <button type="button" id="rt-autofill">自動入力</button>
+                    <span class="small">開始月より前の月は0円になります</span></div>
+                <div class="scroll">
+                <table class="grid">
+                    <thead><tr><?php foreach (PAY_RESIDENT_TAX_MONTHS as $month): ?><th><?= $month ?>月</th><?php endforeach; ?><th class="num">年税額</th></tr></thead>
+                    <tbody><tr>
+                        <?php foreach (PAY_RESIDENT_TAX_MONTHS as $month): ?>
+                            <td><input type="number" name="month_amount[<?= $month ?>]" class="rt-month" data-month="<?= $month ?>" min="0" style="width:72px;" value="<?= pay_h((string) $residentFormMonths[$month]) ?>" required></td>
+                        <?php endforeach; ?>
+                        <td class="num"><strong id="rt-total">0円</strong></td>
+                    </tr></tbody>
+                </table>
+                </div>
                 <button type="submit">登録・更新</button>
             </form>
-            <p class="small">住民税の徴収方法が「特別徴収」の場合だけ給与から控除します。支給日が6月なら6月分、それ以外は7月〜翌5月分の額です（年度は支給日で判定）。</p>
+            <p class="small">住民税の徴収方法が「特別徴収」の場合だけ給与から控除します。控除額は支給日の属する月のマスの額です（例: 7月10日支給 → 7月の額。年度は6月始まりで、2027年5月支給は2026年度）。年税額は通知書の年税額と一致するか確認してください。年度途中で税額変更の通知が来たら、該当月以降のマスを個別に直して更新します。</p>
+            <script>
+            (function () {
+                var form = document.getElementById('resident-tax-form');
+                var inputs = form.querySelectorAll('.rt-month');
+                function updateTotal() {
+                    var total = 0;
+                    inputs.forEach(function (input) { total += parseInt(input.value, 10) || 0; });
+                    document.getElementById('rt-total').textContent = total.toLocaleString('ja-JP') + '円';
+                }
+                document.getElementById('rt-autofill').addEventListener('click', function () {
+                    var start = document.getElementById('rt-start-month').value;
+                    var first = document.getElementById('rt-first-amount').value.trim();
+                    var rest = document.getElementById('rt-rest-amount').value.trim();
+                    if (!/^\d+$/.test(first) || !/^\d+$/.test(rest)) {
+                        alert('初回の額と2回目以降の額を0以上の整数で入力してください。');
+                        return;
+                    }
+                    var started = false;
+                    inputs.forEach(function (input) {
+                        if (input.dataset.month === start) {
+                            input.value = first;
+                            started = true;
+                        } else {
+                            input.value = started ? rest : '0';
+                        }
+                    });
+                    updateTotal();
+                });
+                inputs.forEach(function (input) { input.addEventListener('input', updateTotal); });
+                updateTotal();
+            })();
+            </script>
         </fieldset>
 
         <fieldset>

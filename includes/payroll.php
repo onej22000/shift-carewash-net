@@ -17,6 +17,7 @@ const PAY_PARKING_FEE_TYPE_LABELS = ['monthly' => '月単位', 'per_use' => '利
 const PAY_WITHHOLDING_TABLE_MAX = 740000; // 月額表の表引きで求められる上限（これ以上は計算式のため手計算）
 const PAY_WITHHOLDING_MAX_DEPENDENTS = 7;
 const PAY_DAYS_PER_WEEK = 7;
+const PAY_RESIDENT_TAX_MONTHS = [6, 7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5]; // 住民税の年度内の月順（6月始まり）
 
 /** 給与計算画面の共通ヘッダー（管理者のみ。各ページで require_login('admin') 済みであること） */
 function pay_render_header(array $admin, string $title, string $current = ''): void
@@ -180,12 +181,26 @@ function pay_resident_tax_fiscal_year(string $payDate): int
     return (int) substr($payDate, 5, 2) >= 6 ? $year : $year - 1;
 }
 
-function pay_resident_tax_row(PDO $pdo, int $employeeId, int $fiscalYear): ?array
+/**
+ * 住民税（特別徴収）の年度内の月別額（pay_resident_tax_months）。[月 => 額] を 6月〜翌5月の順で返す。
+ * 未登録の年度は空配列。
+ */
+function pay_resident_tax_months(PDO $pdo, int $employeeId, int $fiscalYear): array
 {
-    $stmt = $pdo->prepare('SELECT * FROM pay_resident_tax WHERE employee_id = :employee_id AND fiscal_year = :fiscal_year');
+    $stmt = $pdo->prepare('SELECT month, amount FROM pay_resident_tax_months WHERE employee_id = :employee_id AND fiscal_year = :fiscal_year');
     $stmt->execute([':employee_id' => $employeeId, ':fiscal_year' => $fiscalYear]);
-    $row = $stmt->fetch();
-    return $row === false ? null : $row;
+    $amounts = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $amounts[(int) $row['month']] = (int) $row['amount'];
+    }
+    if (empty($amounts)) {
+        return [];
+    }
+    $months = [];
+    foreach (PAY_RESIDENT_TAX_MONTHS as $month) {
+        $months[$month] = $amounts[$month] ?? 0;
+    }
+    return $months;
 }
 
 function pay_emp_insurance_rate_on(PDO $pdo, string $date): ?string
@@ -548,12 +563,14 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
     $residentTaxDetail = null;
     if ($terms !== null && ($terms['resident_tax_method'] ?? 'ordinary') === 'special') {
         $fiscalYear = pay_resident_tax_fiscal_year($payDate);
-        $residentRow = pay_resident_tax_row($pdo, $employeeId, $fiscalYear);
-        if ($residentRow === null) {
+        $residentMonths = pay_resident_tax_months($pdo, $employeeId, $fiscalYear);
+        if (empty($residentMonths)) {
             $warnings[] = '住民税が特別徴収ですが、' . $fiscalYear . '年度の税額が未登録のため0円にしています。';
         } else {
-            $row['resident_tax'] = (int) substr($payDate, 5, 2) === 6 ? (int) $residentRow['june_amount'] : (int) $residentRow['monthly_amount'];
-            $residentTaxDetail = ['fiscal_year' => $fiscalYear, 'june_amount' => (int) $residentRow['june_amount'], 'monthly_amount' => (int) $residentRow['monthly_amount']];
+            // 支給日の属する月のマスの額を控除する（例: 7月10日支給 → 7月の額）
+            $payMonth = (int) substr($payDate, 5, 2);
+            $row['resident_tax'] = $residentMonths[$payMonth];
+            $residentTaxDetail = ['fiscal_year' => $fiscalYear, 'month' => $payMonth, 'months' => $residentMonths];
         }
     }
 
