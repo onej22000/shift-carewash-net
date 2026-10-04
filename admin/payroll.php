@@ -201,7 +201,7 @@ pay_render_messages($flash, $errorMessage);
     $slipsStmt->execute([':run_id' => $runId]);
     $slips = $slipsStmt->fetchAll();
     $errorCount = 0;
-    $totals = array_fill_keys(['pay_officer', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'emp_insurance', 'withholding_tax', 'resident_tax', 'other_deduction', 'deduction_total', 'net_pay'], 0);
+    $totals = array_fill_keys(['pay_officer', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'si_total', 'emp_insurance', 'withholding_tax', 'resident_tax', 'other_deduction', 'deduction_total', 'net_pay'], 0);
     foreach ($slips as $s) {
         if (!empty(json_decode((string) $s['errors'], true))) {
             $errorCount++;
@@ -258,7 +258,7 @@ pay_render_messages($flash, $errorMessage);
                     <th>氏名</th><th>区分</th><th class="num">出勤</th><th class="num">労働時間</th>
                     <th class="num">役員報酬</th><th class="num">洗濯代行</th><th class="num">店舗</th><th class="num">集荷</th><th class="num">時間外</th><th class="num">深夜</th>
                     <th class="num">手当</th><th class="num">交通費</th><th class="num">駐車場代</th><th class="num">調整・その他</th>
-                    <th class="num">総支給</th><th class="num">雇用保険</th><th class="num">課税対象</th><th class="num">所得税</th><th class="num">住民税</th><th class="num">その他控除</th>
+                    <th class="num">総支給</th><th class="num">社会保険</th><th class="num">雇用保険</th><th class="num">課税対象</th><th class="num">所得税</th><th class="num">住民税</th><th class="num">その他控除</th>
                     <th class="num">差引支給</th><th>エラー・注意</th><th></th>
                 </tr>
             </thead>
@@ -274,7 +274,7 @@ pay_render_messages($flash, $errorMessage);
                     'pay_laundry' => (int) $s['pay_laundry'], 'pay_store' => (int) $s['pay_store'], 'pay_pickup' => (int) $s['pay_pickup'],
                     'pay_overtime' => (int) $s['pay_overtime'], 'pay_night' => (int) $s['pay_night'], 'allowance_total' => (int) $s['allowance_total'],
                     'commute_total' => (int) $s['commute_total'], 'parking_total' => (int) $s['parking_total'], 'manual_pay' => $manualPay,
-                    'gross_total' => (int) $s['gross_total'], 'emp_insurance' => (int) $s['emp_insurance'], 'withholding_tax' => (int) $s['withholding_tax'],
+                    'gross_total' => (int) $s['gross_total'], 'si_total' => pay_si_total($s), 'emp_insurance' => (int) $s['emp_insurance'], 'withholding_tax' => (int) $s['withholding_tax'],
                     'resident_tax' => (int) $s['resident_tax'], 'other_deduction' => (int) $s['other_deduction'],
                     'deduction_total' => (int) $s['deduction_total'], 'net_pay' => (int) $s['net_pay'],
                 ];
@@ -298,6 +298,7 @@ pay_render_messages($flash, $errorMessage);
                     <td class="num"><?= number_format($row['parking_total']) ?></td>
                     <td class="num"><?= number_format($manualPay) ?></td>
                     <td class="num"><strong><?= number_format($row['gross_total']) ?></strong></td>
+                    <td class="num"><?= number_format($row['si_total']) ?><?= $row['si_total'] > 0 ? '<div class="small">' . pay_h(substr((string) $s['si_month'], 5) . '月分') . '</div>' : '' ?></td>
                     <td class="num"><?= number_format($row['emp_insurance']) ?></td>
                     <td class="num"><?= number_format((int) $s['taxable_amount']) ?></td>
                     <td class="num"><?= number_format($row['withholding_tax']) ?></td>
@@ -318,7 +319,7 @@ pay_render_messages($flash, $errorMessage);
             <?php endforeach; ?>
                 <tr class="total">
                     <td>合計（<?= count($slips) ?>名）</td><td></td><td></td><td></td>
-                    <?php foreach (['pay_officer', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'emp_insurance'] as $key): ?>
+                    <?php foreach (['pay_officer', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night', 'allowance_total', 'commute_total', 'parking_total', 'manual_pay', 'gross_total', 'si_total', 'emp_insurance'] as $key): ?>
                         <td class="num"><?= number_format($totals[$key]) ?></td>
                     <?php endforeach; ?>
                     <td></td>

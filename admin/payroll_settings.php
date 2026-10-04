@@ -40,6 +40,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $publicLimit = parse_non_negative_int($_POST['public_transit_nontax_limit'] ?? '');
                 $fiscalStartInput = trim((string) ($_POST['fiscal_year_start_month'] ?? ''));
                 $fiscalStartMonth = $fiscalStartInput === '' ? null : parse_non_negative_int($fiscalStartInput);
+                $siPrefecture = trim((string) ($_POST['si_prefecture'] ?? ''));
+                $siCollection = (string) ($_POST['si_collection'] ?? '');
 
                 if (mb_strlen($companyName) > 100) {
                     throw new InvalidArgumentException('会社名は100文字以内で入力してください。');
@@ -62,14 +64,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($fiscalStartInput !== '' && ($fiscalStartMonth === null || $fiscalStartMonth < 1 || $fiscalStartMonth > 12)) {
                     throw new InvalidArgumentException('事業年度の開始月は1〜12で選択してください。');
                 }
+                if ($siPrefecture === '' || mb_strlen($siPrefecture) > 10) {
+                    throw new InvalidArgumentException('社会保険の適用事業所の都道府県を入力してください。');
+                }
+                if (!isset(PAY_SI_COLLECTION_LABELS[$siCollection])) {
+                    throw new InvalidArgumentException('社会保険料の徴収方法を選択してください。');
+                }
                 $pdo->prepare(
                     'UPDATE pay_settings SET company_name = :company_name, closing_day = :closing_day, pay_month_offset = :pay_month_offset,
                      pay_day = :pay_day, week_start_dow = :week_start_dow, overtime_rate = :overtime_rate, night_rate = :night_rate,
-                     public_transit_nontax_limit = :public_limit, fiscal_year_start_month = :fiscal_start, updated_at = NOW() WHERE id = 1'
+                     public_transit_nontax_limit = :public_limit, fiscal_year_start_month = :fiscal_start,
+                     si_prefecture = :si_prefecture, si_collection = :si_collection, updated_at = NOW() WHERE id = 1'
                 )->execute([
                     ':company_name' => $companyName, ':closing_day' => $closingDay, ':pay_month_offset' => $payMonthOffset,
                     ':pay_day' => $payDay, ':week_start_dow' => $weekStartDow, ':overtime_rate' => $overtimeRate,
                     ':night_rate' => $nightRate, ':public_limit' => $publicLimit, ':fiscal_start' => $fiscalStartMonth,
+                    ':si_prefecture' => $siPrefecture, ':si_collection' => $siCollection,
                 ]);
                 set_flash('success', '基本設定を保存しました。');
                 settings_redirect('basic');
@@ -173,6 +183,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ->execute([':d' => $effectiveFrom, ':c' => $cap, ':m' => $minDistance]);
                 set_flash('success', '駐車場等の料金の加算ルール（' . $effectiveFrom . ' 適用）を登録しました。');
                 settings_redirect('parking');
+            } elseif ($action === 'si_rate_add') {
+                $effectiveMonth = (string) ($_POST['effective_month'] ?? '');
+                $prefecture = trim((string) ($_POST['prefecture'] ?? ''));
+                $sourceUrl = trim((string) ($_POST['source_url'] ?? ''));
+                if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $effectiveMonth)) {
+                    throw new InvalidArgumentException('適用開始月（◯月分）を選択してください。');
+                }
+                if ($prefecture === '' || mb_strlen($prefecture) > 10) {
+                    throw new InvalidArgumentException('都道府県名（10文字以内）を入力してください。');
+                }
+                $rates = [];
+                foreach (['health_rate' => '健康保険料率', 'care_rate' => '介護保険料率', 'child_support_rate' => '子ども・子育て支援金率', 'pension_rate' => '厚生年金保険料率'] as $key => $label) {
+                    $value = trim((string) ($_POST[$key] ?? ''));
+                    if (!preg_match('/^\d{1,2}(\.\d{1,3})?$/', $value)) {
+                        throw new InvalidArgumentException($label . 'は 9.890 のような%の数値（小数第3位まで）で入力してください。');
+                    }
+                    $rates[$key] = $value;
+                }
+                if (mb_strlen($sourceUrl) > 255) {
+                    throw new InvalidArgumentException('出典URLは255文字以内で入力してください。');
+                }
+                $pdo->prepare(
+                    'INSERT INTO pay_si_rates (effective_month, prefecture, health_rate, care_rate, child_support_rate, pension_rate, source_url)
+                     VALUES (:m, :p, :h, :c, :cs, :pe, :u)
+                     ON DUPLICATE KEY UPDATE health_rate = VALUES(health_rate), care_rate = VALUES(care_rate),
+                        child_support_rate = VALUES(child_support_rate), pension_rate = VALUES(pension_rate), source_url = VALUES(source_url)'
+                )->execute([
+                    ':m' => $effectiveMonth, ':p' => $prefecture, ':h' => $rates['health_rate'], ':c' => $rates['care_rate'],
+                    ':cs' => $rates['child_support_rate'], ':pe' => $rates['pension_rate'], ':u' => $sourceUrl === '' ? null : $sourceUrl,
+                ]);
+                set_flash('success', $prefecture . 'の社会保険料率（' . $effectiveMonth . '分から）を登録しました。下書きの給与計算は「再計算」で反映されます。');
+                settings_redirect('si');
+            } elseif ($action === 'si_rate_delete') {
+                $pdo->prepare('DELETE FROM pay_si_rates WHERE id = :id')->execute([':id' => (int) ($_POST['id'] ?? 0)]);
+                set_flash('success', '社会保険料率を削除しました。');
+                settings_redirect('si');
             } elseif ($action === 'parking_delete') {
                 $pdo->prepare('DELETE FROM pay_parking_rules WHERE id = :id')->execute([':id' => (int) ($_POST['id'] ?? 0)]);
                 set_flash('success', '駐車場等の料金の加算ルールを削除しました。');
@@ -194,6 +240,7 @@ $rates = $pdo->query('SELECT * FROM pay_emp_insurance_rates ORDER BY effective_f
 $minWages = $pdo->query('SELECT * FROM pay_min_wages ORDER BY prefecture, effective_from DESC')->fetchAll();
 $commuteLimits = $pdo->query('SELECT * FROM pay_commute_limits ORDER BY effective_from DESC, min_km')->fetchAll();
 $parkingRules = $pdo->query('SELECT * FROM pay_parking_rules ORDER BY effective_from DESC')->fetchAll();
+$siRates = $pdo->query('SELECT * FROM pay_si_rates ORDER BY prefecture, effective_month DESC')->fetchAll();
 
 // 税額の確認（GET。DBには書かない）
 $checkResult = null;
@@ -255,6 +302,15 @@ pay_render_messages($flash, $errorMessage);
                 </select>
                 <span class="small">役員報酬の改定時期のチェック（定期同額給与：事業年度開始から3か月以内の改定）に使います</span>
                 <?php if ($settings['fiscal_year_start_month'] === null): ?><span class="small" style="color:#b3261e;">未設定です</span><?php endif; ?></div>
+            <div class="form-row"><label class="caption">社会保険の適用事業所（都道府県）</label>
+                <input type="text" name="si_prefecture" size="8" maxlength="10" value="<?= pay_h($settings['si_prefecture']) ?>" required>
+                <span class="small">協会けんぽの都道府県支部の料率を使います</span></div>
+            <div class="form-row"><label class="caption">社会保険料の徴収</label>
+                <select name="si_collection">
+                    <?php foreach (PAY_SI_COLLECTION_LABELS as $key => $label): ?>
+                        <option value="<?= $key ?>" <?= $settings['si_collection'] === $key ? 'selected' : '' ?>><?= pay_h($label) ?></option>
+                    <?php endforeach; ?>
+                </select></div>
             <p class="small">時間外・深夜の割増率と週の起算曜日は、賃金確認（wages.php）・シフト表の見込み額にも使われます。</p>
             <button type="submit">保存</button>
         </fieldset>
@@ -371,6 +427,39 @@ pay_render_messages($flash, $errorMessage);
         <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>"><input type="hidden" name="action" value="rate_add">
         適用開始日 <input type="date" name="effective_from" required>
         労働者負担率 <input type="text" name="employee_rate" size="9" placeholder="0.00500" required>
+        <button type="submit">追加・更新</button>
+    </form>
+</section>
+
+<section id="si">
+    <h2>社会保険料率（協会けんぽ・厚生年金）</h2>
+    <p class="small">率は労使合計の%です。給与計算では、適用事業所の都道府県で、控除する保険料の対象月（◯月分）時点に有効な行を使います。健康保険・介護保険は毎年3月分から、子ども・子育て支援金は2026年4月分からです。登録前に協会けんぽの都道府県の保険料額表と照合してください。</p>
+    <div class="scroll">
+    <table class="grid">
+        <thead><tr><th>都道府県</th><th>適用開始（◯月分）</th><th class="num">健康保険</th><th class="num">介護保険</th><th class="num">子ども・子育て支援金</th><th class="num">厚生年金</th><th>出典</th><th></th></tr></thead>
+        <tbody>
+        <?php if (empty($siRates)): ?><tr><td colspan="8">未登録</td></tr><?php endif; ?>
+        <?php foreach ($siRates as $sr): ?>
+            <tr><td><?= pay_h($sr['prefecture']) ?></td><td><?= pay_h($sr['effective_month']) ?>分〜</td>
+                <td class="num"><?= pay_h($sr['health_rate']) ?>%</td><td class="num"><?= pay_h($sr['care_rate']) ?>%</td>
+                <td class="num"><?= pay_h($sr['child_support_rate']) ?>%</td><td class="num"><?= pay_h($sr['pension_rate']) ?>%</td>
+                <td class="small"><?php if ($sr['source_url'] !== null): ?><a href="<?= pay_h($sr['source_url']) ?>" target="_blank" rel="noopener">出典</a><?php endif; ?></td>
+                <td><form method="post" action="/admin/payroll_settings.php" class="inline-form" onsubmit="return confirm('この料率を削除しますか？');">
+                    <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>"><input type="hidden" name="action" value="si_rate_delete"><input type="hidden" name="id" value="<?= (int) $sr['id'] ?>">
+                    <button type="submit" class="danger">削除</button></form></td></tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table>
+    </div>
+    <form method="post" action="/admin/payroll_settings.php">
+        <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>"><input type="hidden" name="action" value="si_rate_add">
+        適用開始 <input type="month" name="effective_month" required>分
+        都道府県 <input type="text" name="prefecture" size="6" value="<?= pay_h($settings['si_prefecture']) ?>" required>
+        健康 <input type="text" name="health_rate" size="6" placeholder="9.890" required>%
+        介護 <input type="text" name="care_rate" size="6" placeholder="1.620" required>%
+        支援金 <input type="text" name="child_support_rate" size="6" value="0.000" required>%
+        厚生年金 <input type="text" name="pension_rate" size="6" value="18.300" required>%
+        出典URL <input type="url" name="source_url" size="30" maxlength="255">
         <button type="submit">追加・更新</button>
     </form>
 </section>

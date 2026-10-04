@@ -32,7 +32,7 @@ function fetch_employee(PDO $pdo, int $employeeId): ?array
 {
     $stmt = $pdo->prepare(
         'SELECT e.id, e.name, e.role, e.status, e.hourly_wage_weekday, e.hourly_wage_holiday, e.commute_allowance_type, e.commute_allowance_amount,
-                COALESCE(p.payroll_enabled, 1) AS payroll_enabled, COALESCE(p.employment_type, \'employee\') AS employment_type, p.gender
+                COALESCE(p.payroll_enabled, 1) AS payroll_enabled, COALESCE(p.employment_type, \'employee\') AS employment_type, p.gender, p.birth_date
          FROM employees e LEFT JOIN pay_employees p ON p.employee_id = e.id WHERE e.id = :id'
     );
     $stmt->execute([':id' => $employeeId]);
@@ -69,6 +69,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $enabled = isset($_POST['payroll_enabled']) ? 1 : 0;
                 $employmentType = (string) ($_POST['employment_type'] ?? 'employee');
                 $gender = (string) ($_POST['gender'] ?? '');
+                $birthDate = trim((string) ($_POST['birth_date'] ?? ''));
+                if ($birthDate !== '') {
+                    pay_assert_date($birthDate, '生年月日');
+                    if ($birthDate < '1900-01-01' || $birthDate > $todayStr) {
+                        throw new InvalidArgumentException('生年月日が正しくありません。');
+                    }
+                }
                 if (!isset(PAY_EMPLOYMENT_TYPE_LABELS[$employmentType])) {
                     throw new InvalidArgumentException('区分の指定が正しくありません。');
                 }
@@ -76,10 +83,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     throw new InvalidArgumentException('性別の指定が正しくありません。');
                 }
                 $pdo->prepare(
-                    'INSERT INTO pay_employees (employee_id, payroll_enabled, employment_type, gender, updated_at) VALUES (:id, :enabled, :employment_type, :gender, NOW())
-                     ON DUPLICATE KEY UPDATE payroll_enabled = VALUES(payroll_enabled), employment_type = VALUES(employment_type), gender = VALUES(gender), updated_at = NOW()'
-                )->execute([':id' => $employeeId, ':enabled' => $enabled, ':employment_type' => $employmentType, ':gender' => $gender === '' ? null : $gender]);
-                set_flash('success', '給与計算対象・区分・性別を保存しました。');
+                    'INSERT INTO pay_employees (employee_id, payroll_enabled, employment_type, gender, birth_date, updated_at)
+                     VALUES (:id, :enabled, :employment_type, :gender, :birth_date, NOW())
+                     ON DUPLICATE KEY UPDATE payroll_enabled = VALUES(payroll_enabled), employment_type = VALUES(employment_type),
+                        gender = VALUES(gender), birth_date = VALUES(birth_date), updated_at = NOW()'
+                )->execute([
+                    ':id' => $employeeId, ':enabled' => $enabled, ':employment_type' => $employmentType,
+                    ':gender' => $gender === '' ? null : $gender, ':birth_date' => $birthDate === '' ? null : $birthDate,
+                ]);
+                set_flash('success', '給与計算対象・区分・性別・生年月日を保存しました。');
                 employee_redirect($employeeId, 'profile');
             } elseif ($action === 'save_terms') {
                 $effectiveFrom = (string) ($_POST['effective_from'] ?? '');
@@ -239,6 +251,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ->execute([':id' => (int) ($_POST['officer_comp_id'] ?? 0), ':employee_id' => $employeeId]);
                 set_flash('success', '役員報酬の履歴を1件削除しました。');
                 employee_redirect($employeeId, 'officer');
+            } elseif ($action === 'save_si_standard') {
+                $effectiveMonth = (string) ($_POST['effective_month'] ?? '');
+                if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $effectiveMonth)) {
+                    throw new InvalidArgumentException('適用開始月（◯月分）を選択してください。');
+                }
+                $enrolled = isset($_POST['lost']) ? 0 : 1;
+                $healthStandard = optional_int($_POST['health_standard'] ?? '', '健康保険の標準報酬月額');
+                $pensionStandard = optional_int($_POST['pension_standard'] ?? '', '厚生年金の標準報酬月額');
+                $note = trim((string) ($_POST['note'] ?? ''));
+                if ($enrolled === 1 && $healthStandard === null && $pensionStandard === null) {
+                    throw new InvalidArgumentException('健康保険・厚生年金の標準報酬月額を入力してください（資格喪失の場合は「資格喪失」にチェック）。');
+                }
+                if (mb_strlen($note) > 200) {
+                    throw new InvalidArgumentException('根拠メモは200文字以内で入力してください。');
+                }
+                $pdo->prepare(
+                    'INSERT INTO pay_si_standard (employee_id, effective_month, enrolled, health_standard, pension_standard, note, created_by)
+                     VALUES (:employee_id, :effective_month, :enrolled, :health, :pension, :note, :created_by)
+                     ON DUPLICATE KEY UPDATE enrolled = VALUES(enrolled), health_standard = VALUES(health_standard),
+                        pension_standard = VALUES(pension_standard), note = VALUES(note), created_by = VALUES(created_by), created_at = CURRENT_TIMESTAMP'
+                )->execute([
+                    ':employee_id' => $employeeId, ':effective_month' => $effectiveMonth, ':enrolled' => $enrolled,
+                    ':health' => $enrolled === 1 ? $healthStandard : null, ':pension' => $enrolled === 1 ? $pensionStandard : null,
+                    ':note' => $note === '' ? null : $note, ':created_by' => (int) $admin['id'],
+                ]);
+                set_flash('success', '社会保険（' . $effectiveMonth . '分から' . ($enrolled === 1 ? '' : '資格喪失') . '）を保存しました。下書きの給与計算は「再計算」で反映されます。');
+                employee_redirect($employeeId, 'si');
+            } elseif ($action === 'delete_si_standard') {
+                $pdo->prepare('DELETE FROM pay_si_standard WHERE id = :id AND employee_id = :employee_id')
+                    ->execute([':id' => (int) ($_POST['si_standard_id'] ?? 0), ':employee_id' => $employeeId]);
+                set_flash('success', '社会保険の履歴を1件削除しました。');
+                employee_redirect($employeeId, 'si');
             } elseif ($action === 'delete_resident_tax') {
                 $fiscalYear = (int) ($_POST['fiscal_year'] ?? 0);
                 $pdo->beginTransaction();
@@ -264,10 +308,11 @@ $csrfToken = csrf_token();
 $selectedId = isset($_GET['employee_id']) ? (int) $_GET['employee_id'] : (int) ($_POST['employee_id'] ?? 0);
 $selected = $selectedId > 0 ? fetch_employee($pdo, $selectedId) : null;
 $currentFiscalYear = pay_resident_tax_fiscal_year($todayStr);
+$currentSiMonth = substr($todayStr, 0, 7);
 
 $employees = $pdo->query(
     "SELECT e.id, e.name, e.role, e.status, e.hourly_wage_weekday, e.hourly_wage_holiday, e.commute_allowance_type, e.commute_allowance_amount,
-            COALESCE(p.payroll_enabled, 1) AS payroll_enabled, COALESCE(p.employment_type, 'employee') AS employment_type, p.gender
+            COALESCE(p.payroll_enabled, 1) AS payroll_enabled, COALESCE(p.employment_type, 'employee') AS employment_type, p.gender, p.birth_date
      FROM employees e LEFT JOIN pay_employees p ON p.employee_id = e.id
      ORDER BY COALESCE(p.payroll_enabled, 1) DESC, FIELD(e.status, 'active', 'invited', 'disabled'), e.id"
 )->fetchAll();
@@ -281,7 +326,7 @@ pay_render_messages($flash, $errorMessage);
     <div class="scroll">
     <table class="grid">
         <thead><tr>
-            <th>氏名</th><th>状態</th><th>給与計算</th><th>区分</th><th>性別</th><th>甲乙・扶養</th><th>雇用保険</th><th>住民税</th>
+            <th>氏名</th><th>状態</th><th>給与計算</th><th>区分</th><th>性別</th><th>甲乙・扶養</th><th>社会保険</th><th>雇用保険</th><th>住民税</th>
             <th>通勤手段</th><th>就業地</th><th class="num">平日時給</th><th>交通費</th><th>未設定</th><th></th>
         </tr></thead>
         <tbody>
@@ -289,8 +334,13 @@ pay_render_messages($flash, $errorMessage);
             <?php
             $terms = pay_terms_on($pdo, (int) $emp['id'], $todayStr);
             $isOfficer = $emp['employment_type'] === 'officer';
+            $siStandard = pay_si_standard_on($pdo, (int) $emp['id'], $currentSiMonth);
+            $siEnrolled = $siStandard !== null && (int) $siStandard['enrolled'] === 1;
             $missing = [];
             if ((int) $emp['payroll_enabled'] === 1) {
+                if ($siEnrolled && $emp['birth_date'] === null) {
+                    $missing[] = '生年月日';
+                }
                 if ($isOfficer && pay_officer_compensation_on($pdo, (int) $emp['id'], $todayStr) === null) {
                     $missing[] = '役員報酬';
                 }
@@ -316,6 +366,7 @@ pay_render_messages($flash, $errorMessage);
                 <td><?= $isOfficer ? '<strong>役員</strong>' : '従業員' ?></td>
                 <td><?= pay_h(PAY_GENDER_LABELS[$emp['gender']] ?? '—') ?></td>
                 <td><?= $terms === null ? '—' : ($terms['tax_column'] === 'kou' ? '甲・扶養' . (int) $terms['dependents'] . '人' : '乙') ?></td>
+                <td><?= $siEnrolled ? '加入' : '—' ?></td>
                 <td><?= $terms === null || $isOfficer ? '—' : ((int) $terms['emp_insurance'] === 1 ? '加入' : '—') ?></td>
                 <td><?= $terms === null ? '—' : ($terms['resident_tax_method'] === 'special' ? '特別徴収' : '普通徴収') ?></td>
                 <?php if ($isOfficer): ?>
@@ -378,13 +429,16 @@ pay_render_messages($flash, $errorMessage);
     $officerComps = $pdo->prepare('SELECT * FROM pay_officer_compensation WHERE employee_id = :id ORDER BY effective_from DESC');
     $officerComps->execute([':id' => $selected['id']]);
     $officerComps = $officerComps->fetchAll();
+    $siStandards = $pdo->prepare('SELECT * FROM pay_si_standard WHERE employee_id = :id ORDER BY effective_month DESC');
+    $siStandards->execute([':id' => $selected['id']]);
+    $siStandards = $siStandards->fetchAll();
     $v = static fn (string $key, $default = '') => $latest !== null && $latest[$key] !== null ? $latest[$key] : $default;
     ?>
     <section>
         <h2><?= pay_h($selected['name']) ?>さんの給与設定</h2>
 
         <fieldset id="profile">
-            <legend>給与計算対象・区分・性別</legend>
+            <legend>給与計算対象・区分・性別・生年月日</legend>
             <form method="post" action="/admin/payroll_employees.php">
                 <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>">
                 <input type="hidden" name="action" value="save_profile">
@@ -401,8 +455,10 @@ pay_render_messages($flash, $errorMessage);
                         <option value="<?= $key ?>" <?= $selected['gender'] === $key ? 'selected' : '' ?>><?= $label ?></option>
                     <?php endforeach; ?>
                 </select>
+                　生年月日 <input type="date" name="birth_date" value="<?= pay_h($selected['birth_date'] ?? '') ?>">
                 <button type="submit">保存</button>
             </form>
+            <p class="small">生年月日は、社会保険の介護保険料（40歳以上65歳未満）の判定に使います。社会保険の加入者は登録が必要です。</p>
         </fieldset>
 
         <fieldset id="terms">
@@ -576,6 +632,45 @@ pay_render_messages($flash, $errorMessage);
                 updateTotal();
             })();
             </script>
+        </fieldset>
+
+        <fieldset id="si">
+            <legend>社会保険（標準報酬月額。適用開始月＝◯月分ごとの履歴）</legend>
+            <?php if (!empty($siStandards) && $selected['birth_date'] === null): ?>
+                <p class="notice">生年月日が未登録です。介護保険の対象か判定できないため、加入中の月は給与計算で確定できません。</p>
+            <?php endif; ?>
+            <table class="grid">
+                <thead><tr><th>適用開始</th><th>資格</th><th class="num">健康保険</th><th class="num">厚生年金</th><th>根拠メモ</th><th></th></tr></thead>
+                <tbody>
+                <?php if (empty($siStandards)): ?><tr><td colspan="6">未加入（登録なし）</td></tr><?php endif; ?>
+                <?php foreach ($siStandards as $ss): ?>
+                    <tr><td><?= pay_h($ss['effective_month']) ?>分〜</td>
+                        <td><?= (int) $ss['enrolled'] === 1 ? '加入' : '資格喪失' ?></td>
+                        <td class="num"><?= $ss['health_standard'] !== null ? pay_yen((int) $ss['health_standard']) : '—' ?></td>
+                        <td class="num"><?= $ss['pension_standard'] !== null ? pay_yen((int) $ss['pension_standard']) : '—' ?></td>
+                        <td><?= pay_h($ss['note'] ?? '') ?></td>
+                        <td><form method="post" action="/admin/payroll_employees.php" class="inline-form" onsubmit="return confirm('この社会保険の履歴を削除しますか？（確定済みの明細は変わりません）');">
+                            <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>"><input type="hidden" name="action" value="delete_si_standard">
+                            <input type="hidden" name="employee_id" value="<?= (int) $selected['id'] ?>"><input type="hidden" name="si_standard_id" value="<?= (int) $ss['id'] ?>">
+                            <button type="submit" class="danger">削除</button></form></td></tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+            <h3>登録（同じ適用開始月なら上書き）</h3>
+            <form method="post" action="/admin/payroll_employees.php">
+                <input type="hidden" name="csrf_token" value="<?= pay_h($csrfToken) ?>"><input type="hidden" name="action" value="save_si_standard">
+                <input type="hidden" name="employee_id" value="<?= (int) $selected['id'] ?>">
+                <div class="form-row"><label class="caption">適用開始月</label><input type="month" name="effective_month" required>分から
+                    <span class="small">決定通知書の「◯月分から」の月（定時決定なら9月分）</span></div>
+                <div class="form-row"><label class="caption">標準報酬月額</label>
+                    健康保険 <input type="number" name="health_standard" min="0">円
+                    厚生年金 <input type="number" name="pension_standard" min="0">円
+                    <span class="small">加入していない方は空欄</span></div>
+                <div class="form-row"><label class="caption">資格喪失</label><label><input type="checkbox" name="lost" value="1"> この月分から控除しない（資格喪失）</label></div>
+                <div class="form-row"><label class="caption">根拠メモ</label><input type="text" name="note" maxlength="200" size="40" placeholder="例: 2026-09 定時決定通知書"></div>
+                <button type="submit">登録</button>
+            </form>
+            <p class="small">控除する保険料の対象月は、給与設定の徴収方法（翌月徴収なら支給月の前月分）で決まります。料率は給与設定の「社会保険料率」を使います。</p>
         </fieldset>
 
         <?php if ($selectedIsOfficer): ?>

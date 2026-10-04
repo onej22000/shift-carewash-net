@@ -20,6 +20,12 @@ const PAY_DAYS_PER_WEEK = 7;
 const PAY_RESIDENT_TAX_MONTHS = [6, 7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5]; // 住民税の年度内の月順（6月始まり）
 const PAY_EMPLOYMENT_TYPE_LABELS = ['employee' => '従業員', 'officer' => '役員'];
 const PAY_OFFICER_REVISION_MONTHS = 3; // 定期同額給与: 事業年度開始から3か月以内の改定
+const PAY_SI_COLLECTION_LABELS = [
+    'next_month' => '翌月徴収（前月分の保険料を当月支給の報酬から控除）',
+    'same_month' => '当月徴収（当月分の保険料を当月支給の報酬から控除）',
+];
+const PAY_CARE_INSURANCE_START_AGE = 40; // 介護保険第2号被保険者（40歳以上65歳未満）
+const PAY_CARE_INSURANCE_END_AGE = 65;
 
 /** 給与計算画面の共通ヘッダー（管理者のみ。各ページで require_login('admin') 済みであること） */
 function pay_render_header(array $admin, string $title, string $current = ''): void
@@ -249,6 +255,162 @@ function pay_officer_revision_in_period(?int $fiscalYearStartMonth, string $effe
     }
     $month = (int) substr($effectiveFrom, 5, 2);
     return ($month - $fiscalYearStartMonth + 12) % 12 < PAY_OFFICER_REVISION_MONTHS;
+}
+
+// ---------------------------------------------------------------------------
+// 社会保険（健康保険・介護保険・子ども・子育て支援金・厚生年金）
+// ---------------------------------------------------------------------------
+
+/** 控除する保険料の対象月（◯月分、YYYY-MM）。翌月徴収なら支給月の前月、当月徴収なら支給月 */
+function pay_si_target_month(array $settings, string $payDate): string
+{
+    $month = new DateTime(substr($payDate, 0, 7) . '-01');
+    if (($settings['si_collection'] ?? 'next_month') === 'next_month') {
+        $month->modify('-1 month');
+    }
+    return $month->format('Y-m');
+}
+
+/** $month（◯月分）時点で有効な標準報酬月額の行。登録が無ければ null */
+function pay_si_standard_on(PDO $pdo, int $employeeId, string $month): ?array
+{
+    $stmt = $pdo->prepare(
+        'SELECT * FROM pay_si_standard WHERE employee_id = :employee_id AND effective_month <= :month
+         ORDER BY effective_month DESC LIMIT 1'
+    );
+    $stmt->execute([':employee_id' => $employeeId, ':month' => $month]);
+    $row = $stmt->fetch();
+    return $row === false ? null : $row;
+}
+
+/** $prefecture・$month（◯月分）時点で有効な社会保険料率の行。登録が無ければ null */
+function pay_si_rate_on(PDO $pdo, string $prefecture, string $month): ?array
+{
+    $stmt = $pdo->prepare(
+        'SELECT * FROM pay_si_rates WHERE prefecture = :prefecture AND effective_month <= :month
+         ORDER BY effective_month DESC LIMIT 1'
+    );
+    $stmt->execute([':prefecture' => $prefecture, ':month' => $month]);
+    $row = $stmt->fetch();
+    return $row === false ? null : $row;
+}
+
+/** 年齢に達した日（誕生日の前日）。2月29日生まれの人も前日の考え方で判定する */
+function pay_age_reached_date(string $birthDate, int $age): DateTime
+{
+    [$year, $month, $day] = array_map('intval', explode('-', $birthDate));
+    $birthday = new DateTime(sprintf('%04d-%02d-01', $year + $age, $month));
+    $birthday->modify('+' . ($day - 1) . ' day'); // 2/29 生まれは平年だと 3/1 になる
+    return $birthday->modify('-1 day');
+}
+
+/**
+ * 介護保険第2号被保険者として $month（◯月分）の介護保険料がかかるか。
+ * 開始＝40歳に達した日（誕生日の前日）の属する月、終了＝65歳に達した日の属する月の前月。
+ */
+function pay_care_insurance_applies(string $birthDate, string $month): bool
+{
+    $start = pay_age_reached_date($birthDate, PAY_CARE_INSURANCE_START_AGE)->format('Y-m');
+    $end = pay_age_reached_date($birthDate, PAY_CARE_INSURANCE_END_AGE)->format('Y-m'); // この月から対象外
+    return $month >= $start && $month < $end;
+}
+
+/**
+ * 保険料額表の「折半額」を給与から控除する額にする（50銭以下切捨て・50銭超切上げ）。
+ * $rateMilliPct は率（%）の1000倍の整数（9.890% → 9890）。標準報酬×率÷100÷2 を整数で計算する。
+ */
+function pay_si_half_premium(int $standard, int $rateMilliPct): int
+{
+    $numerator = $standard * $rateMilliPct; // 単位: 1/200000 円（％×1000 と ÷2 の分）
+    $yen = intdiv($numerator, 200000);
+    return $numerator % 200000 > 100000 ? $yen + 1 : $yen;
+}
+
+/**
+ * 社会保険料の本人負担（保険料額表の欄どおりに端数処理）。
+ *   健康保険料 = 端数処理(標準報酬×健康保険料率÷2)
+ *   介護保険料 = 端数処理(標準報酬×(健康＋介護)÷2) − 健康保険料（介護保険第2号被保険者のみ）
+ *   子ども・子育て支援金 = 端数処理(標準報酬×支援金率÷2)
+ *   厚生年金保険料 = 端数処理(標準報酬×厚生年金保険料率÷2)
+ *
+ * @return array{health:int, care:int, child_support:int, pension:int}
+ */
+function pay_si_premiums(?int $healthStandard, ?int $pensionStandard, array $rate, bool $care): array
+{
+    $healthRate = pay_decimal_to_int((string) $rate['health_rate'], 3);
+    $careRate = pay_decimal_to_int((string) $rate['care_rate'], 3);
+    $childRate = pay_decimal_to_int((string) $rate['child_support_rate'], 3);
+    $pensionRate = pay_decimal_to_int((string) $rate['pension_rate'], 3);
+
+    $result = ['health' => 0, 'care' => 0, 'child_support' => 0, 'pension' => 0];
+    if ($healthStandard !== null) {
+        $result['health'] = pay_si_half_premium($healthStandard, $healthRate);
+        if ($care) {
+            $result['care'] = pay_si_half_premium($healthStandard, $healthRate + $careRate) - $result['health'];
+        }
+        $result['child_support'] = pay_si_half_premium($healthStandard, $childRate);
+    }
+    if ($pensionStandard !== null) {
+        $result['pension'] = pay_si_half_premium($pensionStandard, $pensionRate);
+    }
+    return $result;
+}
+
+/**
+ * 明細に控除する社会保険料。対象月（◯月分）に加入中（enrolled=1）の標準報酬月額がある人だけ控除する。
+ *
+ * @return array{si_month:string, si_health:int, si_care:int, si_child_support:int, si_pension:int, detail:?array}
+ */
+function pay_si_deduction(PDO $pdo, array $settings, int $employeeId, string $payDate, array &$errors): array
+{
+    $month = pay_si_target_month($settings, $payDate);
+    $row = ['si_month' => $month, 'si_health' => 0, 'si_care' => 0, 'si_child_support' => 0, 'si_pension' => 0, 'detail' => null];
+
+    $standard = pay_si_standard_on($pdo, $employeeId, $month);
+    if ($standard === null || (int) $standard['enrolled'] !== 1) {
+        return $row;
+    }
+    $healthStandard = $standard['health_standard'] === null ? null : (int) $standard['health_standard'];
+    $pensionStandard = $standard['pension_standard'] === null ? null : (int) $standard['pension_standard'];
+
+    $prefecture = (string) $settings['si_prefecture'];
+    $rate = pay_si_rate_on($pdo, $prefecture, $month);
+    if ($rate === null) {
+        $errors[] = $prefecture . 'の' . $month . '分の社会保険料率が未登録です（給与設定）。';
+        return $row;
+    }
+
+    $care = false;
+    if ($healthStandard !== null) {
+        $stmt = $pdo->prepare('SELECT birth_date FROM pay_employees WHERE employee_id = :id');
+        $stmt->execute([':id' => $employeeId]);
+        $birthDate = $stmt->fetchColumn();
+        if ($birthDate === false || $birthDate === null) {
+            $errors[] = '社会保険の加入者ですが、生年月日が未登録のため介護保険の対象か判定できません（従業員の給与設定）。';
+            return $row;
+        }
+        $care = pay_care_insurance_applies((string) $birthDate, $month);
+    }
+
+    $premiums = pay_si_premiums($healthStandard, $pensionStandard, $rate, $care);
+    $row['si_health'] = $premiums['health'];
+    $row['si_care'] = $premiums['care'];
+    $row['si_child_support'] = $premiums['child_support'];
+    $row['si_pension'] = $premiums['pension'];
+    $row['detail'] = [
+        'month' => $month,
+        'standard' => $standard,
+        'rate' => $rate,
+        'care' => $care,
+        'premiums' => $premiums,
+    ];
+    return $row;
+}
+
+/** 社会保険料（本人負担）の合計 */
+function pay_si_total(array $row): int
+{
+    return (int) $row['si_health'] + (int) $row['si_care'] + (int) $row['si_child_support'] + (int) $row['si_pension'];
 }
 
 function pay_emp_insurance_rate_on(PDO $pdo, string $date): ?string
@@ -604,7 +766,12 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
         }
     }
 
-    $row['taxable_amount'] = $row['gross_total'] - $row['commute_nontax'] - (int) $row['other_nontax'] - $row['emp_insurance'];
+    $si = pay_si_deduction($pdo, $settings, $employeeId, $payDate, $errors);
+    $siDetail = $si['detail'];
+    unset($si['detail']);
+    $row = array_merge($row, $si);
+
+    $row['taxable_amount'] = $row['gross_total'] - $row['commute_nontax'] - (int) $row['other_nontax'] - $row['emp_insurance'] - pay_si_total($row);
     $row['tax_table_year'] = (int) substr($payDate, 0, 4);
     $row['withholding_tax'] = 0;
     if ($terms !== null && !$noPayment) {
@@ -614,7 +781,7 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
 
     [$row['resident_tax'], $residentTaxDetail] = pay_resident_tax_deduction($pdo, $employeeId, $terms, $payDate, $warnings);
 
-    $row['deduction_total'] = $row['emp_insurance'] + $row['withholding_tax'] + $row['resident_tax'] + (int) $row['other_deduction'];
+    $row['deduction_total'] = pay_si_total($row) + $row['emp_insurance'] + $row['withholding_tax'] + $row['resident_tax'] + (int) $row['other_deduction'];
     $row['net_pay'] = $row['gross_total'] - $row['deduction_total'];
     if ($row['net_pay'] < 0) {
         $errors[] = '差引支給額がマイナスです（' . pay_yen($row['net_pay']) . '）。';
@@ -632,6 +799,7 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
         'allowances' => json_decode($row['allowance_detail'], true),
         'work_prefecture' => $prefecture,
         'resident_tax' => $residentTaxDetail,
+        'social_insurance' => $siDetail,
         'settings' => [
             'overtime_rate' => $settings['overtime_rate'],
             'night_rate' => $settings['night_rate'],
@@ -657,6 +825,7 @@ function pay_calculate_slip(PDO $pdo, array $run, array $employee, array $manual
  */
 function pay_calculate_officer_slip(PDO $pdo, array $run, array $employee, array $manual): array
 {
+    $settings = pay_settings($pdo);
     $employeeId = (int) $employee['id'];
     $periodEnd = $run['period_end'];
     $payDate = $run['pay_date'];
@@ -695,7 +864,11 @@ function pay_calculate_officer_slip(PDO $pdo, array $run, array $employee, array
 
     $row['emp_insurance_rate'] = null;
     $row['emp_insurance'] = 0;
-    $row['taxable_amount'] = $row['gross_total'] - (int) $row['other_nontax'];
+    $si = pay_si_deduction($pdo, $settings, $employeeId, $payDate, $errors);
+    $siDetail = $si['detail'];
+    unset($si['detail']);
+    $row = array_merge($row, $si);
+    $row['taxable_amount'] = $row['gross_total'] - (int) $row['other_nontax'] - pay_si_total($row);
     $row['tax_table_year'] = (int) substr($payDate, 0, 4);
     $row['withholding_tax'] = 0;
     if ($terms !== null) {
@@ -705,7 +878,7 @@ function pay_calculate_officer_slip(PDO $pdo, array $run, array $employee, array
 
     [$row['resident_tax'], $residentTaxDetail] = pay_resident_tax_deduction($pdo, $employeeId, $terms, $payDate, $warnings);
 
-    $row['deduction_total'] = $row['withholding_tax'] + $row['resident_tax'] + (int) $row['other_deduction'];
+    $row['deduction_total'] = pay_si_total($row) + $row['withholding_tax'] + $row['resident_tax'] + (int) $row['other_deduction'];
     $row['net_pay'] = $row['gross_total'] - $row['deduction_total'];
     if ($row['net_pay'] < 0) {
         $errors[] = '差引支給額がマイナスです（' . pay_yen($row['net_pay']) . '）。';
@@ -718,6 +891,7 @@ function pay_calculate_officer_slip(PDO $pdo, array $run, array $employee, array
         'terms' => $terms,
         'officer_compensation' => $compensation,
         'resident_tax' => $residentTaxDetail,
+        'social_insurance' => $siDetail,
     ], JSON_UNESCAPED_UNICODE);
     $row['calc_detail'] = json_encode([
         'warnings' => $warnings,
@@ -734,7 +908,8 @@ const PAY_SLIP_CALC_COLUMNS = [
     'commute_trips', 'pay_laundry', 'pay_store', 'pay_pickup', 'pay_overtime', 'pay_night',
     'allowance_total', 'allowance_detail', 'commute_total', 'parking_total', 'commute_nontax_limit', 'commute_nontax', 'commute_taxable',
     'attendance_adjust', 'attendance_adjust_reason', 'other_taxable', 'other_taxable_label', 'other_nontax', 'other_nontax_label',
-    'gross_total', 'emp_insurance_rate', 'emp_insurance', 'taxable_amount', 'tax_table_year', 'withholding_tax', 'resident_tax',
+    'gross_total', 'si_month', 'si_health', 'si_care', 'si_child_support', 'si_pension',
+    'emp_insurance_rate', 'emp_insurance', 'taxable_amount', 'tax_table_year', 'withholding_tax', 'resident_tax',
     'other_deduction', 'other_deduction_label', 'deduction_total', 'net_pay', 'errors', 'note',
 ];
 
@@ -1065,16 +1240,32 @@ function pay_slip_payment_lines(array $slip): array
     return $lines;
 }
 
-/** 明細の控除項目（表示順） */
+/** 明細の控除項目（表示順）。社会保険料は0円の行を出さない */
 function pay_slip_deduction_lines(array $slip): array
 {
-    $lines = [
+    $lines = [];
+    foreach (['si_health' => '健康保険料', 'si_care' => '介護保険料', 'si_child_support' => '子ども・子育て支援金', 'si_pension' => '厚生年金保険料'] as $column => $label) {
+        if ((int) $slip[$column] !== 0) {
+            $lines[] = [$label, (int) $slip[$column]];
+        }
+    }
+    $lines = array_merge($lines, [
         ['雇用保険料', (int) $slip['emp_insurance']],
         ['所得税', (int) $slip['withholding_tax']],
         ['住民税', (int) $slip['resident_tax']],
-    ];
+    ]);
     if ((int) $slip['other_deduction'] !== 0) {
         $lines[] = [(string) ($slip['other_deduction_label'] ?: 'その他控除'), (int) $slip['other_deduction']];
     }
     return $lines;
+}
+
+/** 明細の備考に出す「◯月分の保険料を控除」（社会保険料の控除が無ければ空文字） */
+function pay_slip_si_note(array $slip): string
+{
+    if (pay_si_total($slip) === 0 || empty($slip['si_month'])) {
+        return '';
+    }
+    [$year, $month] = array_map('intval', explode('-', (string) $slip['si_month']));
+    return $year . '年' . $month . '月分の保険料を控除';
 }

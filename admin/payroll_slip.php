@@ -141,6 +141,8 @@ function jp_date(string $date): string
         </div>
 
         <div class="net"><span>差引支給額</span><span><?= number_format((int) $slip['net_pay']) ?>円</span></div>
+        <?php $siNote = pay_slip_si_note($slip); ?>
+        <?php if ($siNote !== ''): ?><div class="note"><?= pay_h($siNote) ?></div><?php endif; ?>
         <?php if (!empty($slip['note'])): ?><div class="note">備考: <?= pay_h($slip['note']) ?></div><?php endif; ?>
     </div>
 <?php endforeach; ?>
