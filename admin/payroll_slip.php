@@ -65,6 +65,9 @@ function jp_date(string $date): string
         th, td { border: 1px solid #555; padding: 1.5mm 2mm; }
         th { background: #eee; text-align: left; font-weight: normal; }
         td.num { text-align: right; white-space: nowrap; }
+        table.att { table-layout: fixed; width: 100%; }
+        table.att th, table.att td { white-space: nowrap; overflow: hidden; text-overflow: clip; }
+        .slip { box-sizing: border-box; }
         tr.total td, tr.total th { font-weight: bold; background: #f6f6f6; }
         .net { border: 2px solid #111; padding: 3mm; display: flex; justify-content: space-between; font-size: 1.2em; font-weight: bold; margin-top: 2mm; }
         .note { font-size: 0.85em; margin-top: 3mm; white-space: pre-wrap; }
@@ -110,21 +113,26 @@ function jp_date(string $date): string
         </div>
 
         <?php if (!$isOfficer): ?>
-        <table>
-            <tr><th>出勤日数</th><th>実働時間</th><th>洗濯代行</th><th>店舗</th><th>集荷</th><th>休日勤務</th><th>普通残業</th><th>休日残業</th><th>深夜</th></tr>
+        <table class="att">
+            <tr><th>出勤日数</th><th>実働時間</th><th>洗濯代行</th><th>店舗</th><th>集荷</th></tr>
             <tr>
                 <td class="num"><?= (int) $slip['work_days'] ?>日</td>
-                <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_total'])) ?></td>
-                <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_laundry'])) ?></td>
-                <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_store'])) ?></td>
-                <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_pickup'])) ?></td>
-                <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_holiday'])) ?></td>
-                <td class="num"><?= pay_h(pay_minutes_label(pay_slip_weekday_overtime_minutes($slip))) ?></td>
-                <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_overtime_holiday'])) ?></td>
-                <td class="num"><?= pay_h(pay_minutes_label((int) $slip['minutes_night'])) ?></td>
+                <td class="num"><?= pay_h(payslip_pdf_hours((int) $slip['minutes_total'])) ?></td>
+                <td class="num"><?= pay_h(payslip_pdf_hours((int) $slip['minutes_laundry'])) ?></td>
+                <td class="num"><?= pay_h(payslip_pdf_hours((int) $slip['minutes_store'])) ?></td>
+                <td class="num"><?= pay_h(payslip_pdf_hours((int) $slip['minutes_pickup'])) ?></td>
             </tr>
         </table>
-        <p class="small">洗濯代行・店舗・集荷・休日勤務の時間は時間外を含む実時間。時間外は1日8時間超<?= (int) $slip['minutes_overtime_weekly'] > 0 ? '・週40時間超（うち週' . pay_h(pay_minutes_label((int) $slip['minutes_overtime_weekly'])) . '）' : '' ?>。</p>
+        <table class="att">
+            <tr><th>休日勤務</th><th>普通残業</th><th>休日残業</th><th>深夜</th></tr>
+            <tr>
+                <td class="num"><?= pay_h(payslip_pdf_hours((int) $slip['minutes_holiday'])) ?></td>
+                <td class="num"><?= pay_h(payslip_pdf_hours(pay_slip_weekday_overtime_minutes($slip))) ?></td>
+                <td class="num"><?= pay_h(payslip_pdf_hours((int) $slip['minutes_overtime_holiday'])) ?></td>
+                <td class="num"><?= pay_h(payslip_pdf_hours((int) $slip['minutes_night'])) ?></td>
+            </tr>
+        </table>
+        <p class="small">時間は「時間:分」。洗濯代行・店舗・集荷・休日勤務の時間は時間外を含む実時間。時間外は1日8時間超<?= (int) $slip['minutes_overtime_weekly'] > 0 ? '・週40時間超（うち週' . pay_h(pay_minutes_label((int) $slip['minutes_overtime_weekly'])) . '）' : '' ?>。</p>
         <?php endif; ?>
 
         <div class="cols">
