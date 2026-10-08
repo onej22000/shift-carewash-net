@@ -195,11 +195,13 @@ $dailyTotalsRows = $dailyTotalsStmt->fetchAll();
 // こちらの時刻を店舗シフト13:00〜16:00に合わせて修正したため、区分だけ洗濯代行のまま）を
 // 洗濯代行として拾ってしまう。そこで、打刻をシフト（予定）に紐付け、紐付いたシフトの区分で判定する。
 // attendance.shift_idは出勤時に保存されておらず全件NULLのため、同じ従業員・同じ日のシフトのうち
-// 打刻時間帯との重なりが最も長いものを紐付け先とする（重なるシフトが無ければ「区分不明」）。
+// 打刻時間帯との重なりが最も長いものを紐付け先とする。
 // - 紐付いたシフトの区分が洗濯代行のみ → 対象
 // - 紐付いたシフトが洗濯代行を含む複合区分 → 打刻の区分（出勤時に選択）も洗濯代行なら対象
 // - それ以外（店舗・集荷のシフト）→ 対象外
-// - 区分不明の打刻は集計から除外し、件数を画面下に注記する
+// 時間帯の重なるシフトが無い打刻（2026-10-08、案Zとして明示指定）:
+// - 打刻の区分が店舗・集荷・NULL → 対象外（注記にも出さない）
+// - 打刻の区分が洗濯代行 → 対象外とし「区分不明の打刻」として画面下に注記する（0件なら注記ごと非表示）
 $dailyAttendanceStmt = $pdo->prepare(
     "SELECT a.id, a.employee_id, DATE(a.clock_in_at) AS work_day, e.name AS employee_name,
             a.category, a.clock_in_at, a.clock_out_at, a.status, a.work_minutes
@@ -251,7 +253,9 @@ foreach ($dailyAttendanceRows as $row) {
     }
 
     if ($linkedShift === null) {
-        $unlinkedAttendanceRows[] = $row;
+        if ($row['category'] === '洗濯代行') {
+            $unlinkedAttendanceRows[] = $row;
+        }
         continue;
     }
 
@@ -447,7 +451,7 @@ foreach ($dailyAttendanceRows as $row) {
 
     <?php if (!empty($unlinkedAttendanceRows)): ?>
         <p class="notice">
-            区分不明の打刻: <?= count($unlinkedAttendanceRows) ?>件（同じ日に時間帯の重なるシフトが無いため区分を判定できず、作業時間・作業氏名の集計から除外しています）<br>
+            区分不明の打刻: <?= count($unlinkedAttendanceRows) ?>件（洗濯代行で打刻されているが、時間帯の重なるシフトが無いため、作業時間・作業氏名の集計から除外しています）<br>
             <?php foreach ($unlinkedAttendanceRows as $row): ?>
                 <?= htmlspecialchars($row['work_day'] . ' ' . $row['employee_name'] . ' ' . substr($row['clock_in_at'], 11, 5) . '〜' . ($row['clock_out_at'] !== null ? substr($row['clock_out_at'], 11, 5) : '') . '（打刻区分: ' . ($row['category'] ?? '未選択') . '）', ENT_QUOTES, 'UTF-8') ?><br>
             <?php endforeach; ?>
