@@ -2075,7 +2075,7 @@ function find_attendance_alert_dismissal_keys(PDO $pdo): array
 
 /**
  * calc_clock_in_needed_alerts() / calc_clock_out_needed_alerts() の結果から、
- * 確認済みの行を取り除く（管理者ダッシュボードの表示用。従業員側では使わない）。
+ * 確認済みの行を取り除く。
  */
 function filter_dismissed_attendance_alerts(array $alerts, string $alertType, array $dismissedKeys): array
 {
@@ -2083,6 +2083,22 @@ function filter_dismissed_attendance_alerts(array $alerts, string $alertType, ar
         $alerts,
         static fn (array $a): bool => !isset($dismissedKeys[attendance_alert_key($alertType, $a['employee_id'], $a['work_date'])])
     ));
+}
+
+/**
+ * 「打刻の注意喚起」に表示する行（出勤忘れ・退勤忘れ、管理者が確認済みにした行は除外済み）。
+ * 管理者ダッシュボードと従業員ダッシュボードの両方がこの関数だけを使うことで、表示件数を揃える。
+ *
+ * @return array{clock_in:array<int,array>,clock_out:array<int,array>}
+ */
+function calc_active_attendance_alerts(PDO $pdo, DateTime $now): array
+{
+    $dismissedKeys = find_attendance_alert_dismissal_keys($pdo);
+
+    return [
+        'clock_in' => filter_dismissed_attendance_alerts(calc_clock_in_needed_alerts($pdo, $now), 'clock_in', $dismissedKeys),
+        'clock_out' => filter_dismissed_attendance_alerts(calc_clock_out_needed_alerts($pdo, $now), 'clock_out', $dismissedKeys),
+    ];
 }
 
 /**

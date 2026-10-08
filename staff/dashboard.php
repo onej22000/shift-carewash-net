@@ -37,8 +37,10 @@ $returnNeededAlerts = calc_return_needed_alerts($pdo, $today);
 $pickupNeededAlerts = calc_pickup_needed_alerts($pdo, $now);
 
 // 出勤忘れ・退勤忘れも全施設アラートと同様、全スタッフに全員分を表示する（自分以外の未打刻も分かるように）。
-$clockInNeededAlerts = calc_clock_in_needed_alerts($pdo, $now);
-$clockOutNeededAlerts = calc_clock_out_needed_alerts($pdo, $now);
+// 管理者ダッシュボードと同じ共通関数を使い、管理者が確認済みにした行は除外する（従業員側に確認済みボタンは無い）。
+$activeAttendanceAlerts = calc_active_attendance_alerts($pdo, $now);
+$clockInNeededAlerts = $activeAttendanceAlerts['clock_in'];
+$clockOutNeededAlerts = $activeAttendanceAlerts['clock_out'];
 
 const MISSED_CLOCK_DISPLAY_LIMIT = 5;
 $missedClockDates = find_missed_clock_dates($pdo, (int) $staff['id'], $today);

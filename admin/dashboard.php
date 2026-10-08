@@ -12,8 +12,10 @@ $vehicleAlerts = calc_vehicle_alerts($pdo, $now->format('Y-m-d'));
 $laundryNeededAlerts = calc_laundry_needed_alerts($pdo);
 $returnNeededAlerts = calc_return_needed_alerts($pdo, $now->format('Y-m-d'));
 $pickupNeededAlerts = calc_pickup_needed_alerts($pdo, $now);
-$clockInNeededAlerts = calc_clock_in_needed_alerts($pdo, $now);
-$clockOutNeededAlerts = calc_clock_out_needed_alerts($pdo, $now);
+// 従業員ダッシュボードと同じ共通関数（確認済みの行は除外済み）
+$activeAttendanceAlerts = calc_active_attendance_alerts($pdo, $now);
+$clockInNeededAlerts = $activeAttendanceAlerts['clock_in'];
+$clockOutNeededAlerts = $activeAttendanceAlerts['clock_out'];
 
 // 打刻の注意喚起の「確認済み」：管理者ダッシュボードの表示だけを消す（attendance・shiftsは変更しない）
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -21,7 +23,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
         set_flash('error', '不正なリクエストです。再度お試しください。');
     } elseif ($action === 'dismiss_clock_alert' || $action === 'dismiss_all_clock_alerts') {
-        // 今この時点で注意喚起の条件を満たしている行だけを対象にする
+        // 今この時点で表示対象（条件を満たし、まだ確認済みでない）の行だけを対象にする
         $currentAlerts = [];
         foreach (['clock_in' => $clockInNeededAlerts, 'clock_out' => $clockOutNeededAlerts] as $alertType => $alerts) {
             foreach ($alerts as $alert) {
@@ -53,10 +55,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Location: /admin/dashboard.php');
     exit;
 }
-
-$dismissedAlertKeys = find_attendance_alert_dismissal_keys($pdo);
-$clockInNeededAlerts = filter_dismissed_attendance_alerts($clockInNeededAlerts, 'clock_in', $dismissedAlertKeys);
-$clockOutNeededAlerts = filter_dismissed_attendance_alerts($clockOutNeededAlerts, 'clock_out', $dismissedAlertKeys);
 
 $flash = pop_flash();
 $csrfToken = csrf_token();
