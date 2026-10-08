@@ -12,6 +12,10 @@ $isSharedAccount = (int) ($staff['is_shared_account'] ?? 0) === 1;
 $suggestedCategory = null;
 $employees = [];
 $openEmployeeIds = [];
+$todayShifts = [];
+$now = new DateTime();
+$today = $now->format('Y-m-d');
+$confirmWarning = null;
 
 if ($isSharedAccount) {
     $employeesStmt = $pdo->query(
@@ -37,20 +41,14 @@ if ($isSharedAccount) {
         exit;
     }
 
-    // ---- 本日のシフトから区分の初期値を提案する（複数シフトがあれば区分をまとめてSHIFT_CATEGORIES優先順で解決） ----
-    $today = (new DateTime())->format('Y-m-d');
-    $todayShiftsStmt = $pdo->prepare('SELECT categories FROM shifts WHERE employee_id = :employee_id AND work_date = :work_date');
+    // ---- 本日のシフトから区分の初期値を提案する ----
+    // 2026-10-08変更: 現在時刻をカバーするシフト、無ければ次に始まるシフトの区分（以前は時刻を問わず
+    // その日の全シフトの区分をSHIFT_CATEGORIES優先順で解決していたため、10:50の打刻でも17:00の
+    // 洗濯代行シフトの区分が初期選択されていた）。
+    $todayShiftsStmt = $pdo->prepare('SELECT id, start_time, end_time, categories FROM shifts WHERE employee_id = :employee_id AND work_date = :work_date');
     $todayShiftsStmt->execute([':employee_id' => $staff['id'], ':work_date' => $today]);
-
-    $todayCategories = [];
-    foreach ($todayShiftsStmt->fetchAll() as $shift) {
-        foreach (categories_from_value($shift['categories']) as $category) {
-            if (!in_array($category, $todayCategories, true)) {
-                $todayCategories[] = $category;
-            }
-        }
-    }
-    $suggestedCategory = resolve_shift_category($todayCategories);
+    $todayShifts = $todayShiftsStmt->fetchAll();
+    $suggestedCategory = suggest_clock_in_category($todayShifts, $today, $now->getTimestamp());
 }
 
 $errorMessage = '';
@@ -76,9 +74,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $errorMessage = '区分を選択してください。';
         }
 
-        if ($errorMessage === '') {
+        // 共用アカウント以外は、シフトが無い・区分がシフトと異なる・シフト開始60分以上前の場合に
+        // 確認を挟む（「このまま打刻」で再送信されたら通す。打刻自体は止めない）。
+        if ($errorMessage === '' && !$isSharedAccount && (string) ($_POST['confirm_warning'] ?? '') !== '1') {
+            $confirmWarning = build_clock_in_warning($todayShifts, $today, $now->getTimestamp(), $category);
+        }
+
+        if ($errorMessage === '' && $confirmWarning === null) {
             $lat = (isset($_POST['lat']) && $_POST['lat'] !== '') ? (float) $_POST['lat'] : null;
             $lng = (isset($_POST['lng']) && $_POST['lng'] !== '') ? (float) $_POST['lng'] : null;
+            // 対応するシフトが確定できる場合のみ保存（共用アカウントは従来どおりNULL）
+            $shiftId = $isSharedAccount ? null : resolve_clock_in_shift_id($todayShifts, $today, $now->getTimestamp(), $category);
 
             // 集荷区分の場合は出勤打刻を即確定させず、集荷前車両等チェックを挟む
             // （チェック完了時にvehicle_check.php側でattendanceをINSERTする）。
@@ -88,6 +94,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'category' => $category,
                     'lat' => $lat,
                     'lng' => $lng,
+                    'shift_id' => $shiftId,
                     'requested_at' => (new DateTime())->format('Y-m-d H:i:s'),
                 ];
                 header('Location: /staff/vehicle_check.php');
@@ -95,11 +102,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             $insertStmt = $pdo->prepare(
-                "INSERT INTO attendance (employee_id, category, clock_in_at, clock_in_lat, clock_in_lng, status)
-                 VALUES (:employee_id, :category, :clock_in_at, :lat, :lng, 'working')"
+                "INSERT INTO attendance (employee_id, shift_id, category, clock_in_at, clock_in_lat, clock_in_lng, status)
+                 VALUES (:employee_id, :shift_id, :category, :clock_in_at, :lat, :lng, 'working')"
             );
             $insertStmt->execute([
                 ':employee_id' => $targetEmployeeId,
+                ':shift_id' => $shiftId,
                 ':category' => $category,
                 ':clock_in_at' => (new DateTime())->format('Y-m-d H:i:s'),
                 ':lat' => $lat,
@@ -137,6 +145,11 @@ $formCategory = $_SERVER['REQUEST_METHOD'] === 'POST' ? (string) ($_POST['catego
         .form-row label { display: block; margin-bottom: 4px; font-weight: bold; }
         .form-row select { width: 100%; font-size: 1em; padding: 6px; }
         #submit-button { font-size: 1.1em; padding: 12px 32px; border-radius: 6px; border: none; color: #fff; background: #0b5ed7; cursor: pointer; }
+        .confirm-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
+        .confirm-dialog { background: #fff; border-radius: 8px; padding: 20px; max-width: 360px; width: 100%; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3); }
+        .confirm-dialog p { margin: 0 0 16px; line-height: 1.6; }
+        .confirm-actions { display: flex; gap: 12px; justify-content: flex-end; align-items: center; }
+        .confirm-actions button { font-size: 1.05em; padding: 10px 20px; border-radius: 6px; border: none; color: #fff; background: #0b5ed7; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -157,8 +170,27 @@ $formCategory = $_SERVER['REQUEST_METHOD'] === 'POST' ? (string) ($_POST['catego
     <p class="notice">出勤する従業員を選択してください。</p>
 <?php elseif ($suggestedCategory !== null): ?>
     <p class="notice">本日のシフトから区分「<?= htmlspecialchars($suggestedCategory, ENT_QUOTES, 'UTF-8') ?>」を初期選択しています。違う場合は変更してください。</p>
+<?php elseif (($reference = find_clock_in_reference_shift($todayShifts, $today, $now->getTimestamp())) !== null && $reference['kind'] === 'past'): ?>
+    <p class="notice">本日のシフトは終了しています。区分を選択してください。</p>
 <?php else: ?>
     <p class="notice">本日のシフトに区分が設定されていません。区分を選択してください。</p>
+<?php endif; ?>
+
+<?php if ($confirmWarning !== null): ?>
+<div class="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="confirm-message">
+    <div class="confirm-dialog">
+        <p id="confirm-message"><?= htmlspecialchars($confirmWarning, ENT_QUOTES, 'UTF-8') ?></p>
+        <form method="post" action="/staff/clock.php" class="confirm-actions">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+            <input type="hidden" name="category" value="<?= htmlspecialchars($formCategory, ENT_QUOTES, 'UTF-8') ?>">
+            <input type="hidden" name="lat" value="<?= htmlspecialchars((string) ($_POST['lat'] ?? ''), ENT_QUOTES, 'UTF-8') ?>">
+            <input type="hidden" name="lng" value="<?= htmlspecialchars((string) ($_POST['lng'] ?? ''), ENT_QUOTES, 'UTF-8') ?>">
+            <input type="hidden" name="confirm_warning" value="1">
+            <a href="/staff/clock.php">戻る</a>
+            <button type="submit">このまま打刻</button>
+        </form>
+    </div>
+</div>
 <?php endif; ?>
 
 <form id="clock-form" method="post" action="/staff/clock.php">

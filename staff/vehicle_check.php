@@ -147,11 +147,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     );
 
                     $attendanceStmt = $pdo->prepare(
-                        "INSERT INTO attendance (employee_id, category, clock_in_at, clock_in_lat, clock_in_lng, status)
-                         VALUES (:employee_id, :category, :clock_in_at, :lat, :lng, 'working')"
+                        "INSERT INTO attendance (employee_id, shift_id, category, clock_in_at, clock_in_lat, clock_in_lng, status)
+                         VALUES (:employee_id, :shift_id, :category, :clock_in_at, :lat, :lng, 'working')"
                     );
                     $attendanceStmt->execute([
                         ':employee_id' => $pending['employee_id'],
+                        ':shift_id' => $pending['shift_id'] ?? null,
                         ':category' => $pending['category'],
                         ':clock_in_at' => $now->format('Y-m-d H:i:s'),
                         ':lat' => $pending['lat'],

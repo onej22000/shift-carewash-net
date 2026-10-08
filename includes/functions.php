@@ -101,6 +101,111 @@ function resolve_shift_category(array $categories): ?string
     return null;
 }
 
+const CLOCK_IN_EARLY_WARNING_MINUTES = 60;
+
+/**
+ * 出勤打刻（staff/clock.php）の基準シフトを決める。
+ * 現在時刻をカバーするシフト → 無ければ次に始まるシフト → 無ければ（その日のシフトが全て終了後）最後に終わったシフト。
+ * 候補が複数ある場合は$categoryを含むシフトを優先し、それでも決まらなければ開始時刻の早い方。
+ *
+ * @param list<array{id:int|string, start_time:string, end_time:string, categories:string}> $shifts その日のシフト
+ * @return array{shift:array, kind:string, start:int, end:int}|null kindは'covering'|'next'|'past'。シフトが無ければnull
+ */
+function find_clock_in_reference_shift(array $shifts, string $workDate, int $nowTimestamp, ?string $category = null): ?array
+{
+    $groups = ['covering' => [], 'next' => [], 'past' => []];
+    foreach ($shifts as $shift) {
+        $start = strtotime($workDate . ' ' . $shift['start_time']);
+        $end = strtotime($workDate . ' ' . $shift['end_time']);
+        if ($end <= $start) {
+            $end += 86400; // 日付をまたぐシフト
+        }
+        $kind = $nowTimestamp < $start ? 'next' : ($nowTimestamp < $end ? 'covering' : 'past');
+        $groups[$kind][] = ['shift' => $shift, 'kind' => $kind, 'start' => $start, 'end' => $end];
+    }
+
+    foreach (['covering', 'next', 'past'] as $kind) {
+        $candidates = $groups[$kind];
+        if (empty($candidates)) {
+            continue;
+        }
+        usort($candidates, static function (array $a, array $b) use ($kind, $category): int {
+            if ($category !== null) {
+                $aMatch = in_array($category, categories_from_value($a['shift']['categories']), true);
+                $bMatch = in_array($category, categories_from_value($b['shift']['categories']), true);
+                if ($aMatch !== $bMatch) {
+                    return $aMatch ? -1 : 1;
+                }
+            }
+            // 終了済みのシフトは最後に終わったものを、それ以外は開始の早いものを優先
+            return $kind === 'past' ? $b['end'] <=> $a['end'] : $a['start'] <=> $b['start'];
+        });
+        return $candidates[0];
+    }
+
+    return null;
+}
+
+/**
+ * 出勤打刻の区分の初期選択。現在時刻をカバーするシフト、無ければ次に始まるシフトの区分
+ * （複合区分ならSHIFT_CATEGORIES優先順）。該当シフトが無ければnull（未選択）。
+ */
+function suggest_clock_in_category(array $shifts, string $workDate, int $nowTimestamp): ?string
+{
+    $reference = find_clock_in_reference_shift($shifts, $workDate, $nowTimestamp);
+    if ($reference === null || $reference['kind'] === 'past') {
+        return null;
+    }
+
+    return resolve_shift_category(categories_from_value($reference['shift']['categories']));
+}
+
+/**
+ * 出勤打刻前の確認メッセージ。次のいずれかに該当すればメッセージを返し、該当しなければnull。
+ * - その日にシフトがない
+ * - 選んだ区分が基準シフトの区分と異なる
+ * - 基準シフトの開始60分以上前に打刻する
+ */
+function build_clock_in_warning(array $shifts, string $workDate, int $nowTimestamp, string $category): ?string
+{
+    $nowLabel = date('H:i', $nowTimestamp);
+    $reference = find_clock_in_reference_shift($shifts, $workDate, $nowTimestamp, $category);
+    if ($reference === null) {
+        return '本日のシフトはありません。今は' . $nowLabel . 'です。このまま' . $category . 'で打刻しますか？';
+    }
+
+    $shiftCategories = categories_from_value($reference['shift']['categories']);
+    $isCategoryMismatch = !in_array($category, $shiftCategories, true);
+    $isTooEarly = $reference['kind'] === 'next'
+        && $reference['start'] - $nowTimestamp >= CLOCK_IN_EARLY_WARNING_MINUTES * 60;
+    if (!$isCategoryMismatch && !$isTooEarly) {
+        return null;
+    }
+
+    $shiftLabel = date('H:i', $reference['start']) . '〜' . (!empty($shiftCategories) ? implode('・', $shiftCategories) : '区分なし');
+    return '本日のシフトは' . $shiftLabel . 'です。今は' . $nowLabel . 'です。このまま' . $category . 'で打刻しますか？';
+}
+
+/**
+ * 出勤打刻に紐づけるシフトID（attendance.shift_id）。次の場合のみ基準シフトのIDを返し、それ以外はnull（確定できない）。
+ * - 現在時刻をカバーするシフト、または開始60分前以内の次のシフトで、かつ選んだ区分がそのシフトの区分に含まれる
+ */
+function resolve_clock_in_shift_id(array $shifts, string $workDate, int $nowTimestamp, string $category): ?int
+{
+    $reference = find_clock_in_reference_shift($shifts, $workDate, $nowTimestamp, $category);
+    if ($reference === null || $reference['kind'] === 'past') {
+        return null;
+    }
+    if ($reference['kind'] === 'next' && $reference['start'] - $nowTimestamp >= CLOCK_IN_EARLY_WARNING_MINUTES * 60) {
+        return null;
+    }
+    if (!in_array($category, categories_from_value($reference['shift']['categories']), true)) {
+        return null;
+    }
+
+    return (int) $reference['shift']['id'];
+}
+
 function category_stripe_style(array $categories): string
 {
     if (empty($categories)) {
