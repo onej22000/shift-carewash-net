@@ -190,18 +190,79 @@ $dailyTotalsRows = $dailyTotalsStmt->fetchAll();
 //   （attendance.work_minutes、休憩控除後）の合計＝延べ時間。退勤前の人の分は含めない。
 // - 作業氏名: その日に洗濯代行で出勤した全従業員（退勤済みか否かを問わない）を重複なく列挙する。
 // 過去日付もこの集計で表示される（保存済みの値を読むだけで、再集計のためのデータ更新は不要）。
+// 2026-10-08修正: 打刻のcategoryだけで判定すると、打刻後に時刻だけ修正されて区分が残った打刻
+// （例: 2026-09-28 山本真実 attendance#287。洗濯代行で出勤→10/02に店舗分の打刻を削除し、
+// こちらの時刻を店舗シフト13:00〜16:00に合わせて修正したため、区分だけ洗濯代行のまま）を
+// 洗濯代行として拾ってしまう。そこで、打刻をシフト（予定）に紐付け、紐付いたシフトの区分で判定する。
+// attendance.shift_idは出勤時に保存されておらず全件NULLのため、同じ従業員・同じ日のシフトのうち
+// 打刻時間帯との重なりが最も長いものを紐付け先とする（重なるシフトが無ければ「区分不明」）。
+// - 紐付いたシフトの区分が洗濯代行のみ → 対象
+// - 紐付いたシフトが洗濯代行を含む複合区分 → 打刻の区分（出勤時に選択）も洗濯代行なら対象
+// - それ以外（店舗・集荷のシフト）→ 対象外
+// - 区分不明の打刻は集計から除外し、件数を画面下に注記する
 $dailyAttendanceStmt = $pdo->prepare(
-    "SELECT DATE(a.clock_in_at) AS work_day, e.name AS employee_name, a.status, a.work_minutes
+    "SELECT a.id, a.employee_id, DATE(a.clock_in_at) AS work_day, e.name AS employee_name,
+            a.category, a.clock_in_at, a.clock_out_at, a.status, a.work_minutes
      FROM attendance a
      INNER JOIN employees e ON e.id = a.employee_id
-     WHERE a.category = '洗濯代行' AND a.deleted_at IS NULL
-           AND DATE(a.clock_in_at) BETWEEN :start AND :end"
+     WHERE a.deleted_at IS NULL
+           AND DATE(a.clock_in_at) BETWEEN :start AND :end
+     ORDER BY a.clock_in_at"
 );
 $dailyAttendanceStmt->execute([':start' => $start, ':end' => $end]);
+$dailyAttendanceRows = $dailyAttendanceStmt->fetchAll();
 
+$shiftsForAttendanceStmt = $pdo->prepare(
+    'SELECT employee_id, work_date, start_time, end_time, categories
+     FROM shifts
+     WHERE work_date BETWEEN :start AND :end'
+);
+$shiftsForAttendanceStmt->execute([':start' => $start, ':end' => $end]);
+$shiftsForAttendance = [];
+foreach ($shiftsForAttendanceStmt->fetchAll() as $row) {
+    $shiftsForAttendance[(int) $row['employee_id']][$row['work_date']][] = $row;
+}
+
+$nowTimestamp = time();
 $dailyWorkStatsByDate = [];
-foreach ($dailyAttendanceStmt->fetchAll() as $row) {
+$unlinkedAttendanceRows = [];
+foreach ($dailyAttendanceRows as $row) {
     $date = $row['work_day'];
+    $inTimestamp = strtotime($row['clock_in_at']);
+    $outTimestamp = $row['clock_out_at'] !== null ? strtotime($row['clock_out_at']) : max($inTimestamp, $nowTimestamp);
+
+    $linkedShift = null;
+    $linkedOverlap = 0;
+    foreach ($shiftsForAttendance[(int) $row['employee_id']][$date] ?? [] as $shift) {
+        $shiftStart = strtotime($date . ' ' . $shift['start_time']);
+        $shiftEnd = strtotime($date . ' ' . $shift['end_time']);
+        if ($shiftEnd <= $shiftStart) {
+            $shiftEnd += 86400; // 日付をまたぐシフト
+        }
+        // 退勤前（勤務中）で出勤直後の打刻も紐付くよう、重なり0秒でも出勤時刻がシフト内なら1秒扱い
+        $overlap = min($outTimestamp, $shiftEnd) - max($inTimestamp, $shiftStart);
+        if ($overlap <= 0 && $inTimestamp >= $shiftStart && $inTimestamp < $shiftEnd) {
+            $overlap = 1;
+        }
+        if ($overlap > $linkedOverlap) {
+            $linkedOverlap = $overlap;
+            $linkedShift = $shift;
+        }
+    }
+
+    if ($linkedShift === null) {
+        $unlinkedAttendanceRows[] = $row;
+        continue;
+    }
+
+    $shiftCategories = categories_from_value($linkedShift['categories']);
+    if (!in_array('洗濯代行', $shiftCategories, true)) {
+        continue;
+    }
+    if (count($shiftCategories) > 1 && $row['category'] !== '洗濯代行') {
+        continue;
+    }
+
     if (!isset($dailyWorkStatsByDate[$date])) {
         $dailyWorkStatsByDate[$date] = ['names' => [], 'work_minutes' => null];
     }
@@ -376,6 +437,15 @@ foreach ($dailyAttendanceStmt->fetchAll() as $row) {
                 <?php endforeach; ?>
             </tbody>
         </table>
+    <?php endif; ?>
+
+    <?php if (!empty($unlinkedAttendanceRows)): ?>
+        <p class="notice">
+            区分不明の打刻: <?= count($unlinkedAttendanceRows) ?>件（同じ日に時間帯の重なるシフトが無いため区分を判定できず、作業時間・作業氏名の集計から除外しています）<br>
+            <?php foreach ($unlinkedAttendanceRows as $row): ?>
+                <?= htmlspecialchars($row['work_day'] . ' ' . $row['employee_name'] . ' ' . substr($row['clock_in_at'], 11, 5) . '〜' . ($row['clock_out_at'] !== null ? substr($row['clock_out_at'], 11, 5) : '') . '（打刻区分: ' . ($row['category'] ?? '未選択') . '）', ENT_QUOTES, 'UTF-8') ?><br>
+            <?php endforeach; ?>
+        </p>
     <?php endif; ?>
 </section>
 </body>
