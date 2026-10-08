@@ -414,6 +414,7 @@ foreach ($dailyAttendanceRows as $row) {
                     <th>洗濯ネット数（合計）</th>
                     <th>作業時間</th>
                     <th>作業氏名</th>
+                    <th>1人あたり枚/時（枚/人・時）</th>
                 </tr>
             </thead>
             <tbody>
@@ -423,6 +424,10 @@ foreach ($dailyAttendanceRows as $row) {
                     $dayNames = $dayStats !== null ? array_keys($dayStats['names']) : [];
                     sort($dayNames);
                     $dayWorkMinutes = $dayStats !== null ? $dayStats['work_minutes'] : null;
+                    // 洗濯ネット数（合計）÷ 延べ作業時間。表示用に丸めた時間ではなく分の合計から計算する。
+                    $dayNetsPerPersonHour = ($row['net_total'] !== null && $dayWorkMinutes !== null && $dayWorkMinutes > 0)
+                        ? (int) $row['net_total'] / ($dayWorkMinutes / 60)
+                        : null;
                     ?>
                     <tr>
                         <td><?= htmlspecialchars($row['work_date'], ENT_QUOTES, 'UTF-8') ?></td>
@@ -433,6 +438,7 @@ foreach ($dailyAttendanceRows as $row) {
                             <?= $dayWorkMinutes !== null ? number_format($dayWorkMinutes / 60, 2) . '時間' : '-' ?>
                         </td>
                         <td><?= !empty($dayNames) ? htmlspecialchars(implode('・', $dayNames), ENT_QUOTES, 'UTF-8') : '-' ?></td>
+                        <td><?= $dayNetsPerPersonHour !== null ? number_format($dayNetsPerPersonHour, 1) . '枚/人・時' : '-' ?></td>
                     </tr>
                 <?php endforeach; ?>
             </tbody>
