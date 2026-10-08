@@ -170,6 +170,7 @@ function find_attendance_day_shift(array $shiftsForDay, array $record): ?array
  * $showCategory=true（管理者画面）のときは実績に打刻区分のバッジを付け、対応するシフト
  * （find_attendance_day_shift()）が無い、または打刻区分がそのシフトの区分に含まれない場合は
  * 実績の枠を強調表示する（.actual-entry.category-alert、色は呼び出し側のCSSで定義）。
+ * 打刻区分がNULLの打刻は強調しない。
  */
 function render_attendance_day_cell(array $shiftsForDay, array $attendanceForDay, ?string $editBaseUrl = null, bool $showCategory = false): void
 {
@@ -197,7 +198,8 @@ function render_attendance_day_cell(array $shiftsForDay, array $attendanceForDay
         $outTime = $record['clock_out_at'] !== null ? substr($record['clock_out_at'], 11, 5) : null;
         $entryClass = 'actual-entry';
         $categoryAlert = null;
-        if ($showCategory) {
+        // 打刻区分がNULLの打刻（区分列の導入前、2026-07上旬まで）は判定材料が無いため強調しない（バッジは「区分なし」）
+        if ($showCategory && ($record['category'] ?? null) !== null) {
             $dayShift = find_attendance_day_shift($shiftsForDay, $record);
             if ($dayShift === null) {
                 $categoryAlert = 'シフトなし';
