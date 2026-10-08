@@ -418,7 +418,7 @@ foreach ($dailyAttendanceRows as $row) {
                     <th>洗濯ネット数（合計）</th>
                     <th>作業時間</th>
                     <th>作業氏名</th>
-                    <th>1人あたり枚/時（枚/人・時）</th>
+                    <th>1時間あたり洗濯ネット数（1人あたり）</th>
                 </tr>
             </thead>
             <tbody>
@@ -442,7 +442,7 @@ foreach ($dailyAttendanceRows as $row) {
                             <?= $dayWorkMinutes !== null ? number_format($dayWorkMinutes / 60, 2) . '時間' : '-' ?>
                         </td>
                         <td><?= !empty($dayNames) ? htmlspecialchars(implode('・', $dayNames), ENT_QUOTES, 'UTF-8') : '-' ?></td>
-                        <td><?= $dayNetsPerPersonHour !== null ? number_format($dayNetsPerPersonHour, 1) . '枚/人・時' : '-' ?></td>
+                        <td><?= $dayNetsPerPersonHour !== null ? number_format($dayNetsPerPersonHour, 1) . '枚/時' : '-' ?></td>
                     </tr>
                 <?php endforeach; ?>
             </tbody>
