@@ -367,54 +367,70 @@ const MONTH_END_CORRECTION_EARLY_CLOCK_IN_GRACE_MINUTES = 5;
  *
  * ルール：シフトの予定出勤時刻の5分前より早く打刻していた場合のみ、予定出勤時刻の5分前に補正する。
  * 5分前〜予定時刻の間、および予定時刻より後（遅刻）は対象外。
- * 同日に「店舗」区分のシフトが複数ある場合は、そのうち最も早い開始時刻を予定出勤時刻として扱う。
+ * 2026-10-08変更: 対象は「打刻の区分が店舗」かつ「店舗区分を含むシフトと時間帯が重なる打刻」のみ。
+ * 以前は同日に店舗シフトがあれば区分・時間帯を問わず全打刻を対象にしていたため、店舗シフト前の
+ * 洗濯代行の打刻（2026-09-28 attendance#287、10:54→12:55）まで書き換えてしまっていた。
+ * 予定出勤時刻は、その打刻と最も長く重なる店舗シフトの開始時刻（以前は同日の店舗シフトの最も早い開始時刻）。
+ * 退勤前の打刻は現在時刻までを打刻時間帯とみなす。
  *
- * @return list<array{attendance_id:int, employee_id:int, employee_name:string, work_date:string, shift_start_time:string, old_clock_in_at:string, new_clock_in_at:string, clock_out_at:?string, total_break_minutes:?int}>
+ * @return list<array{attendance_id:int, employee_id:int, employee_name:string, category:string, work_date:string, shift_start_time:string, old_clock_in_at:string, new_clock_in_at:string, clock_out_at:?string, total_break_minutes:?int}>
  */
 function find_month_end_correction_candidates(PDO $pdo, string $yearMonth): array
 {
     [$monthStart, $monthEnd] = get_month_range($yearMonth);
 
     $shiftsStmt = $pdo->prepare(
-        'SELECT employee_id, work_date, start_time, categories
+        'SELECT employee_id, work_date, start_time, end_time, categories
          FROM shifts
          WHERE work_date BETWEEN :start AND :end'
     );
     $shiftsStmt->execute([':start' => $monthStart, ':end' => $monthEnd]);
 
-    $storeShiftStartByEmployeeDate = [];
+    $storeShiftsByEmployeeDate = [];
     foreach ($shiftsStmt->fetchAll() as $shift) {
         if (!categories_include_store(categories_from_value($shift['categories']))) {
             continue;
         }
-        $employeeId = (int) $shift['employee_id'];
-        $date = $shift['work_date'];
-        $current = $storeShiftStartByEmployeeDate[$employeeId][$date] ?? null;
-        if ($current === null || $shift['start_time'] < $current) {
-            $storeShiftStartByEmployeeDate[$employeeId][$date] = $shift['start_time'];
-        }
+        $storeShiftsByEmployeeDate[(int) $shift['employee_id']][$shift['work_date']][] = $shift;
     }
 
-    if (empty($storeShiftStartByEmployeeDate)) {
+    if (empty($storeShiftsByEmployeeDate)) {
         return [];
     }
 
     $attendanceStmt = $pdo->prepare(
-        'SELECT a.id, a.employee_id, e.name AS employee_name, a.clock_in_at, a.clock_out_at, a.total_break_minutes
+        "SELECT a.id, a.employee_id, e.name AS employee_name, a.category, a.clock_in_at, a.clock_out_at, a.total_break_minutes
          FROM attendance a
          INNER JOIN employees e ON e.id = a.employee_id
-         WHERE a.deleted_at IS NULL AND DATE(a.clock_in_at) BETWEEN :start AND :end
-         ORDER BY a.clock_in_at'
+         WHERE a.deleted_at IS NULL AND a.category = '店舗' AND DATE(a.clock_in_at) BETWEEN :start AND :end
+         ORDER BY a.clock_in_at"
     );
     $attendanceStmt->execute([':start' => $monthStart, ':end' => $monthEnd]);
 
+    $nowTimestamp = time();
     $candidates = [];
     foreach ($attendanceStmt->fetchAll() as $row) {
         $employeeId = (int) $row['employee_id'];
         $workDate = substr($row['clock_in_at'], 0, 10);
-        $shiftStartTime = $storeShiftStartByEmployeeDate[$employeeId][$workDate] ?? null;
+        $inTimestamp = strtotime($row['clock_in_at']);
+        $outTimestamp = $row['clock_out_at'] !== null ? strtotime($row['clock_out_at']) : max($inTimestamp, $nowTimestamp);
+
+        $shiftStartTime = null;
+        $longestOverlap = 0;
+        foreach ($storeShiftsByEmployeeDate[$employeeId][$workDate] ?? [] as $shift) {
+            $shiftStart = strtotime($workDate . ' ' . $shift['start_time']);
+            $shiftEnd = strtotime($workDate . ' ' . $shift['end_time']);
+            if ($shiftEnd <= $shiftStart) {
+                $shiftEnd += 86400; // 日付をまたぐシフト
+            }
+            $overlap = min($outTimestamp, $shiftEnd) - max($inTimestamp, $shiftStart);
+            if ($overlap > $longestOverlap) {
+                $longestOverlap = $overlap;
+                $shiftStartTime = $shift['start_time'];
+            }
+        }
         if ($shiftStartTime === null) {
-            continue;
+            continue; // 時間帯の重なる店舗シフトが無い
         }
 
         $scheduledStart = new DateTime($workDate . ' ' . $shiftStartTime);
@@ -429,6 +445,7 @@ function find_month_end_correction_candidates(PDO $pdo, string $yearMonth): arra
             'attendance_id' => (int) $row['id'],
             'employee_id' => $employeeId,
             'employee_name' => $row['employee_name'],
+            'category' => $row['category'],
             'work_date' => $workDate,
             'shift_start_time' => $shiftStartTime,
             'old_clock_in_at' => $row['clock_in_at'],

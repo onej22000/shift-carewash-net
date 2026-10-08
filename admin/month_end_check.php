@@ -152,7 +152,7 @@ $csrfToken = csrf_token();
 <?php endif; ?>
 
 <p class="notice">
-    対象は打刻区分「店舗」のシフトの出勤打刻のみです（「集荷」「洗濯代行」は対象外・変更されません）。<br>
+    出勤時刻の補正対象は、打刻区分が「店舗」で、かつ店舗シフトと時間帯が重なる出勤打刻のみです（「集荷」「洗濯代行」の打刻や、店舗シフトと時間帯が重ならない打刻は対象外・変更されません）。<br>
     休憩時間は「店舗」の勤務だけを通算し、法定時間に不足する分を店舗打刻へ補正します。「集荷」「洗濯代行」は勤務時間も通算せず、本人の休憩入力をそのまま採用して変更しません。<br>
     シフトの予定出勤時刻の5分より前に打刻していた場合のみ「予定出勤時刻の5分前」に補正します。5分前〜予定時刻の間はそのまま、遅刻は対象外です。<br>
     実行すると、補正内容はすべて打刻修正履歴（attendance_edit_logs）に記録されます。
@@ -180,8 +180,9 @@ $csrfToken = csrf_token();
     <table class="candidates">
         <thead>
             <tr>
-                <th>従業員</th>
                 <th>日付</th>
+                <th>氏名</th>
+                <th>区分</th>
                 <th>予定出勤時刻</th>
                 <th>元の出勤打刻</th>
                 <th>補正後の出勤打刻</th>
@@ -190,8 +191,9 @@ $csrfToken = csrf_token();
         <tbody>
             <?php foreach ($candidates as $candidate): ?>
                 <tr>
-                    <td><?= htmlspecialchars($candidate['employee_name'], ENT_QUOTES, 'UTF-8') ?></td>
                     <td><?= htmlspecialchars($candidate['work_date'], ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars($candidate['employee_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars($candidate['category'], ENT_QUOTES, 'UTF-8') ?></td>
                     <td><?= htmlspecialchars(substr($candidate['shift_start_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?></td>
                     <td class="old-time"><?= htmlspecialchars(substr($candidate['old_clock_in_at'], 11, 5), ENT_QUOTES, 'UTF-8') ?></td>
                     <td class="new-time"><?= htmlspecialchars(substr($candidate['new_clock_in_at'], 11, 5), ENT_QUOTES, 'UTF-8') ?></td>
