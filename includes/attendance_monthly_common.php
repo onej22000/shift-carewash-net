@@ -65,7 +65,7 @@ function calc_attendance_work_minutes(string $clockInAt, ?string $clockOutAt, ?i
  */
 function fetch_monthly_shifts_by_employee_date(PDO $pdo, string $startDate, string $endDate, ?int $employeeId = null): array
 {
-    $sql = 'SELECT employee_id, work_date, start_time, end_time, categories
+    $sql = 'SELECT id, employee_id, work_date, start_time, end_time, categories
             FROM shifts
             WHERE work_date BETWEEN :start AND :end';
     $params = [':start' => $startDate, ':end' => $endDate];
@@ -95,7 +95,7 @@ function fetch_monthly_shifts_by_employee_date(PDO $pdo, string $startDate, stri
  */
 function fetch_monthly_attendance_by_employee_date(PDO $pdo, string $startDate, string $endDate, ?int $employeeId = null): array
 {
-    $sql = 'SELECT id, employee_id, clock_in_at, clock_out_at, work_minutes, total_break_minutes, status
+    $sql = 'SELECT id, employee_id, shift_id, category, clock_in_at, clock_out_at, work_minutes, total_break_minutes, status
             FROM attendance
             WHERE DATE(clock_in_at) BETWEEN :start AND :end
               AND deleted_at IS NULL';
@@ -125,11 +125,53 @@ function fetch_monthly_attendance_by_employee_date(PDO $pdo, string $startDate, 
 }
 
 /**
+ * 打刻1件に対応するシフトを返す（無ければnull）。attendance.shift_idが保存されていて同日のシフトに
+ * 含まれればそれを、無ければ打刻時間帯と最も長く重なるシフトを採用する（退勤前は現在時刻まで）。
+ */
+function find_attendance_day_shift(array $shiftsForDay, array $record): ?array
+{
+    if (($record['shift_id'] ?? null) !== null) {
+        foreach ($shiftsForDay as $shift) {
+            if (isset($shift['id']) && (int) $shift['id'] === (int) $record['shift_id']) {
+                return $shift;
+            }
+        }
+    }
+
+    $workDate = substr($record['clock_in_at'], 0, 10);
+    $inTimestamp = strtotime($record['clock_in_at']);
+    $outTimestamp = $record['clock_out_at'] !== null ? strtotime($record['clock_out_at']) : max($inTimestamp, time());
+    $matched = null;
+    $longestOverlap = 0;
+    foreach ($shiftsForDay as $shift) {
+        $shiftStart = strtotime($workDate . ' ' . $shift['start_time']);
+        $shiftEnd = strtotime($workDate . ' ' . $shift['end_time']);
+        if ($shiftEnd <= $shiftStart) {
+            $shiftEnd += 86400; // 日付をまたぐシフト
+        }
+        $overlap = min($outTimestamp, $shiftEnd) - max($inTimestamp, $shiftStart);
+        // 勤務中で出勤直後の打刻も紐付くよう、重なり0秒でも出勤時刻がシフト内なら1秒扱い
+        if ($overlap <= 0 && $inTimestamp >= $shiftStart && $inTimestamp < $shiftEnd) {
+            $overlap = 1;
+        }
+        if ($overlap > $longestOverlap) {
+            $longestOverlap = $overlap;
+            $matched = $shift;
+        }
+    }
+
+    return $matched;
+}
+
+/**
  * 1日分の 予定/実績/休憩/実働 を描画する。
  * $editBaseUrl を渡すと実績をクリックで修正画面へ遷移させる（管理者画面用）。
  * null の場合は閲覧専用で、リンク・onclickを一切出力しない（従業員画面用）。
+ * $showCategory=true（管理者画面）のときは実績に打刻区分のバッジを付け、対応するシフト
+ * （find_attendance_day_shift()）が無い、または打刻区分がそのシフトの区分に含まれない場合は
+ * 実績の枠を強調表示する（.actual-entry.category-alert、色は呼び出し側のCSSで定義）。
  */
-function render_attendance_day_cell(array $shiftsForDay, array $attendanceForDay, ?string $editBaseUrl = null): void
+function render_attendance_day_cell(array $shiftsForDay, array $attendanceForDay, ?string $editBaseUrl = null, bool $showCategory = false): void
 {
     foreach ($shiftsForDay as $shift) {
         $categories = categories_from_value($shift['categories']);
@@ -153,16 +195,35 @@ function render_attendance_day_cell(array $shiftsForDay, array $attendanceForDay
     foreach ($attendanceForDay as $record) {
         $inTime = substr($record['clock_in_at'], 11, 5);
         $outTime = $record['clock_out_at'] !== null ? substr($record['clock_out_at'], 11, 5) : null;
+        $entryClass = 'actual-entry';
+        $categoryAlert = null;
+        if ($showCategory) {
+            $dayShift = find_attendance_day_shift($shiftsForDay, $record);
+            if ($dayShift === null) {
+                $categoryAlert = 'シフトなし';
+            } elseif (!in_array((string) ($record['category'] ?? ''), categories_from_value($dayShift['categories']), true)) {
+                $categoryAlert = 'シフトと区分違い';
+            }
+            if ($categoryAlert !== null) {
+                $entryClass .= ' category-alert';
+            }
+        }
         ?>
         <?php if ($editBaseUrl !== null): ?>
-        <div class="actual-entry" onclick="event.stopPropagation(); location.href='<?= htmlspecialchars($editBaseUrl . '&edit=' . (int) $record['id'], ENT_QUOTES, 'UTF-8') ?>';">
+        <div class="<?= $entryClass ?>" onclick="event.stopPropagation(); location.href='<?= htmlspecialchars($editBaseUrl . '&edit=' . (int) $record['id'], ENT_QUOTES, 'UTF-8') ?>';">
         <?php else: ?>
-        <div class="actual-entry">
+        <div class="<?= $entryClass ?>">
         <?php endif; ?>
             <span class="entry-label">実績</span>
             <?= htmlspecialchars($inTime, ENT_QUOTES, 'UTF-8') ?>〜<?= $outTime !== null ? htmlspecialchars($outTime, ENT_QUOTES, 'UTF-8') : '' ?>
             <?php if ($outTime === null): ?>
                 <span class="working-badge">勤務中</span>
+            <?php endif; ?><?php if ($showCategory): ?>
+                <?php $recordCategory = $record['category'] ?? null; ?>
+                <span class="category-badge" style="background:<?= htmlspecialchars($recordCategory !== null ? (CATEGORY_COLORS[$recordCategory] ?? CATEGORY_COLOR_NONE) : CATEGORY_COLOR_NONE, ENT_QUOTES, 'UTF-8') ?>;"><?= htmlspecialchars($recordCategory ?? '区分なし', ENT_QUOTES, 'UTF-8') ?></span>
+                <?php if ($categoryAlert !== null): ?>
+                    <span class="category-alert-label"><?= htmlspecialchars($categoryAlert, ENT_QUOTES, 'UTF-8') ?></span>
+                <?php endif; ?>
             <?php endif; ?>
             <?php if ($record['work_minutes'] !== null): ?>
                 <div class="entry-sub">

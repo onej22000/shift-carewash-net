@@ -405,6 +405,8 @@ $csrfToken = csrf_token();
         .missing-punch { font-size: 0.8em; color: #b3261e; margin-bottom: 3px; }
         .working-badge { display: inline-block; font-size: 0.75em; background: #0b5ed7; color: #fff; border-radius: 3px; padding: 1px 5px; margin-left: 2px; }
         .category-badge { display: inline-block; font-size: 0.75em; color: #fff; border-radius: 3px; padding: 1px 4px; margin-left: 2px; }
+        .actual-entry.category-alert { border: 2px solid #d93025; background: #fdecea; }
+        .category-alert-label { display: inline-block; font-size: 0.75em; font-weight: bold; color: #fff; background: #d93025; border-radius: 3px; padding: 1px 4px; margin-left: 2px; }
         .summary-footer { margin-top: 16px; font-weight: bold; }
         .inline-form { display: inline; }
     </style>
@@ -556,7 +558,8 @@ $csrfToken = csrf_token();
                                 render_attendance_day_cell(
                                     $shiftsByEmployeeDate[$employeeId][$dateStr] ?? [],
                                     $attendanceByEmployeeDate[$employeeId][$dateStr] ?? [],
-                                    $pageUrl
+                                    $pageUrl,
+                                    true
                                 );
                                 ?>
                             </td>
