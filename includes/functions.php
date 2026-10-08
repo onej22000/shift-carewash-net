@@ -464,6 +464,9 @@ function is_holiday_in_set(string $date, array $holidayDates): bool
 }
 
 const MONTH_END_CORRECTION_EARLY_CLOCK_IN_GRACE_MINUTES = 5;
+// 補正する早出の上限（予定出勤時刻より何分以内の早い打刻まで補正するか）。打刻画面の確認ダイアログの
+// CLOCK_IN_EARLY_WARNING_MINUTES とは別の定数（2026-10-08、明示的な指定により分離）。
+const MONTH_END_CORRECTION_MAX_EARLY_MINUTES = 60;
 
 /**
  * 月末チェック（店舗区分限定の出勤時刻自動補正）の対象を洗い出す。
@@ -477,10 +480,12 @@ const MONTH_END_CORRECTION_EARLY_CLOCK_IN_GRACE_MINUTES = 5;
  * 洗濯代行の打刻（2026-09-28 attendance#287、10:54→12:55）まで書き換えてしまっていた。
  * 予定出勤時刻は、その打刻と最も長く重なる店舗シフトの開始時刻（以前は同日の店舗シフトの最も早い開始時刻）。
  * 退勤前の打刻は現在時刻までを打刻時間帯とみなす。
+ * 2026-10-08追加: 予定出勤時刻よりMONTH_END_CORRECTION_MAX_EARLY_MINUTES分を超えて早い打刻は補正せず、
+ * 要確認（review）として別に返す（シフトの記録漏れ・別業務の打刻などの可能性があるため）。
  *
- * @return list<array{attendance_id:int, employee_id:int, employee_name:string, category:string, work_date:string, shift_start_time:string, old_clock_in_at:string, new_clock_in_at:string, clock_out_at:?string, total_break_minutes:?int}>
+ * @return array{candidates: list<array{attendance_id:int, employee_id:int, employee_name:string, category:string, work_date:string, shift_start_time:string, old_clock_in_at:string, new_clock_in_at:string, clock_out_at:?string, total_break_minutes:?int}>, review: list<array{attendance_id:int, employee_id:int, employee_name:string, category:string, work_date:string, shift_start_time:string, clock_in_at:string, early_minutes:int}>}
  */
-function find_month_end_correction_candidates(PDO $pdo, string $yearMonth): array
+function collect_month_end_clock_in_corrections(PDO $pdo, string $yearMonth): array
 {
     [$monthStart, $monthEnd] = get_month_range($yearMonth);
 
@@ -500,7 +505,7 @@ function find_month_end_correction_candidates(PDO $pdo, string $yearMonth): arra
     }
 
     if (empty($storeShiftsByEmployeeDate)) {
-        return [];
+        return ['candidates' => [], 'review' => []];
     }
 
     $attendanceStmt = $pdo->prepare(
@@ -514,6 +519,7 @@ function find_month_end_correction_candidates(PDO $pdo, string $yearMonth): arra
 
     $nowTimestamp = time();
     $candidates = [];
+    $reviewItems = [];
     foreach ($attendanceStmt->fetchAll() as $row) {
         $employeeId = (int) $row['employee_id'];
         $workDate = substr($row['clock_in_at'], 0, 10);
@@ -546,6 +552,21 @@ function find_month_end_correction_candidates(PDO $pdo, string $yearMonth): arra
             continue; // 5分前以降（定刻含む）または遅刻：対象外
         }
 
+        $earlySeconds = $scheduledStart->getTimestamp() - $actualClockIn->getTimestamp();
+        if ($earlySeconds > MONTH_END_CORRECTION_MAX_EARLY_MINUTES * 60) {
+            $reviewItems[] = [
+                'attendance_id' => (int) $row['id'],
+                'employee_id' => $employeeId,
+                'employee_name' => $row['employee_name'],
+                'category' => $row['category'],
+                'work_date' => $workDate,
+                'shift_start_time' => $shiftStartTime,
+                'clock_in_at' => $row['clock_in_at'],
+                'early_minutes' => intdiv($earlySeconds, 60),
+            ];
+            continue; // 上限を超えて早い：補正しない
+        }
+
         $candidates[] = [
             'attendance_id' => (int) $row['id'],
             'employee_id' => $employeeId,
@@ -560,7 +581,27 @@ function find_month_end_correction_candidates(PDO $pdo, string $yearMonth): arra
         ];
     }
 
-    return $candidates;
+    return ['candidates' => $candidates, 'review' => $reviewItems];
+}
+
+/**
+ * 月末チェック（店舗区分限定の出勤時刻自動補正）の補正対象。ルールは collect_month_end_clock_in_corrections() を参照。
+ *
+ * @return list<array{attendance_id:int, employee_id:int, employee_name:string, category:string, work_date:string, shift_start_time:string, old_clock_in_at:string, new_clock_in_at:string, clock_out_at:?string, total_break_minutes:?int}>
+ */
+function find_month_end_correction_candidates(PDO $pdo, string $yearMonth): array
+{
+    return collect_month_end_clock_in_corrections($pdo, $yearMonth)['candidates'];
+}
+
+/**
+ * 月末チェックで補正しない「要確認」の打刻（予定出勤時刻よりMONTH_END_CORRECTION_MAX_EARLY_MINUTES分を超えて早い）。
+ *
+ * @return list<array{attendance_id:int, employee_id:int, employee_name:string, category:string, work_date:string, shift_start_time:string, clock_in_at:string, early_minutes:int}>
+ */
+function find_month_end_correction_review_items(PDO $pdo, string $yearMonth): array
+{
+    return collect_month_end_clock_in_corrections($pdo, $yearMonth)['review'];
 }
 
 function calc_category_minutes(PDO $pdo, int $employeeId, string $startDate, string $endDate): array

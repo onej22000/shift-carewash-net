@@ -101,6 +101,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $flash = pop_flash();
 $candidates = find_month_end_correction_candidates($pdo, $yearMonth);
+$reviewItems = find_month_end_correction_review_items($pdo, $yearMonth);
 $breakCandidates = find_month_end_break_correction_candidates($pdo, $yearMonth);
 
 $prevMonth = (DateTime::createFromFormat('Y-m-d', $yearMonth . '-01'))->modify('-1 month')->format('Y-m');
@@ -155,6 +156,7 @@ $csrfToken = csrf_token();
     出勤時刻の補正対象は、打刻区分が「店舗」で、かつ店舗シフトと時間帯が重なる出勤打刻のみです（「集荷」「洗濯代行」の打刻や、店舗シフトと時間帯が重ならない打刻は対象外・変更されません）。<br>
     休憩時間は「店舗」の勤務だけを通算し、法定時間に不足する分を店舗打刻へ補正します。「集荷」「洗濯代行」は勤務時間も通算せず、本人の休憩入力をそのまま採用して変更しません。<br>
     シフトの予定出勤時刻の5分より前に打刻していた場合のみ「予定出勤時刻の5分前」に補正します。5分前〜予定時刻の間はそのまま、遅刻は対象外です。<br>
+    予定出勤時刻より<?= (int) MONTH_END_CORRECTION_MAX_EARLY_MINUTES ?>分を超えて早い打刻は補正せず、「要確認（補正しません）」に表示します。<br>
     実行すると、補正内容はすべて打刻修正履歴（attendance_edit_logs）に記録されます。
 </p>
 
@@ -202,6 +204,37 @@ $csrfToken = csrf_token();
         </tbody>
     </table>
 
+<?php endif; ?>
+
+<h2>要確認（補正しません）（<?= htmlspecialchars($yearMonth, ENT_QUOTES, 'UTF-8') ?>）</h2>
+<?php if (empty($reviewItems)): ?>
+    <p class="notice">要確認の打刻はありません。</p>
+<?php else: ?>
+    <p class="notice">予定出勤時刻より<?= (int) MONTH_END_CORRECTION_MAX_EARLY_MINUTES ?>分を超えて早い打刻です。シフトの記録漏れや別業務の打刻の可能性があるため自動補正しません。必要に応じて月間打刻実績から個別に修正してください。</p>
+    <table class="candidates">
+        <thead>
+            <tr>
+                <th>日付</th>
+                <th>氏名</th>
+                <th>区分</th>
+                <th>予定出勤時刻</th>
+                <th>打刻時刻</th>
+                <th>差分（分）</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php foreach ($reviewItems as $item): ?>
+                <tr>
+                    <td><?= htmlspecialchars($item['work_date'], ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars($item['employee_name'], ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars($item['category'], ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars(substr($item['shift_start_time'], 0, 5), ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= htmlspecialchars(substr($item['clock_in_at'], 11, 5), ENT_QUOTES, 'UTF-8') ?></td>
+                    <td><?= (int) $item['early_minutes'] ?>分早い</td>
+                </tr>
+            <?php endforeach; ?>
+        </tbody>
+    </table>
 <?php endif; ?>
 
 <h2>店舗勤務の休憩補正対象</h2>
