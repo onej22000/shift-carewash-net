@@ -23,6 +23,7 @@ $form = [
     'issue_date' => $today,
     'valid_until' => quotation_default_valid_until($today),
     'note' => '',
+    'lead_id' => '',
 ];
 $copySource = isset($_GET['copy']) ? quotation_fetch($pdo, (int) $_GET['copy']) : null;
 if ($copySource !== null) {
@@ -31,6 +32,15 @@ if ($copySource !== null) {
     }
     $form['facility_id'] = (string) ($copySource['facility_id'] ?? '');
     $form['has_odor_mini_option'] = (int) $copySource['has_odor_mini_option'] === 1 ? '1' : '';
+}
+// 営業先の詳細画面から作成する場合（?lead_id=ID）は宛先をその営業先の内容で埋め、発行時もその営業先に紐づける
+$leadSource = isset($_GET['lead_id']) ? lead_fetch($pdo, (int) $_GET['lead_id']) : null;
+if ($leadSource !== null) {
+    $form['lead_id'] = (string) $leadSource['id'];
+    $form['facility_id'] = (string) ($leadSource['facility_id'] ?? '');
+    $form['recipient_name'] = (string) $leadSource['name'];
+    $form['recipient_address'] = (string) ($leadSource['address'] ?? '');
+    $form['contact_person'] = (string) ($leadSource['contact_person'] ?? '');
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -44,7 +54,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (isset($values['errors'])) {
             $errors = $values['errors'];
         } else {
-            $id = quotation_insert($pdo, $values, (int) $admin['id']);
+            $leadId = (int) $form['lead_id'] > 0 ? (int) $form['lead_id'] : null;
+            $id = quotation_insert($pdo, $values, (int) $admin['id'], $leadId);
             $created = quotation_fetch($pdo, $id);
             set_flash('success', '見積書 ' . $created['quote_no'] . ' を発行しました。');
             header('Location: /admin/quotation_view.php?id=' . $id);
@@ -100,9 +111,13 @@ foreach ($facilities as $f) {
 <?php if ($copySource !== null && $_SERVER['REQUEST_METHOD'] !== 'POST'): ?>
     <p class="hint"><?= quotation_esc($copySource['quote_no']) ?> の内容を引き継いでいます。発行すると新しい見積番号が付きます。</p>
 <?php endif; ?>
+<?php if ($leadSource !== null && $_SERVER['REQUEST_METHOD'] !== 'POST'): ?>
+    <p class="hint">営業先「<?= quotation_esc($leadSource['name']) ?>」の見積書を作成します。発行するとこの営業先に紐づきます。</p>
+<?php endif; ?>
 
 <form method="post" action="/admin/quotation_edit.php">
     <input type="hidden" name="csrf_token" value="<?= quotation_esc($csrfToken) ?>">
+    <input type="hidden" name="lead_id" value="<?= quotation_esc($form['lead_id']) ?>">
 
     <fieldset>
         <legend>宛先</legend>

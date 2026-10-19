@@ -15,6 +15,7 @@
 
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/functions.php';
+require_once __DIR__ . '/lead_common.php';
 
 const QUOTATION_DEFAULT_UNIT_PRICE = 4500;
 const QUOTATION_TAX_RATE = 10;
@@ -107,8 +108,10 @@ function quotation_fetch_facilities(PDO $pdo): array
 function quotation_fetch(PDO $pdo, int $id): ?array
 {
     $stmt = $pdo->prepare(
-        'SELECT q.*, e.name AS created_by_name
-         FROM quotations q LEFT JOIN employees e ON e.id = q.created_by
+        'SELECT q.*, e.name AS created_by_name, l.name AS lead_name, l.status AS lead_status
+         FROM quotations q
+         LEFT JOIN employees e ON e.id = q.created_by
+         LEFT JOIN leads l ON l.id = q.lead_id
          WHERE q.id = :id'
     );
     $stmt->execute([':id' => $id]);
@@ -206,8 +209,11 @@ function quotation_parse_input(PDO $pdo, array $post): array
     ];
 }
 
-/** 見積番号を採番して保存し、新しいIDを返す（発行日ごとの連番 Q-YYYYMMDD-001） */
-function quotation_insert(PDO $pdo, array $values, int $createdBy): int
+/**
+ * 見積番号を採番して保存し、新しいIDを返す（発行日ごとの連番 Q-YYYYMMDD-001）。
+ * 同じトランザクションで宛先の営業先（leads）を作成または再利用して紐づける。$leadId 指定時はその営業先に紐づける。
+ */
+function quotation_insert(PDO $pdo, array $values, int $createdBy, ?int $leadId = null): int
 {
     $prefix = 'Q-' . str_replace('-', '', $values['issue_date']) . '-';
     for ($attempt = 0; ; $attempt++) {
@@ -232,8 +238,9 @@ function quotation_insert(PDO $pdo, array $values, int $createdBy): int
                     :subtotal_excl, :tax_rate, :tax_amount, :total_incl,
                     :issue_date, :valid_until, :note, :issuer_snapshot, :created_by)'
             );
+            $quoteNo = $prefix . sprintf('%03d', $seq);
             $insert->execute([
-                ':quote_no' => $prefix . sprintf('%03d', $seq),
+                ':quote_no' => $quoteNo,
                 ':facility_id' => $values['facility_id'],
                 ':recipient_name' => $values['recipient_name'],
                 ':recipient_honorific' => $values['recipient_honorific'],
@@ -254,6 +261,7 @@ function quotation_insert(PDO $pdo, array $values, int $createdBy): int
                 ':created_by' => $createdBy,
             ]);
             $id = (int) $pdo->lastInsertId();
+            lead_link_quotation($pdo, $id, $quoteNo, $values, $createdBy, $leadId);
             $pdo->commit();
             return $id;
         } catch (PDOException $e) {

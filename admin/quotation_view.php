@@ -65,6 +65,9 @@ $csrfToken = csrf_token();
 <div class="paper">
     <?= quotation_document_html($quotation) ?>
 </div>
+<?php if ($quotation['lead_id'] !== null): ?>
+<p class="meta">営業先：<a href="/admin/lead_view.php?id=<?= (int) $quotation['lead_id'] ?>"><?= quotation_esc($quotation['lead_name']) ?></a>（<?= quotation_esc($quotation['lead_status']) ?>）</p>
+<?php endif; ?>
 <p class="meta">作成者：<?= quotation_esc($quotation['created_by_name'] ?? '') ?>　作成日時：<?= quotation_esc($quotation['created_at']) ?></p>
 </body>
 </html>
