@@ -246,6 +246,7 @@ $csrfToken = csrf_token();
     <h2>請求</h2>
     <div class="nav-cards">
         <a class="nav-card" href="/admin/invoice.php"><h2>請求書</h2></a>
+        <a class="nav-card" href="/admin/quotations.php"><h2>見積書</h2></a>
         <a class="nav-card" href="/admin/invoice_adjustments.php"><h2>訂正・値引き</h2></a>
         <a class="nav-card" href="/admin/invoice_settings.php"><h2>請求設定</h2></a>
         <a class="nav-card" href="/admin/accounting_input.php"><h2>会計（取引入力・決算書）</h2></a>
