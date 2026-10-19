@@ -1,6 +1,6 @@
 -- 見積書機能（admin/quotation*.php）用テーブル
 -- 既存テーブルには触れない。quotations テーブルのみ作成する。
--- 作成日: 2026-10-19
+-- 作成日: 2026-10-19（汚物miniオプションの2列は quotations_migrate_20261019_odor_mini.sql で既存テーブルに追加済み）
 
 CREATE TABLE IF NOT EXISTS quotations (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS quotations (
   contact_person VARCHAR(100) NULL COMMENT '宛先の担当者名',
   resident_count INT UNSIGNED NOT NULL COMMENT '入居者数（見積作成時に手入力）',
   unit_price INT UNSIGNED NOT NULL COMMENT '税抜単価（円/人・月）、既定4500',
-  subtotal_excl INT UNSIGNED NOT NULL COMMENT '税抜金額 = 入居者数 × 単価',
+  has_odor_mini_option TINYINT(1) NOT NULL DEFAULT 0 COMMENT '汚物miniオプションの有無',
+  odor_mini_unit_price INT UNSIGNED NULL COMMENT '汚物miniオプション単価（税抜・円/人・月）、既定500',
+  subtotal_excl INT UNSIGNED NOT NULL COMMENT '税抜金額 = 入居者数 × 単価（＋汚物miniオプション）',
   tax_rate TINYINT UNSIGNED NOT NULL DEFAULT 10 COMMENT '消費税率（%）',
   tax_amount INT UNSIGNED NOT NULL COMMENT '消費税（1円未満切り捨て）',
   total_incl INT UNSIGNED NOT NULL COMMENT '税込金額',

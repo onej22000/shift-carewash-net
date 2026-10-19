@@ -19,6 +19,7 @@ $form = [
     'contact_person' => '',
     'resident_count' => '',
     'unit_price' => (string) QUOTATION_DEFAULT_UNIT_PRICE,
+    'has_odor_mini_option' => '',
     'issue_date' => $today,
     'valid_until' => quotation_default_valid_until($today),
     'note' => '',
@@ -29,6 +30,7 @@ if ($copySource !== null) {
         $form[$key] = (string) ($copySource[$key] ?? '');
     }
     $form['facility_id'] = (string) ($copySource['facility_id'] ?? '');
+    $form['has_odor_mini_option'] = (int) $copySource['has_odor_mini_option'] === 1 ? '1' : '';
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -145,8 +147,16 @@ foreach ($facilities as $f) {
             <input type="number" id="unit_price" name="unit_price" min="0" max="999999" step="1" required value="<?= quotation_esc($form['unit_price']) ?>"> 円／人・月
             <span class="hint">既定 <?= number_format(QUOTATION_DEFAULT_UNIT_PRICE) ?>円。この見積りだけ変更できます</span>
         </div>
+        <div class="form-row">
+            <label for="has_odor_mini_option">オプション</label>
+            <label><input type="checkbox" id="has_odor_mini_option" name="has_odor_mini_option" value="1"<?= $form['has_odor_mini_option'] === '1' ? ' checked' : '' ?>> <?= quotation_esc(QUOTATION_ODOR_MINI_ITEM_NAME) ?>を追加する</label>
+            <span class="hint">入居者数 × <?= number_format(QUOTATION_ODOR_MINI_UNIT_PRICE) ?>円（税抜）を上乗せします</span>
+        </div>
+        <p class="hint">集荷頻度：<?= quotation_esc(QUOTATION_PICKUP_FREQUENCY) ?>（すべての見積書に固定で記載されます）</p>
         <table class="calc">
-            <tr><th>税抜金額</th><td id="calc-subtotal">-</td></tr>
+            <tr><th>基本利用料</th><td id="calc-base">-</td></tr>
+            <tr id="calc-odor-row"><th><?= quotation_esc(QUOTATION_ODOR_MINI_ITEM_NAME) ?></th><td id="calc-odor">-</td></tr>
+            <tr><th>税抜金額（小計）</th><td id="calc-subtotal">-</td></tr>
             <tr><th>消費税（<?= QUOTATION_TAX_RATE ?>%・切り捨て）</th><td id="calc-tax">-</td></tr>
             <tr class="total"><th>税込金額（月額）</th><td id="calc-total">-</td></tr>
         </table>
@@ -177,18 +187,26 @@ foreach ($facilities as $f) {
 (function () {
     var facilities = <?= json_encode($facilityJson, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
     var taxRate = <?= QUOTATION_TAX_RATE ?>;
+    var odorMiniUnitPrice = <?= QUOTATION_ODOR_MINI_UNIT_PRICE ?>;
     var $ = function (id) { return document.getElementById(id); };
     var yen = function (n) { return '¥' + n.toLocaleString('ja-JP'); };
 
     function recalc() {
         var count = parseInt($('resident_count').value, 10);
         var price = parseInt($('unit_price').value, 10);
+        var withOdorMini = $('has_odor_mini_option').checked;
+        $('calc-odor-row').style.display = withOdorMini ? '' : 'none';
         if (!(count > 0) || !(price >= 0)) {
-            $('calc-subtotal').textContent = $('calc-tax').textContent = $('calc-total').textContent = '-';
+            ['calc-base', 'calc-odor', 'calc-subtotal', 'calc-tax', 'calc-total'].forEach(function (id) { $(id).textContent = '-'; });
             return;
         }
-        var subtotal = count * price;
+        // サーバー側の quotation_calc_amounts() と同じ計算
+        var base = count * price;
+        var odorMini = withOdorMini ? count * odorMiniUnitPrice : 0;
+        var subtotal = base + odorMini;
         var tax = Math.floor(subtotal * taxRate / 100);
+        $('calc-base').textContent = yen(base);
+        $('calc-odor').textContent = yen(odorMini);
         $('calc-subtotal').textContent = yen(subtotal);
         $('calc-tax').textContent = yen(tax);
         $('calc-total').textContent = yen(subtotal + tax);
@@ -215,6 +233,7 @@ foreach ($facilities as $f) {
     });
     $('resident_count').addEventListener('input', recalc);
     $('unit_price').addEventListener('input', recalc);
+    $('has_odor_mini_option').addEventListener('change', recalc);
     recalc();
 })();
 </script>

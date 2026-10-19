@@ -23,7 +23,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $keyword = trim((string) ($_GET['q'] ?? ''));
-$sql = 'SELECT id, quote_no, recipient_name, recipient_honorific, resident_count, total_incl, issue_date, valid_until
+$sql = 'SELECT id, quote_no, recipient_name, recipient_honorific, resident_count, has_odor_mini_option, total_incl, issue_date, valid_until
         FROM quotations';
 $params = [];
 if ($keyword !== '') {
@@ -63,6 +63,7 @@ $csrfToken = csrf_token();
         table.list td.num { text-align: right; }
         tr.expired td { color: #888; }
         .badge { display: inline-block; font-size: 0.78em; padding: 1px 7px; border-radius: 10px; background: #eee; color: #777; margin-left: 4px; }
+        .badge.option { background: #e8eef7; color: #2c4a75; }
         .inline-form { display: inline; }
         button.danger { border: 1px solid #b3261e; color: #b3261e; background: #fff; border-radius: 4px; cursor: pointer; }
         .muted { color: #666; }
@@ -110,7 +111,7 @@ $csrfToken = csrf_token();
                 <td><a href="/admin/quotation_view.php?id=<?= (int) $q['id'] ?>"><?= quotation_esc($q['quote_no']) ?></a></td>
                 <td><?= quotation_esc($q['recipient_name']) ?> <?= quotation_esc($q['recipient_honorific']) ?></td>
                 <td class="num"><?= number_format((int) $q['resident_count']) ?> 名</td>
-                <td class="num"><?= quotation_esc(quotation_yen((int) $q['total_incl'])) ?></td>
+                <td class="num"><?= quotation_esc(quotation_yen((int) $q['total_incl'])) ?><?php if ((int) $q['has_odor_mini_option'] === 1): ?><span class="badge option">汚物mini</span><?php endif; ?></td>
                 <td><?= quotation_esc($q['issue_date']) ?></td>
                 <td><?= quotation_esc($q['valid_until']) ?><?php if ($expired): ?><span class="badge">期限切れ</span><?php endif; ?></td>
                 <td>

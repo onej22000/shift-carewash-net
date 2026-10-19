@@ -7,7 +7,10 @@
  * 発行時点の値を quotations.issuer_snapshot にJSONで保存する。表示・PDFはスナップショットのみを使うため、
  * 後から QUOTATION_ISSUER を変えても発行済みの見積書は変わらない。
  *
- * 金額：税抜金額 = 入居者数 × 単価（税抜）、消費税は1円未満切り捨て（請求書機能と同じ）。
+ * 金額：税抜金額 = 入居者数 × 単価（税抜）＋ 汚物miniオプション（付ける場合のみ 入居者数 × 500円）、
+ * 消費税は1円未満切り捨て（請求書機能と同じ）。subtotal_excl には両方の合計を保存し、
+ * 内訳は has_odor_mini_option・odor_mini_unit_price から quotation_calc_amounts() で再計算する。
+ * 集荷頻度（週2回）は入力項目ではなく、すべての見積書に固定で表示する。
  */
 
 require_once __DIR__ . '/auth.php';
@@ -17,6 +20,9 @@ const QUOTATION_DEFAULT_UNIT_PRICE = 4500;
 const QUOTATION_TAX_RATE = 10;
 const QUOTATION_HONORIFICS = ['御中', '様'];
 const QUOTATION_ITEM_NAME = 'CareWash 洗濯代行サービス 月額利用料';
+const QUOTATION_ODOR_MINI_UNIT_PRICE = 500;
+const QUOTATION_ODOR_MINI_ITEM_NAME = '汚物miniオプション';
+const QUOTATION_PICKUP_FREQUENCY = '週2回';
 
 const QUOTATION_ISSUER = [
     'company_name' => '株式会社CareWash',
@@ -62,12 +68,30 @@ function quotation_default_valid_until(string $issueDate): string
     return $nextMonth->format('Y-m-') . sprintf('%02d', min($day, $lastDay));
 }
 
-/** 税抜金額・消費税（切り捨て）・税込金額 */
-function quotation_calc_amounts(int $residentCount, int $unitPrice, int $taxRate = QUOTATION_TAX_RATE): array
+/**
+ * 基本利用料・汚物miniオプション・税抜合計・消費税（切り捨て）・税込金額。
+ * $odorMiniUnitPrice が null ならオプションなし（odor_mini_excl = 0）。
+ */
+function quotation_calc_amounts(int $residentCount, int $unitPrice, ?int $odorMiniUnitPrice = null, int $taxRate = QUOTATION_TAX_RATE): array
 {
-    $subtotal = $residentCount * $unitPrice;
+    $base = $residentCount * $unitPrice;
+    $odorMini = $odorMiniUnitPrice === null ? 0 : $residentCount * $odorMiniUnitPrice;
+    $subtotal = $base + $odorMini;
     $tax = intdiv($subtotal * $taxRate, 100);
-    return ['subtotal_excl' => $subtotal, 'tax_amount' => $tax, 'total_incl' => $subtotal + $tax];
+    return [
+        'base_excl' => $base,
+        'odor_mini_excl' => $odorMini,
+        'subtotal_excl' => $subtotal,
+        'tax_amount' => $tax,
+        'total_incl' => $subtotal + $tax,
+    ];
+}
+
+/** 保存済みの見積書の内訳（has_odor_mini_option・odor_mini_unit_price から再計算） */
+function quotation_amounts_of(array $q): array
+{
+    $odorMiniUnitPrice = (int) $q['has_odor_mini_option'] === 1 ? (int) $q['odor_mini_unit_price'] : null;
+    return quotation_calc_amounts((int) $q['resident_count'], (int) $q['unit_price'], $odorMiniUnitPrice, (int) $q['tax_rate']);
 }
 
 /** 見積書の宛先に選べる施設（有効な介護施設）。入居者数は facilities に無いため返さない */
@@ -122,6 +146,7 @@ function quotation_parse_input(PDO $pdo, array $post): array
     $issueDate = (string) ($post['issue_date'] ?? '');
     $validUntil = (string) ($post['valid_until'] ?? '');
     $note = trim((string) ($post['note'] ?? ''));
+    $hasOdorMini = (string) ($post['has_odor_mini_option'] ?? '') === '1';
 
     if ($recipientName === '' || mb_strlen($recipientName) > 100) {
         $errors[] = '宛先（施設名・会社名）を100文字以内で入力してください。';
@@ -159,6 +184,8 @@ function quotation_parse_input(PDO $pdo, array $post): array
 
     $residentCount = (int) $residentRaw;
     $unitPrice = (int) $priceRaw;
+    $odorMiniUnitPrice = $hasOdorMini ? QUOTATION_ODOR_MINI_UNIT_PRICE : null;
+    $amounts = quotation_calc_amounts($residentCount, $unitPrice, $odorMiniUnitPrice);
     return [
         'facility_id' => $facilityId > 0 ? $facilityId : null,
         'recipient_name' => $recipientName,
@@ -167,11 +194,16 @@ function quotation_parse_input(PDO $pdo, array $post): array
         'contact_person' => $contact === '' ? null : $contact,
         'resident_count' => $residentCount,
         'unit_price' => $unitPrice,
+        'has_odor_mini_option' => $hasOdorMini ? 1 : 0,
+        'odor_mini_unit_price' => $odorMiniUnitPrice,
+        'subtotal_excl' => $amounts['subtotal_excl'],
+        'tax_amount' => $amounts['tax_amount'],
+        'total_incl' => $amounts['total_incl'],
         'tax_rate' => QUOTATION_TAX_RATE,
         'issue_date' => $issueDate,
         'valid_until' => $validUntil,
         'note' => $note === '' ? null : $note,
-    ] + quotation_calc_amounts($residentCount, $unitPrice);
+    ];
 }
 
 /** 見積番号を採番して保存し、新しいIDを返す（発行日ごとの連番 Q-YYYYMMDD-001） */
@@ -191,11 +223,13 @@ function quotation_insert(PDO $pdo, array $values, int $createdBy): int
             $insert = $pdo->prepare(
                 'INSERT INTO quotations
                    (quote_no, facility_id, recipient_name, recipient_honorific, recipient_address, contact_person,
-                    resident_count, unit_price, subtotal_excl, tax_rate, tax_amount, total_incl,
+                    resident_count, unit_price, has_odor_mini_option, odor_mini_unit_price,
+                    subtotal_excl, tax_rate, tax_amount, total_incl,
                     issue_date, valid_until, note, issuer_snapshot, created_by)
                  VALUES
                    (:quote_no, :facility_id, :recipient_name, :recipient_honorific, :recipient_address, :contact_person,
-                    :resident_count, :unit_price, :subtotal_excl, :tax_rate, :tax_amount, :total_incl,
+                    :resident_count, :unit_price, :has_odor_mini_option, :odor_mini_unit_price,
+                    :subtotal_excl, :tax_rate, :tax_amount, :total_incl,
                     :issue_date, :valid_until, :note, :issuer_snapshot, :created_by)'
             );
             $insert->execute([
@@ -207,6 +241,8 @@ function quotation_insert(PDO $pdo, array $values, int $createdBy): int
                 ':contact_person' => $values['contact_person'],
                 ':resident_count' => $values['resident_count'],
                 ':unit_price' => $values['unit_price'],
+                ':has_odor_mini_option' => $values['has_odor_mini_option'],
+                ':odor_mini_unit_price' => $values['odor_mini_unit_price'],
                 ':subtotal_excl' => $values['subtotal_excl'],
                 ':tax_rate' => $values['tax_rate'],
                 ':tax_amount' => $values['tax_amount'],
@@ -237,6 +273,7 @@ function quotation_insert(PDO $pdo, array $values, int $createdBy): int
 function quotation_document_html(array $q): string
 {
     $issuer = quotation_issuer($q);
+    $amounts = quotation_amounts_of($q);
     $cell = 'border:0.3mm solid #555; padding:2.2mm 3mm;';
     $head = $cell . ' background:#e9eef5; text-align:center;';
     ob_start();
@@ -278,6 +315,13 @@ function quotation_document_html(array $q): string
         </tr>
     </table>
 
+    <table style="border-collapse:collapse; margin-bottom:3mm;">
+        <tr>
+            <td style="<?= $head ?>">集荷頻度</td>
+            <td style="<?= $cell ?> padding-right:8mm;"><?= quotation_esc(QUOTATION_PICKUP_FREQUENCY) ?></td>
+        </tr>
+    </table>
+
     <table style="width:100%; border-collapse:collapse;">
         <tr>
             <td style="<?= $head ?> width:46%;">品名</td>
@@ -289,8 +333,16 @@ function quotation_document_html(array $q): string
             <td style="<?= $cell ?>"><?= quotation_esc(QUOTATION_ITEM_NAME) ?></td>
             <td style="<?= $cell ?> text-align:right;"><?= number_format((int) $q['resident_count']) ?> 名</td>
             <td style="<?= $cell ?> text-align:right;"><?= quotation_esc(quotation_yen((int) $q['unit_price'])) ?></td>
-            <td style="<?= $cell ?> text-align:right;"><?= quotation_esc(quotation_yen((int) $q['subtotal_excl'])) ?></td>
+            <td style="<?= $cell ?> text-align:right;"><?= quotation_esc(quotation_yen($amounts['base_excl'])) ?></td>
         </tr>
+        <?php if ((int) $q['has_odor_mini_option'] === 1): ?>
+        <tr>
+            <td style="<?= $cell ?>"><?= quotation_esc(QUOTATION_ODOR_MINI_ITEM_NAME) ?></td>
+            <td style="<?= $cell ?> text-align:right;"><?= number_format((int) $q['resident_count']) ?> 名</td>
+            <td style="<?= $cell ?> text-align:right;"><?= quotation_esc(quotation_yen((int) $q['odor_mini_unit_price'])) ?></td>
+            <td style="<?= $cell ?> text-align:right;"><?= quotation_esc(quotation_yen($amounts['odor_mini_excl'])) ?></td>
+        </tr>
+        <?php endif; ?>
         <tr>
             <td colspan="2" style="border:0; padding:0;"></td>
             <td style="<?= $head ?>">小計（税抜）</td>
