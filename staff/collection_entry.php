@@ -159,16 +159,17 @@ function insert_pickup(
     int $employeeId,
     ?int $issuedBagOrange,
     ?int $issuedBagYellow,
+    ?int $issuedBagSilver,
     ?int $issuedBagBlue,
     ?int $issuedLaundryNetCount
 ): int {
     $stmt = $pdo->prepare(
         'INSERT INTO collection_cycles
             (facility_id, pickup_date, pickup_bag_count, pickup_time, pickup_employee_id,
-             issued_bag_orange, issued_bag_yellow, issued_bag_blue, issued_laundry_net_count)
+             issued_bag_orange, issued_bag_yellow, issued_bag_silver, issued_bag_blue, issued_laundry_net_count)
          VALUES
             (:facility_id, :pickup_date, :bag_count, :pickup_time, :employee_id,
-             :issued_bag_orange, :issued_bag_yellow, :issued_bag_blue, :issued_laundry_net_count)'
+             :issued_bag_orange, :issued_bag_yellow, :issued_bag_silver, :issued_bag_blue, :issued_laundry_net_count)'
     );
     $stmt->execute([
         ':facility_id' => $facilityId,
@@ -178,6 +179,7 @@ function insert_pickup(
         ':employee_id' => $employeeId,
         ':issued_bag_orange' => $issuedBagOrange,
         ':issued_bag_yellow' => $issuedBagYellow,
+        ':issued_bag_silver' => $issuedBagSilver,
         ':issued_bag_blue' => $issuedBagBlue,
         ':issued_laundry_net_count' => $issuedLaundryNetCount,
     ]);
@@ -241,7 +243,7 @@ function update_dispatch(PDO $pdo, int $cycleId, int $bagCount, string $dispatch
 //      自分が記録した項目だけに絞らずチーム共有データとして扱う） ----
 const CC_EDITABLE_FIELDS = [
     'facility_id', 'pickup_date', 'pickup_bag_count', 'pickup_time', 'pickup_employee_id',
-    'issued_bag_orange', 'issued_bag_yellow', 'issued_bag_blue', 'issued_laundry_net_count',
+    'issued_bag_orange', 'issued_bag_yellow', 'issued_bag_silver', 'issued_bag_blue', 'issued_laundry_net_count',
     'arrival_bag_count', 'arrival_date', 'arrival_time', 'arrival_employee_id', 'arrival_facility_id',
     'dispatch_bag_count', 'dispatch_date', 'dispatch_time', 'dispatch_employee_id', 'dispatch_facility_id',
     'return_bag_count', 'return_date', 'return_time', 'return_employee_id', 'remarks',
@@ -305,6 +307,7 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
     $pickupEmployeeId = cc_parse_employee_id($post['pickup_employee_id'] ?? '', $validEmployeeIds);
     $issuedBagOrange = cc_parse_bag_count($post['issued_bag_orange'] ?? '');
     $issuedBagYellow = cc_parse_bag_count($post['issued_bag_yellow'] ?? '');
+    $issuedBagSilver = cc_parse_bag_count($post['issued_bag_silver'] ?? '');
     $issuedBagBlue = cc_parse_bag_count($post['issued_bag_blue'] ?? '');
     $issuedLaundryNetCount = cc_parse_bag_count($post['issued_laundry_net_count'] ?? '');
     // 日付が空欄の場合はそのステージ全体を未登録(NULL)状態に戻す。
@@ -377,6 +380,9 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
     if ($issuedBagYellow === false) {
         $errors[] = 'リネン袋交付数（黄）は0以上の整数を入力してください。';
     }
+    if ($issuedBagSilver === false) {
+        $errors[] = 'リネン袋交付数（シルバー）は0以上の整数を入力してください。';
+    }
     if ($issuedBagBlue === false) {
         $errors[] = 'リネン袋交付数（青）は0以上の整数を入力してください。';
     }
@@ -435,6 +441,7 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
             'pickup_employee_id' => $pickupEmployeeId,
             'issued_bag_orange' => $issuedBagOrange,
             'issued_bag_yellow' => $issuedBagYellow,
+            'issued_bag_silver' => $issuedBagSilver,
             'issued_bag_blue' => $issuedBagBlue,
             'issued_laundry_net_count' => $issuedLaundryNetCount,
             'arrival_bag_count' => $arrivalBagCount,
@@ -784,13 +791,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $pickupBagCount = parse_bag_count($_POST['pickup_bag_count'] ?? '');
                     $issuedBagOrange = parse_bag_count($_POST['issued_bag_orange'] ?? '');
                     $issuedBagYellow = parse_bag_count($_POST['issued_bag_yellow'] ?? '');
+                    $issuedBagSilver = parse_bag_count($_POST['issued_bag_silver'] ?? '');
                     $issuedBagBlue = parse_bag_count($_POST['issued_bag_blue'] ?? '');
                     $issuedLaundryNetCount = parse_bag_count($_POST['issued_laundry_net_count'] ?? '');
                     $pickupDate = resolve_entry_date($_POST['pickup_date'] ?? '', $todayStr);
                     $pickupTime = resolve_entry_time($_POST['pickup_time'] ?? '', $nowTimeStr);
                     $pickupEmployeeId = resolve_entry_employee_id($_POST['pickup_employee_id'] ?? '', (int) $staff['id'], $validEmployeeIds);
 
-                    $wantsPickup = $pickupBagCount !== null || $issuedBagOrange !== null || $issuedBagYellow !== null
+                    $wantsPickup = $pickupBagCount !== null || $issuedBagOrange !== null || $issuedBagYellow !== null || $issuedBagSilver !== null
                         || $issuedBagBlue !== null || $issuedLaundryNetCount !== null;
 
                     if (!$wantsPickup) {
@@ -808,11 +816,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         try {
                             $newCycleId = insert_pickup(
                                 $pdo, $facilityId, $pickupBagCount, $pickupDate, $pickupTime, $pickupEmployeeId,
-                                $issuedBagOrange, $issuedBagYellow, $issuedBagBlue, $issuedLaundryNetCount
+                                $issuedBagOrange, $issuedBagYellow, $issuedBagSilver, $issuedBagBlue, $issuedLaundryNetCount
                             );
                             record_collection_cycle_issuance_stock_adjustment($pdo, null, [
                                 'issued_bag_orange' => $issuedBagOrange,
                                 'issued_bag_yellow' => $issuedBagYellow,
+                                'issued_bag_silver' => $issuedBagSilver,
                                 'issued_bag_blue' => $issuedBagBlue,
                                 'issued_laundry_net_count' => $issuedLaundryNetCount,
                             ], $facilityId, $facilityName, $newCycleId, $staff['id']);
@@ -961,7 +970,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             'UPDATE collection_cycles SET
                                 facility_id = :facility_id, pickup_date = :pickup_date,
                                 pickup_bag_count = :pickup_bag_count, pickup_time = :pickup_time, pickup_employee_id = :pickup_employee_id,
-                                issued_bag_orange = :issued_bag_orange, issued_bag_yellow = :issued_bag_yellow,
+                                issued_bag_orange = :issued_bag_orange, issued_bag_yellow = :issued_bag_yellow, issued_bag_silver = :issued_bag_silver,
                                 issued_bag_blue = :issued_bag_blue, issued_laundry_net_count = :issued_laundry_net_count,
                                 arrival_bag_count = :arrival_bag_count, arrival_date = :arrival_date, arrival_time = :arrival_time,
                                 arrival_employee_id = :arrival_employee_id, arrival_facility_id = :arrival_facility_id,
@@ -980,6 +989,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ':pickup_employee_id' => $values['pickup_employee_id'],
                             ':issued_bag_orange' => $values['issued_bag_orange'],
                             ':issued_bag_yellow' => $values['issued_bag_yellow'],
+                            ':issued_bag_silver' => $values['issued_bag_silver'],
                             ':issued_bag_blue' => $values['issued_bag_blue'],
                             ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                             ':arrival_bag_count' => $values['arrival_bag_count'],
@@ -1476,6 +1486,10 @@ function format_stage_cell($bagCount, $date, $time): string
                         <input type="number" id="issued_bag_yellow" name="issued_bag_yellow" min="0" step="1">
                     </div>
                     <div class="form-row">
+                        <label for="issued_bag_silver">リネン袋交付数（シルバー）</label>
+                        <input type="number" id="issued_bag_silver" name="issued_bag_silver" min="0" step="1">
+                    </div>
+                    <div class="form-row">
                         <label for="issued_bag_blue">リネン袋交付数（青）</label>
                         <input type="number" id="issued_bag_blue" name="issued_bag_blue" min="0" step="1">
                     </div>
@@ -1622,6 +1636,10 @@ function format_stage_cell($bagCount, $date, $time): string
                 <div class="form-row">
                     <label for="e_issued_bag_yellow">リネン袋交付数（黄）</label>
                     <input type="number" id="e_issued_bag_yellow" name="issued_bag_yellow" min="0" step="1" value="<?= htmlspecialchars($editFormValues['issued_bag_yellow'], ENT_QUOTES, 'UTF-8') ?>">
+                </div>
+                <div class="form-row">
+                    <label for="e_issued_bag_silver">リネン袋交付数（シルバー）</label>
+                    <input type="number" id="e_issued_bag_silver" name="issued_bag_silver" min="0" step="1" value="<?= htmlspecialchars($editFormValues['issued_bag_silver'], ENT_QUOTES, 'UTF-8') ?>">
                 </div>
                 <div class="form-row">
                     <label for="e_issued_bag_blue">リネン袋交付数（青）</label>
@@ -1775,6 +1793,9 @@ function format_stage_cell($bagCount, $date, $time): string
                     }
                     if ($cycle['issued_bag_yellow'] !== null) {
                         $issuedParts[] = '黄' . (int) $cycle['issued_bag_yellow'];
+                    }
+                    if ($cycle['issued_bag_silver'] !== null) {
+                        $issuedParts[] = 'シルバー' . (int) $cycle['issued_bag_silver'];
                     }
                     if ($cycle['issued_bag_blue'] !== null) {
                         $issuedParts[] = '青' . (int) $cycle['issued_bag_blue'];

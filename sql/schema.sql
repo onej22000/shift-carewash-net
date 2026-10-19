@@ -226,6 +226,7 @@ CREATE TABLE collection_cycles (
     pickup_employee_id    INT UNSIGNED NULL COMMENT '集荷担当者',
     issued_bag_orange     INT UNSIGNED NULL COMMENT 'リネン袋交付数（オレンジ）。集荷時に施設へ渡した交換用の空袋数',
     issued_bag_yellow     INT UNSIGNED NULL COMMENT 'リネン袋交付数（黄）。集荷時に施設へ渡した交換用の空袋数',
+    issued_bag_silver     INT UNSIGNED NULL COMMENT 'リネン袋交付数（シルバー）。集荷時に施設へ渡した交換用の空袋数',
     issued_bag_blue       INT UNSIGNED NULL COMMENT 'リネン袋交付数（青）。集荷時に施設へ渡した交換用の空袋数',
     issued_laundry_net_count INT UNSIGNED NULL COMMENT '洗濯ネット交付数。集荷時に施設へ渡した洗濯ネット数',
     arrival_bag_count     INT UNSIGNED NULL COMMENT 'クリーニング所到着時のリネン袋数',

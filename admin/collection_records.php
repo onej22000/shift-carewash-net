@@ -7,7 +7,7 @@ $pdo = getPdo();
 
 const CC_EDITABLE_FIELDS = [
     'facility_id', 'pickup_date', 'pickup_bag_count', 'pickup_time', 'pickup_employee_id',
-    'issued_bag_orange', 'issued_bag_yellow', 'issued_bag_blue', 'issued_laundry_net_count',
+    'issued_bag_orange', 'issued_bag_yellow', 'issued_bag_silver', 'issued_bag_blue', 'issued_laundry_net_count',
     'arrival_bag_count', 'arrival_date', 'arrival_time', 'arrival_employee_id', 'arrival_facility_id',
     'dispatch_bag_count', 'dispatch_date', 'dispatch_time', 'dispatch_employee_id', 'dispatch_facility_id',
     'return_bag_count', 'return_date', 'return_time', 'return_employee_id', 'remarks',
@@ -75,6 +75,7 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
     $pickupEmployeeId = cc_parse_employee_id($post['pickup_employee_id'] ?? '', $validEmployeeIds);
     $issuedBagOrange = cc_parse_bag_count($post['issued_bag_orange'] ?? '');
     $issuedBagYellow = cc_parse_bag_count($post['issued_bag_yellow'] ?? '');
+    $issuedBagSilver = cc_parse_bag_count($post['issued_bag_silver'] ?? '');
     $issuedBagBlue = cc_parse_bag_count($post['issued_bag_blue'] ?? '');
     $issuedLaundryNetCount = cc_parse_bag_count($post['issued_laundry_net_count'] ?? '');
     $arrivalBagCount = cc_parse_bag_count($post['arrival_bag_count'] ?? '');
@@ -115,6 +116,9 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
     }
     if ($issuedBagYellow === false) {
         $errors[] = 'リネン袋交付数（黄）は0以上の整数を入力してください。';
+    }
+    if ($issuedBagSilver === false) {
+        $errors[] = 'リネン袋交付数（シルバー）は0以上の整数を入力してください。';
     }
     if ($issuedBagBlue === false) {
         $errors[] = 'リネン袋交付数（青）は0以上の整数を入力してください。';
@@ -174,6 +178,7 @@ function parse_collection_cycle_input(array $post, array $validFacilityIds, arra
             'pickup_employee_id' => $pickupEmployeeId,
             'issued_bag_orange' => $issuedBagOrange,
             'issued_bag_yellow' => $issuedBagYellow,
+            'issued_bag_silver' => $issuedBagSilver,
             'issued_bag_blue' => $issuedBagBlue,
             'issued_laundry_net_count' => $issuedLaundryNetCount,
             'arrival_bag_count' => $arrivalBagCount,
@@ -284,13 +289,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $insertStmt = $pdo->prepare(
                     'INSERT INTO collection_cycles
                         (facility_id, pickup_date, pickup_bag_count, pickup_time, pickup_employee_id,
-                         issued_bag_orange, issued_bag_yellow, issued_bag_blue, issued_laundry_net_count,
+                         issued_bag_orange, issued_bag_yellow, issued_bag_silver, issued_bag_blue, issued_laundry_net_count,
                          arrival_bag_count, arrival_date, arrival_time, arrival_employee_id, arrival_facility_id,
                          dispatch_bag_count, dispatch_date, dispatch_time, dispatch_employee_id, dispatch_facility_id,
                          return_bag_count, return_date, return_time, return_employee_id, remarks)
                      VALUES
                         (:facility_id, :pickup_date, :pickup_bag_count, :pickup_time, :pickup_employee_id,
-                         :issued_bag_orange, :issued_bag_yellow, :issued_bag_blue, :issued_laundry_net_count,
+                         :issued_bag_orange, :issued_bag_yellow, :issued_bag_silver, :issued_bag_blue, :issued_laundry_net_count,
                          :arrival_bag_count, :arrival_date, :arrival_time, :arrival_employee_id, :arrival_facility_id,
                          :dispatch_bag_count, :dispatch_date, :dispatch_time, :dispatch_employee_id, :dispatch_facility_id,
                          :return_bag_count, :return_date, :return_time, :return_employee_id, :remarks)'
@@ -303,6 +308,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ':pickup_employee_id' => $values['pickup_employee_id'],
                     ':issued_bag_orange' => $values['issued_bag_orange'],
                     ':issued_bag_yellow' => $values['issued_bag_yellow'],
+                    ':issued_bag_silver' => $values['issued_bag_silver'],
                     ':issued_bag_blue' => $values['issued_bag_blue'],
                     ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                     ':arrival_bag_count' => $values['arrival_bag_count'],
@@ -383,7 +389,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             'UPDATE collection_cycles SET
                                 facility_id = :facility_id, pickup_date = :pickup_date,
                                 pickup_bag_count = :pickup_bag_count, pickup_time = :pickup_time, pickup_employee_id = :pickup_employee_id,
-                                issued_bag_orange = :issued_bag_orange, issued_bag_yellow = :issued_bag_yellow,
+                                issued_bag_orange = :issued_bag_orange, issued_bag_yellow = :issued_bag_yellow, issued_bag_silver = :issued_bag_silver,
                                 issued_bag_blue = :issued_bag_blue, issued_laundry_net_count = :issued_laundry_net_count,
                                 arrival_bag_count = :arrival_bag_count, arrival_date = :arrival_date, arrival_time = :arrival_time,
                                 arrival_employee_id = :arrival_employee_id, arrival_facility_id = :arrival_facility_id,
@@ -402,6 +408,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ':pickup_employee_id' => $values['pickup_employee_id'],
                             ':issued_bag_orange' => $values['issued_bag_orange'],
                             ':issued_bag_yellow' => $values['issued_bag_yellow'],
+                            ':issued_bag_silver' => $values['issued_bag_silver'],
                             ':issued_bag_blue' => $values['issued_bag_blue'],
                             ':issued_laundry_net_count' => $values['issued_laundry_net_count'],
                             ':arrival_bag_count' => $values['arrival_bag_count'],
@@ -463,7 +470,7 @@ $formValues = [
     'facility_id' => (string) ($facilityId > 0 ? $facilityId : ''),
     'pickup_date' => (new DateTime())->format('Y-m-d'),
     'pickup_bag_count' => '', 'pickup_time' => '', 'pickup_employee_id' => '',
-    'issued_bag_orange' => '', 'issued_bag_yellow' => '', 'issued_bag_blue' => '', 'issued_laundry_net_count' => '',
+    'issued_bag_orange' => '', 'issued_bag_yellow' => '', 'issued_bag_silver' => '', 'issued_bag_blue' => '', 'issued_laundry_net_count' => '',
     'arrival_bag_count' => '', 'arrival_date' => '', 'arrival_time' => '', 'arrival_employee_id' => '', 'arrival_facility_id' => '',
     'dispatch_bag_count' => '', 'dispatch_date' => '', 'dispatch_time' => '', 'dispatch_employee_id' => '', 'dispatch_facility_id' => '',
     'return_bag_count' => '', 'return_date' => '', 'return_time' => '', 'return_employee_id' => '',
@@ -548,6 +555,9 @@ function cr_issued(array $record): string
     }
     if ($record['issued_bag_yellow'] !== null) {
         $parts[] = '黄' . (int) $record['issued_bag_yellow'];
+    }
+    if ($record['issued_bag_silver'] !== null) {
+        $parts[] = 'シルバー' . (int) $record['issued_bag_silver'];
     }
     if ($record['issued_bag_blue'] !== null) {
         $parts[] = '青' . (int) $record['issued_bag_blue'];
@@ -783,6 +793,10 @@ $renderOpenCycleCard = function (array $cycle) use ($openCardEditBaseUrl): void 
                 <div class="form-row">
                     <label for="f_issued_bag_yellow">リネン袋交付数（黄）</label>
                     <input type="number" id="f_issued_bag_yellow" name="issued_bag_yellow" min="0" step="1" value="<?= htmlspecialchars($formValues['issued_bag_yellow'], ENT_QUOTES, 'UTF-8') ?>">
+                </div>
+                <div class="form-row">
+                    <label for="f_issued_bag_silver">リネン袋交付数（シルバー）</label>
+                    <input type="number" id="f_issued_bag_silver" name="issued_bag_silver" min="0" step="1" value="<?= htmlspecialchars($formValues['issued_bag_silver'], ENT_QUOTES, 'UTF-8') ?>">
                 </div>
                 <div class="form-row">
                     <label for="f_issued_bag_blue">リネン袋交付数（青）</label>

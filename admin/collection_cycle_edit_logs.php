@@ -12,6 +12,7 @@ const CC_FIELD_LABELS = [
     'pickup_employee_id' => '集荷担当者',
     'issued_bag_orange' => 'リネン袋交付数（オレンジ）',
     'issued_bag_yellow' => 'リネン袋交付数（黄）',
+    'issued_bag_silver' => 'リネン袋交付数（シルバー）',
     'issued_bag_blue' => 'リネン袋交付数（青）',
     'issued_laundry_net_count' => '洗濯ネット交付数',
     'arrival_bag_count' => '到着リネン袋数',

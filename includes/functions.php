@@ -1307,7 +1307,7 @@ function record_facility_issuance_stock_adjustment(PDO $pdo, ?array $before, arr
 }
 
 /**
- * collection_cycles.issued_bag_orange/yellow/blue・issued_laundry_net_count（集荷時に施設へ
+ * collection_cycles.issued_bag_orange/yellow/silver/blue・issued_laundry_net_count（集荷時に施設へ
  * 渡した交換用の袋・ネット数）の新規登録・変更を消耗品在庫に自動反映する。
  *
  * facilities版とは異なり、増えた分だけを一方向に減産する（$before→$afterで値が
@@ -1333,6 +1333,8 @@ function record_collection_cycle_issuance_stock_adjustment(
     $fieldToItemType = [
         'issued_bag_orange' => 'linen_bag_orange',
         'issued_bag_yellow' => 'linen_bag_yellow',
+        // シルバーは品目マスタ画面から後で追加された品目のため、item_keyが自動採番値になっている
+        'issued_bag_silver' => 'item_fe020d6a',
         'issued_bag_blue' => 'linen_bag_blue',
         'issued_laundry_net_count' => 'laundry_net',
     ];

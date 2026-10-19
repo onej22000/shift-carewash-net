@@ -70,6 +70,9 @@ function cr_issued(array $record): string
     if ($record['issued_bag_yellow'] !== null) {
         $parts[] = '黄' . (int) $record['issued_bag_yellow'];
     }
+    if ($record['issued_bag_silver'] !== null) {
+        $parts[] = 'シルバー' . (int) $record['issued_bag_silver'];
+    }
     if ($record['issued_bag_blue'] !== null) {
         $parts[] = '青' . (int) $record['issued_bag_blue'];
     }
