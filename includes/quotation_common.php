@@ -27,14 +27,25 @@ const QUOTATION_PICKUP_FREQUENCY = '週2回';
 
 const QUOTATION_ISSUER = [
     'company_name' => '株式会社CareWash',
+    'representative' => '代表取締役 手塚伸光',
     'postal' => '320-0051',
-    'address' => '栃木県宇都宮市上戸祭町3014番地3',
+    'address' => '栃木県宇都宮市上戸祭町3014-3 ヒルサイド上戸祭A-1',
     'tel' => '090-6249-9612',
     'contact_title' => '関西支部長',
     'contact_name' => '西科潤一',
     'contact_kana' => 'にしなじゅんいち',
     'registration_no' => 'T8060001038718',
 ];
+
+// 発行元の印影（透過PNG）。見積書ごとに変わらないため issuer_snapshot には含めず、表示・PDF生成時に固定で読み込む。
+// includes/ 配下（.htaccess で Web から403）に置き、画面・PDFとも data URI で埋め込む
+const QUOTATION_STAMP_FILE = __DIR__ . '/assets/carewash_hanko.png';
+
+function quotation_stamp_data_uri(): ?string
+{
+    $png = @file_get_contents(QUOTATION_STAMP_FILE);
+    return $png === false ? null : 'data:image/png;base64,' . base64_encode($png);
+}
 
 function quotation_esc($value): string
 {
@@ -119,9 +130,11 @@ function quotation_fetch(PDO $pdo, int $id): ?array
     return $row === false ? null : $row;
 }
 
+/** 発行時の発行元情報。スナップショットに無い項目（後から追加した項目）は空欄にし、現在の値で補わない */
 function quotation_issuer(array $quotation): array
 {
-    return (json_decode((string) $quotation['issuer_snapshot'], true) ?: []) + QUOTATION_ISSUER;
+    $snapshot = json_decode((string) $quotation['issuer_snapshot'], true) ?: [];
+    return $snapshot + array_fill_keys(array_keys(QUOTATION_ISSUER), '');
 }
 
 /**
@@ -282,6 +295,7 @@ function quotation_document_html(array $q): string
 {
     $issuer = quotation_issuer($q);
     $amounts = quotation_amounts_of($q);
+    $stamp = quotation_stamp_data_uri();
     $cell = 'border:0.3mm solid #555; padding:2.2mm 3mm;';
     $head = $cell . ' background:#e9eef5; text-align:center;';
     ob_start();
@@ -313,9 +327,23 @@ function quotation_document_html(array $q): string
                     <tr><td style="<?= $head ?>">発行日</td><td style="<?= $cell ?>"><?= quotation_esc(quotation_date_label((string) $q['issue_date'])) ?></td></tr>
                     <tr><td style="<?= $head ?>">有効期限</td><td style="<?= $cell ?>"><?= quotation_esc(quotation_date_label((string) $q['valid_until'])) ?></td></tr>
                 </table>
-                <div style="font-size:12pt;"><?= quotation_esc($issuer['company_name']) ?></div>
+                <table style="border-collapse:collapse; width:100%;">
+                    <tr>
+                        <td style="padding:0; vertical-align:middle;">
+                            <div style="font-size:12pt;"><?= quotation_esc($issuer['company_name']) ?></div>
+                            <?php if ((string) ($issuer['representative'] ?? '') !== ''): ?>
+                                <div style="margin-top:1mm;"><?= quotation_esc($issuer['representative']) ?></div>
+                            <?php endif; ?>
+                        </td>
+                        <td style="padding:0; width:20mm; text-align:right; vertical-align:middle;">
+                            <?php if ($stamp !== null): ?><img src="<?= $stamp ?>" alt="印" style="width:18mm; height:18mm;"><?php endif; ?>
+                        </td>
+                    </tr>
+                </table>
                 <div style="margin-top:1mm;">〒<?= quotation_esc($issuer['postal']) ?></div>
-                <div><?= quotation_esc($issuer['address']) ?></div>
+                <?php foreach (preg_split('/[ 　]+/u', (string) $issuer['address'], 2) as $addressLine): ?>
+                    <div><?= quotation_esc($addressLine) ?></div>
+                <?php endforeach; ?>
                 <div>TEL <?= quotation_esc($issuer['tel']) ?></div>
                 <div>登録番号 <?= quotation_esc($issuer['registration_no']) ?></div>
                 <div style="margin-top:1mm;">担当：<?= quotation_esc($issuer['contact_title']) ?> <?= quotation_esc($issuer['contact_name']) ?></div>
