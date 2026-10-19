@@ -344,9 +344,9 @@ function quotation_document_html(array $q): string
                 <?php foreach (preg_split('/[ 　]+/u', (string) $issuer['address'], 2) as $addressLine): ?>
                     <div><?= quotation_esc($addressLine) ?></div>
                 <?php endforeach; ?>
-                <div>TEL <?= quotation_esc($issuer['tel']) ?></div>
                 <div>登録番号 <?= quotation_esc($issuer['registration_no']) ?></div>
                 <div style="margin-top:1mm;">担当：<?= quotation_esc($issuer['contact_title']) ?> <?= quotation_esc($issuer['contact_name']) ?></div>
+                <div>TEL <?= quotation_esc($issuer['tel']) ?></div>
             </td>
         </tr>
     </table>
